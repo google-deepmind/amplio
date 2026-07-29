@@ -946,6 +946,22 @@ func TestRunCountsAndStatusFilterAndMarkSeen(t *testing.T) {
 		t.Errorf("updates after mark-seen = %d, want 1", c2.Updates)
 	}
 	check(db.RunFilterUpdates, "run-failed")
+
+	// MarkRunUnseen puts it back: an operator who looked at a run but isn't done
+	// with it finds it again the same way they found it the first time. It must
+	// restore the badge, not merely fail to clear it — last_seen_at rewinds to
+	// created_at, so a NULL (which reads as SEEN here) would do the opposite.
+	if err := s.MarkRunUnseen(ctx, "run-done"); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := s.RunCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Updates != 2 {
+		t.Errorf("updates after mark-unseen = %d, want 2", c3.Updates)
+	}
+	check(db.RunFilterUpdates, "run-done", "run-failed")
 }
 
 // A legacy run with NULL last_seen_at (added by ALTER, never stamped) must not

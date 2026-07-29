@@ -66,6 +66,10 @@ var ClientArgsBridge = map[string]bool{
 	"url":          true,
 	"token_env":    true,
 	"idle_timeout": true,
+	// endpoint names a link configured in config.toml. It is resolved into the
+	// keys above BEFORE a provider is built (cmd/amplio), so this package never
+	// sees it and keeps knowing nothing about application configuration.
+	"endpoint": true,
 }
 
 type httpTransport struct {

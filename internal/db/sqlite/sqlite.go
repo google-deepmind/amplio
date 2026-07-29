@@ -1563,6 +1563,24 @@ func (s *sqliteStore) updateRunField(ctx context.Context, query string, value an
 // updates" badge. Deliberately does NOT touch updated_at (seeing a run is not a
 // modification of it) but DOES emit RunUpdated so live dashboards refetch and
 // drop the dot. Single-operator, so last_seen_at is a global fact.
+// MarkRunUnseen rewinds last_seen_at to created_at, which is the state a run
+// nobody has opened is in — so the badge reappears exactly when it would have
+// for a fresh run: on any relevant root status change since the run started.
+//
+// created_at rather than NULL: a NULL last_seen_at reads as SEEN here (legacy
+// rows), so it would clear the badge instead of restoring it.
+func (s *sqliteStore) MarkRunUnseen(ctx context.Context, runID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.sqlDB.ExecContext(ctx,
+		`UPDATE Run SET last_seen_at = created_at WHERE run_id = ?`, runID,
+	); err != nil {
+		return fmt.Errorf("mark run unseen: %w", err)
+	}
+	s.emit(db.RunUpdated{RunID: runID})
+	return nil
+}
+
 func (s *sqliteStore) MarkRunSeen(ctx context.Context, runID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

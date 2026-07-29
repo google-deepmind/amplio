@@ -65,12 +65,12 @@ func (m Menu) Resolve(handle string) (string, error) {
 	if req, err := ParseSpec(handle); err == nil {
 		if spec, err := resolveSpec(entries, req); err == nil {
 			return spec, nil
-		} else if _, isNick := matchNickname(entries, handle); !isNick {
-			// Not a nickname either, so the spec-shaped error is the useful one.
+		} else if _, isAlias := matchAlias(entries, handle); !isAlias {
+			// Not an alias either, so the spec-shaped error is the useful one.
 			return "", err
 		}
 	}
-	entry, ok := matchNickname(entries, handle)
+	entry, ok := matchAlias(entries, handle)
 	if !ok {
 		return "", fmt.Errorf("%q is not in this server's menu; it offers %s", handle, m.summary())
 	}
@@ -78,7 +78,7 @@ func (m Menu) Resolve(handle string) (string, error) {
 }
 
 // resolveSpec applies the rule above to a handle that parses as a spec.
-func resolveSpec(entries []*Spec, req *Spec) (string, error) {
+func resolveSpec(entries []menuEntry, req *Spec) (string, error) {
 	if len(req.Client) > 0 {
 		return "", fmt.Errorf("client args are not accepted from a caller (%s): this server supplies them",
 			strings.Join(sortedKeys(req.Client), ", "))
@@ -87,29 +87,49 @@ func resolveSpec(entries []*Spec, req *Spec) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var matches []*Spec
+	// Rows for this provider and model, and among them the rows whose args the
+	// caller reproduced exactly. Being MORE specific must never be worse than
+	// being vague: two rows differing only in their args are ambiguous when asked
+	// for by model alone, but a caller who names one exactly has chosen it.
+	var byModel, exact []*Spec
 	for _, e := range entries {
-		model, _, err := e.Model()
+		model, args, err := e.sp.Model()
+		if err != nil || e.sp.Provider != req.Provider || model != reqModel {
+			continue
+		}
+		byModel = append(byModel, e.sp)
+		if EncodeArgs(args) == EncodeArgs(reqArgs) {
+			exact = append(exact, e.sp)
+		}
+	}
+	candidates := byModel
+	if len(exact) > 0 {
+		candidates = exact
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("%s:%s is not in this server's menu", req.Provider, reqModel)
+	}
+
+	// Several rows can be one model wearing different labels — relabelling an
+	// entry is done by adding a #nickname, which the menu keeps as a separate
+	// row. Those are not ambiguous: they resolve to the same thing.
+	resolved := map[string]*Spec{}
+	for _, c := range candidates {
+		model, args, err := c.Model()
 		if err != nil {
 			continue
 		}
-		if e.Provider == req.Provider && model == reqModel {
-			matches = append(matches, e)
-		}
+		resolved[(&Spec{Provider: c.Provider, Client: c.Client, Tail: model + argSuffix(args)}).String()] = c
 	}
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("%s:%s is not in this server's menu", req.Provider, reqModel)
-	case 1:
-	default:
-		// Two entries for one model that differ in their client block (two
-		// endpoints for the same model name, say). Picking one would be a guess
+	if len(resolved) != 1 {
+		// Genuinely different models behind one name — different args, or a
+		// different endpoint in the client block. Picking one would be a guess
 		// with a billing consequence.
-		return "", fmt.Errorf("%s:%s matches %d menu entries; ask for one by nickname",
-			req.Provider, reqModel, len(matches))
+		return "", fmt.Errorf("%s:%s matches %d menu entries; ask for one by the name the menu shows, or give its full spec",
+			req.Provider, reqModel, len(resolved))
 	}
 
-	entry := matches[0]
+	entry := candidates[0]
 	model, args, err := entry.Model()
 	if err != nil {
 		return "", err
@@ -123,44 +143,76 @@ func resolveSpec(entries []*Spec, req *Spec) (string, error) {
 	for k, v := range reqArgs {
 		merged[k] = v
 	}
-	tail := model
-	if len(merged) > 0 {
-		tail = model + "?" + EncodeArgs(merged)
-	}
-	resolved := &Spec{Provider: entry.Provider, Client: entry.Client, Tail: tail}
-	return resolved.String(), nil
+	out := &Spec{Provider: entry.Provider, Client: entry.Client, Tail: model + argSuffix(merged)}
+	return out.String(), nil
 }
 
-// matchNickname resolves a handle against the menu's nicknames. A nickname
-// shared by two entries is refused rather than guessed — the operator wrote the
-// same label twice, and only they know which they meant.
-func matchNickname(entries []*Spec, handle string) (*Spec, bool) {
-	var hit *Spec
-	for _, e := range entries {
-		if e.Nickname != handle {
-			continue
+// argSuffix renders a query, or nothing when there are no args.
+func argSuffix(args url.Values) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return "?" + EncodeArgs(args)
+}
+
+// matchAlias resolves a handle against what the menu CALLS its entries: the
+// operator's #nickname if there is one, otherwise the label ShortLabel derives —
+// the string the picker shows. Accepting the derived label means a caller can
+// use what they see without the operator having to nickname every row, which
+// they would otherwise have to do for a name to exist at all.
+//
+// Nicknames are tried first, so naming a row always wins over whatever the
+// heuristic would have produced for it. Either pass refuses an ambiguous handle
+// rather than guessing.
+//
+// A derived label is a convenience, not a contract: it comes from a heuristic
+// that can change between releases (a facet added, the length cap moved), which
+// a #nickname or a spec cannot. When that happens the caller gets a refusal
+// listing what is on offer, not a wrong model.
+func matchAlias(entries []menuEntry, handle string) (*Spec, bool) {
+	for _, name := range []func(menuEntry) string{
+		func(e menuEntry) string { return e.sp.Nickname },
+		func(e menuEntry) string { return ShortLabel(e.spec) },
+	} {
+		var hit *Spec
+		ambiguous := false
+		for _, e := range entries {
+			if name(e) != handle {
+				continue
+			}
+			if hit != nil {
+				ambiguous = true
+				break
+			}
+			hit = e.sp
+		}
+		if ambiguous {
+			return nil, false
 		}
 		if hit != nil {
-			return nil, false // ambiguous
+			// Drop the nickname: it is a display label, and the resolved spec is
+			// for construction.
+			return &Spec{Provider: hit.Provider, Client: hit.Client, Tail: hit.Tail}, true
 		}
-		hit = e
 	}
-	if hit == nil {
-		return nil, false
-	}
-	// Drop the nickname: it is a display label, and the resolved spec is for
-	// construction.
-	return &Spec{Provider: hit.Provider, Client: hit.Client, Tail: hit.Tail}, true
+	return nil, false
 }
 
-func (m Menu) parse() []*Spec {
-	out := make([]*Spec, 0, len(m.Specs))
+// menuEntry pairs a parsed spec with the verbatim string, which ShortLabel needs
+// and which is also what the operator sees in the picker.
+type menuEntry struct {
+	spec string
+	sp   *Spec
+}
+
+func (m Menu) parse() []menuEntry {
+	out := make([]menuEntry, 0, len(m.Specs))
 	for _, s := range m.Specs {
 		sp, err := ParseSpec(s)
 		if err != nil {
 			continue // a menu entry that doesn't parse can't be run locally either
 		}
-		out = append(out, sp)
+		out = append(out, menuEntry{spec: s, sp: sp})
 	}
 	return out
 }
@@ -180,11 +232,11 @@ func (m Menu) summary() string {
 		items = append(items, s)
 	}
 	for _, e := range m.parse() {
-		add(e.Nickname)
+		add(ShortLabel(e.spec)) // the nickname if there is one, else the label shown
 	}
 	for _, e := range m.parse() {
-		if model, _, err := e.Model(); err == nil {
-			add(e.Provider + ":" + model)
+		if model, _, err := e.sp.Model(); err == nil {
+			add(e.sp.Provider + ":" + model)
 		}
 	}
 	if len(items) == 0 {

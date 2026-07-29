@@ -247,6 +247,10 @@ export const api = {
 	// operator viewed it). Single-operator, so the effect is global.
 	markRunSeen: (id: string) =>
 		req<void>(`/runs/${id}`, { method: 'PATCH', body: JSON.stringify({ seen: true }) }),
+	// markRunUnseen puts the badge back, for a run the operator looked at but is
+	// not done with.
+	markRunUnseen: (id: string) =>
+		req<void>(`/runs/${id}`, { method: 'PATCH', body: JSON.stringify({ seen: false }) }),
 	updateRun: (id: string, body: RunUpdate) =>
 		req<void>(`/runs/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
 	getSysStat: () => req<SysStat>('/sysstat'),

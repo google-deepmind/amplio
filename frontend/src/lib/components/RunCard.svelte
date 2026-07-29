@@ -16,6 +16,7 @@
 
 <script lang="ts">
 	import { api } from '$lib/api';
+	import { goto } from '$app/navigation';
 	import { updates } from '$lib/updates.svelte';
 	import { auth } from '$lib/auth.svelte';
 	import { timeAgo } from '$lib/time';
@@ -28,6 +29,7 @@
 		DotsThreeVerticalIcon,
 		PencilSimpleIcon,
 		ArchiveIcon,
+		EnvelopeIcon,
 		FolderIcon,
 		CubeIcon,
 		XIcon,
@@ -257,6 +259,21 @@
 		}
 	}
 
+	// Mark as unread: put the dashboard badge back for a run the operator looked
+	// at but isn't done with. On the RUN PAGE this must also leave the page — the
+	// run-page layout clears a badge the moment it appears while the tab is
+	// visible, so staying would undo it within a refetch. Leaving is the whole
+	// mechanism, which is why it isn't optional.
+	async function markUnread() {
+		closeMenu();
+		// LEAVE FIRST, then mark. The PATCH makes the server emit run_updated; a
+		// still-mounted run page refetches, sees has_updates while visible, and
+		// clears the badge again — measured, not theoretical. Unmounting the page
+		// before the write removes the only thing that would undo it.
+		if (!linkable) await goto('/');
+		updates.markUnseen(run.run_id);
+	}
+
 	async function toggleArchive() {
 		closeMenu();
 		await api.updateRun(run.run_id, { archived: !run.archived });
@@ -454,6 +471,14 @@
 							Name workspace…
 						</button>
 					{/if}
+					<button
+						class="item"
+						onclick={markUnread}
+						title="Put this run's badge back and return to the dashboard"
+					>
+						<EnvelopeIcon size={14} weight="regular" />
+						Mark as unread
+					</button>
 					<button class="item" onclick={toggleArchive}>
 						<ArchiveIcon size={14} weight={run.archived ? 'fill' : 'regular'} />
 						{run.archived ? 'Unarchive' : 'Archive'}

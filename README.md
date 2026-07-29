@@ -1,9 +1,10 @@
-# Amplio
+# Amplio: A Lightweight Agent Harness for Robust and Long-Horizon Runs
 
-Amplio is a general-purpose agentic framework for long-horizon autonomous
-LLM agents — a harness that runs an LLM in a loop with a small set of
-generic tools (shell, file edit, sub-agent spawn, inter-agent messaging).
-Amplio is designed as a DB-first, crash-resistant framework.
+* **Lightweight**: Multi-agent framework based on a simple step model that provides natural crash-resume capability, and agent / user / env message coordination. Agents work through a small set of generic tools: shell, file edit, sub-agent spawn, and inter-agent coordination.
+* **Robust**: DB-first persistence; crashing at any point during the agentic loop can be robustly resumed.
+  * The agentic loop is guaranteed to be consistent, failures in the tool / environment are not handled by the harness, but reported to the agent.
+  * Sub-agent session trees are automatically resumed upon server recovery.
+* **Autonomous**: Each run can be fully driven by the autonomous agent, or cooperatively driven with user interactions.
 
 ## Installation
 
@@ -164,3 +165,17 @@ to run Amplio inside a sandboxed environment when security is a concern.
 This is not an officially supported Google product. This project is not
 eligible for the [Google Open Source Software Vulnerability Rewards
 Program](https://bughunters.google.com/open-source-security).
+
+## Citation
+
+If you find Amplio helpful, please cite the following BibTeX:
+
+```bibtex
+@misc{Zhang2026Amplio,
+  author       = {Chiyuan Zhang and Da Huang and Chen Liang and Andrew Li and {Amplio Contributors}},
+  title        = {{Amplio: A Lightweight Agent Harness for Robust and Long-Horizon Runs}},
+  year         = {2026},
+  howpublished = {GitHub repository},
+  url          = {https://github.com/google-deepmind/amplio}
+}
+```

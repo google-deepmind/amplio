@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
+	"amplio/internal/config"
 	"amplio/internal/llm"
 )
 
@@ -182,4 +184,82 @@ func TestCreateProvider_ClientArgValidation(t *testing.T) {
 	if _, err := createProvider("openai{max_tokens=nope}:m"); err == nil {
 		t.Error("a non-numeric max_tokens should fail fast")
 	}
+}
+
+// TestBridgeEndpointTable: a spec can name a link instead of repeating where it
+// is and which variable holds its token. Resolved before the provider is built,
+// so internal/llm/bridge never sees the name — it is application configuration.
+func TestBridgeEndpointTable(t *testing.T) {
+	prev := bridgeEndpoints
+	defer func() { bridgeEndpoints = prev }()
+	bridgeEndpoints = map[string]config.BridgeEndpoint{
+		"corp": {URL: "unix:///tmp/corp-bridge.sock", TokenEnv: "CORP_TOKEN", IdleTimeout: "10m"},
+		"ws":   {URL: "https://workstation:26760"},
+		"bad":  {TokenEnv: "X"}, // no url
+	}
+
+	t.Run("the name expands to the link", func(t *testing.T) {
+		args := url.Values{"endpoint": {"corp"}}
+		if err := expandBridgeEndpoint(args); err != nil {
+			t.Fatalf("expand: %v", err)
+		}
+		for k, want := range map[string]string{
+			"url": "unix:///tmp/corp-bridge.sock", "token_env": "CORP_TOKEN", "idle_timeout": "10m",
+		} {
+			if got := args.Get(k); got != want {
+				t.Errorf("%s = %q, want %q", k, got, want)
+			}
+		}
+		if args.Has("endpoint") {
+			t.Error("endpoint= should be consumed, not forwarded")
+		}
+	})
+
+	t.Run("the spec overrides the link's defaults", func(t *testing.T) {
+		args := url.Values{"endpoint": {"corp"}, "idle_timeout": {"30s"}}
+		if err := expandBridgeEndpoint(args); err != nil {
+			t.Fatalf("expand: %v", err)
+		}
+		if got := args.Get("idle_timeout"); got != "30s" {
+			t.Errorf("idle_timeout = %q, want the spec's value", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, want string
+		args       url.Values
+	}{
+		{"unknown name lists the known ones", "bad, corp, ws",
+			url.Values{"endpoint": {"nope"}}},
+		{"endpoint and url together", "mutually exclusive",
+			url.Values{"endpoint": {"corp"}, "url": {"http://x"}}},
+		{"a link with no url", "has no url",
+			url.Values{"endpoint": {"bad"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := expandBridgeEndpoint(tc.args)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("end to end through createProvider", func(t *testing.T) {
+		t.Setenv("CORP_TOKEN", "s3cret")
+		p, err := createProvider("bridge{endpoint=corp}:some-model")
+		if err != nil {
+			t.Fatalf("createProvider: %v", err)
+		}
+		if got := p.ModelID(); got != "some-model" {
+			t.Errorf("ModelID = %q", got)
+		}
+		// A name nobody configured fails at construction, not at first use.
+		if _, err := createProvider("bridge{endpoint=nope}:m"); err == nil ||
+			!strings.Contains(err.Error(), "unknown bridge endpoint") {
+			t.Errorf("err = %v, want an unknown-endpoint failure", err)
+		}
+	})
 }

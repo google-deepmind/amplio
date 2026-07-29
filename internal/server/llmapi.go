@@ -93,8 +93,15 @@ func (s *Server) resolveLentModel(ctx context.Context, handle string) (llm.Provi
 	if err != nil {
 		return nil, fmt.Errorf("build %s: %w", spec, err)
 	}
-	// One line per lent generation: the operator whose credentials are being
-	// spent should be able to see it happening.
-	slog.Info("lending: serving generation", "handle", handle, "spec", spec)
+	// INFO once per model, DEBUG for the rest. The operator should learn that
+	// something started spending their credentials, and on what — but a line per
+	// generation scales with the caller's traffic and buries the server's own
+	// output, which is the argument logPipe already makes for bridge chatter. A
+	// local run logs nothing at all per call.
+	if _, seen := s.lentSeen.LoadOrStore(spec, struct{}{}); !seen {
+		slog.Info("lending: first generation for this model", "handle", handle, "spec", spec)
+	} else {
+		slog.Debug("lending: serving generation", "handle", handle, "spec", spec)
+	}
 	return provider, nil
 }

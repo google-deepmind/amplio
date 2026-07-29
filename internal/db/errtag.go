@@ -100,6 +100,10 @@ func (t *taggedStore) MarkRunSeen(ctx context.Context, runID string) error {
 	return tag(t.s.MarkRunSeen(ctx, runID))
 }
 
+func (t *taggedStore) MarkRunUnseen(ctx context.Context, runID string) error {
+	return tag(t.s.MarkRunUnseen(ctx, runID))
+}
+
 func (t *taggedStore) DeleteRun(ctx context.Context, runID string) error {
 	return tag(t.s.DeleteRun(ctx, runID))
 }

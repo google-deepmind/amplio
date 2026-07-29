@@ -1685,3 +1685,56 @@ func nextSSE(t *testing.T, sc *bufio.Scanner) eventstream.RunEvent {
 	t.Fatal("stream ended before a data line")
 	return eventstream.RunEvent{}
 }
+
+// TestPatchRun_SeenBothDirections: the dashboard badge is server-authoritative,
+// so "mark as unread" is a PATCH like any other — and it has to actually restore
+// the badge, which is the half a "don't clear it" implementation would miss.
+func TestPatchRun_SeenBothDirections(t *testing.T) {
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	seedRun(t, store, db.SessionOngoing, 3)
+	// The badge is "a root's status changed AFTER last_seen_at", and a fresh run
+	// is stamped seen at creation — so the transition has to happen after that,
+	// as it does in life.
+	time.Sleep(5 * time.Millisecond) // timestamps are millisecond-resolution
+	if err := store.UpdateSessionStatus(ctx, testRun, "main-agent", db.SessionConcluded); err != nil {
+		t.Fatal(err)
+	}
+
+	hasUpdates := func() bool {
+		runs, _, err := store.ListRunsWithSessions(ctx, db.ListRunsOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range runs {
+			if r.Run.RunID == testRun {
+				return runHasUpdates(r)
+			}
+		}
+		t.Fatalf("run %s not found", testRun)
+		return false
+	}
+
+	patch := func(body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPatch, "/api/runs/"+testRun, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("PATCH %s = %d (%s)", body, w.Code, w.Body.String())
+		}
+	}
+
+	if !hasUpdates() {
+		t.Fatal("a concluded run should start with a badge")
+	}
+	patch(`{"seen":true}`)
+	if hasUpdates() {
+		t.Error("seen:true should clear the badge")
+	}
+	patch(`{"seen":false}`)
+	if !hasUpdates() {
+		t.Error("seen:false should put the badge back")
+	}
+}

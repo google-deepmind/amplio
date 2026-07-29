@@ -58,6 +58,11 @@ type Store interface {
 	// MarkRunSeen records that the operator viewed the run now, clearing its
 	// dashboard "has updates" badge. Single-operator: global, not per-viewer.
 	MarkRunSeen(ctx context.Context, runID string) error
+	// MarkRunUnseen puts the run's badge back: an operator who looked at a run
+	// but hasn't finished with it says so, and finds it again later the same way
+	// they found it the first time. Rewinds last_seen_at to the run's creation,
+	// so "unseen" means what it means for a run nobody has opened.
+	MarkRunUnseen(ctx context.Context, runID string) error
 	// DeleteRun permanently removes a run and ALL its DB rows (the Run row plus
 	// its Sessions, Events, and Observations) in one transaction. Mined Lessons
 	// (which carry source_run_id as a soft reference) are intentionally kept —

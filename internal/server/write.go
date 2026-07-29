@@ -243,8 +243,9 @@ func (s *Server) handleUpdateRun(w http.ResponseWriter, r *http.Request) {
 		// can't distinguish "absent" from "null".
 		Grade    json.RawMessage `json:"grade"`
 		Archived *bool           `json:"archived"`
-		// Seen=true records that the operator viewed this run now, clearing its
-		// dashboard "has updates" badge. (No "unseen" direction by design.)
+		// Seen records that the operator viewed this run now (true, clearing the
+		// dashboard badge) or that they are not done with it (false, putting the
+		// badge back — see MarkRunUnseen).
 		Seen *bool `json:"seen"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -281,8 +282,14 @@ func (s *Server) handleUpdateRun(w http.ResponseWriter, r *http.Request) {
 	if req.Archived != nil && !apply(s.store.SetRunArchived(r.Context(), id, *req.Archived)) {
 		return
 	}
-	if req.Seen != nil && *req.Seen && !apply(s.store.MarkRunSeen(r.Context(), id)) {
-		return
+	if req.Seen != nil {
+		mark := s.store.MarkRunSeen
+		if !*req.Seen {
+			mark = s.store.MarkRunUnseen
+		}
+		if !apply(mark(r.Context(), id)) {
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }

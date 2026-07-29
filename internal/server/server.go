@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"amplio/internal/agent/critic"
@@ -57,6 +58,10 @@ type Server struct {
 	// deferred return signals "delta below threshold, previous report unchanged"
 	// so the handler can respond 200 (deferred) vs 201 (created).
 	genReport func(ctx context.Context, runID string) (report *critic.RunReport, deferred bool, err error)
+
+	// lentSeen remembers which specs have already been logged at INFO, so lending
+	// announces a model once instead of once per request.
+	lentSeen sync.Map
 
 	// lendProvider builds a provider for the lending listener; nil unless
 	// LendingHandler was called (see llmapi.go).

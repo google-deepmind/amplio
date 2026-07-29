@@ -145,7 +145,7 @@ func TestMenuAmbiguity(t *testing.T) {
 	if err == nil {
 		t.Fatal("an ambiguous model should be refused")
 	}
-	if !strings.Contains(err.Error(), "nickname") {
+	if !strings.Contains(err.Error(), "the name the menu shows") {
 		t.Errorf("error %q should point at the way to disambiguate", err)
 	}
 	// …and by nickname it resolves.
@@ -166,5 +166,118 @@ func TestMenuErrorsAreActionable(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q should list %q as an option", err, want)
 		}
+	}
+}
+
+// TestMenuResolve_DerivedLabel: the label the picker shows is addressable, so a
+// caller can use what they see. Without this an operator would have to nickname
+// every row for it to have a name at all.
+func TestMenuResolve_DerivedLabel(t *testing.T) {
+	m := Menu{Specs: []string{
+		"vertex-claude:claude-opus-5?cache_ttl=1h&output_config.effort=xhigh", // no nickname
+		"openai{base_url=http://localhost:4000/v1}:claude#via-proxy",
+	}}
+	// What the UI shows for row 1…
+	label := ShortLabel(m.Specs[0])
+	if label != "opus-5 · xhigh" {
+		t.Fatalf("ShortLabel = %q; test needs updating", label)
+	}
+	got, err := m.Resolve(label)
+	if err != nil {
+		t.Fatalf("Resolve(%q) = %v", label, err)
+	}
+	if want := "vertex-claude:claude-opus-5?cache_ttl=1h&output_config.effort=xhigh"; got != want {
+		t.Errorf("Resolve(%q) = %q, want %q", label, got, want)
+	}
+	// …and the explicit nickname still works.
+	if _, err := m.Resolve("via-proxy"); err != nil {
+		t.Errorf("Resolve(via-proxy) = %v", err)
+	}
+}
+
+// TestMenuResolve_NicknameBeatsDerivedLabel: naming a row must win over whatever
+// the heuristic produces for another one, or an operator could not override it.
+func TestMenuResolve_NicknameBeatsDerivedLabel(t *testing.T) {
+	m := Menu{Specs: []string{
+		"vertex-claude:claude-opus-5?output_config.effort=xhigh",    // derives "opus-5 · xhigh"
+		"vertex-claude:claude-opus-4-8?cache_ttl=1h#opus-5 · xhigh", // claims that name
+	}}
+	got, err := m.Resolve("opus-5 · xhigh")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if want := "vertex-claude:claude-opus-4-8?cache_ttl=1h"; got != want {
+		t.Errorf("Resolve = %q, want the nicknamed row %q", got, want)
+	}
+}
+
+// TestMenuResolve_AmbiguousDerivedLabel: two rows the heuristic cannot tell
+// apart are refused, not guessed — same rule as two rows sharing a nickname.
+func TestMenuResolve_AmbiguousDerivedLabel(t *testing.T) {
+	m := Menu{Specs: []string{
+		"openai{base_url=http://a/v1}:gpt-5",
+		"openai{base_url=http://a/v1}:gpt-5?temperature=0", // same label, different args
+	}}
+	if a, b := ShortLabel(m.Specs[0]), ShortLabel(m.Specs[1]); a != b {
+		t.Fatalf("test needs two rows with one label, got %q and %q", a, b)
+	}
+	if got, err := m.Resolve(ShortLabel(m.Specs[0])); err == nil {
+		t.Errorf("Resolve = %q, want a refusal for an ambiguous label", got)
+	}
+}
+
+// TestMenuResolve_VariantsOfOneModel: two rows for one model that differ only in
+// their args. Asking by model alone is genuinely ambiguous, but reproducing a
+// row's args exactly picks it — being more specific must never be worse than
+// being vague.
+func TestMenuResolve_VariantsOfOneModel(t *testing.T) {
+	xhigh := "vertex-claude{cache_ttl=1h}:claude-opus-5?output_config.effort=xhigh&thinking.type=adaptive"
+	plain := "vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive"
+	m := Menu{Specs: []string{xhigh, plain}}
+
+	for _, tc := range []struct{ handle, want string }{
+		{"vertex-claude:claude-opus-5?output_config.effort=xhigh&thinking.type=adaptive", xhigh},
+		{"vertex-claude:claude-opus-5?thinking.type=adaptive", plain},
+		{"opus-5 · xhigh", xhigh}, // by the label the menu shows
+		{"opus-5", plain},
+	} {
+		got, err := m.Resolve(tc.handle)
+		if err != nil {
+			t.Errorf("Resolve(%q) = %v", tc.handle, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("Resolve(%q) =\n %q\nwant %q", tc.handle, got, tc.want)
+		}
+	}
+
+	// By model alone it stays ambiguous — the args are overrides, and we cannot
+	// know which row they were meant to layer on. The refusal says how to be
+	// specific.
+	_, err := m.Resolve("vertex-claude:claude-opus-5")
+	if err == nil {
+		t.Fatal("want a refusal for the bare model")
+	}
+	for _, want := range []string{"matches 2", "the name the menu shows", "full spec"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+// TestMenuResolve_RelabelledEntryIsNotAmbiguous: adding a #nickname to an
+// existing entry leaves two rows for one model (the menu keeps both on purpose),
+// but they resolve to the same spec, so asking by model must still work.
+func TestMenuResolve_RelabelledEntryIsNotAmbiguous(t *testing.T) {
+	m := Menu{Specs: []string{
+		"vertex-claude:claude-opus-5?cache_ttl=1h",
+		"vertex-claude:claude-opus-5?cache_ttl=1h#the-good-one",
+	}}
+	got, err := m.Resolve("vertex-claude:claude-opus-5")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if want := "vertex-claude:claude-opus-5?cache_ttl=1h"; got != want {
+		t.Errorf("Resolve = %q, want %q", got, want)
 	}
 }

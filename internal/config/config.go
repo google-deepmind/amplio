@@ -39,7 +39,8 @@ const (
 	EnvDataDir       = "AMPLIO_DATA_DIR"
 	EnvArtifactDir   = "AMPLIO_ARTIFACT_DIR"
 	EnvRunID         = "AMPLIO_RUN_ID"
-	EnvListen        = "AMPLIO_LISTEN" // serve bind address override (host:port)
+	EnvListen        = "AMPLIO_LISTEN"   // serve bind address override (host:port)
+	EnvLendLLM       = "AMPLIO_LEND_LLM" // LLM lending listener address (host:port); empty disables
 	EnvSystemLLMHQ   = "AMPLIO_SYSTEM_LLM_HQ"
 	EnvSystemLLMFast = "AMPLIO_SYSTEM_LLM_FAST"
 	EnvEmbedModel    = "AMPLIO_EMBED_MODEL"
@@ -58,8 +59,34 @@ var dataDirOverride string
 // and the default. Call once at startup (from the --data-dir flag) before any
 // DataDir consumer runs.
 func SetDataDir(dir string) {
-	dataDirOverride = dir
-	_ = os.MkdirAll(dir, 0o755)
+	dataDirOverride = expandTilde(dir)
+	_ = os.MkdirAll(dataDirOverride, 0o755)
+}
+
+// expandTilde resolves a leading "~" against the user's home directory.
+//
+// A shell does this, so a flag typed at a prompt never needs it — but these
+// paths also arrive from config.toml, env files, systemd units and container
+// environments, where nothing does. Unexpanded, a "~/x" is a perfectly valid
+// RELATIVE path: we would create a directory literally named "~" in the working
+// directory and report every subsequent error with the tilde still in it, which
+// reads exactly like the path the operator meant.
+//
+// Only a leading "~" alone or before a separator. "~user/x" is a request to
+// resolve somebody else's home, which we cannot do reliably, so it is left as
+// written rather than guessed at.
+func expandTilde(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~"+string(os.PathSeparator)) && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
 }
 
 // DataDir returns the per-user data directory. Precedence: --data-dir (via
@@ -93,6 +120,7 @@ func DataDir() string {
 		return dataDirOverride
 	}
 	if override := os.Getenv(EnvDataDir); override != "" {
+		override = expandTilde(override)
 		_ = os.MkdirAll(override, 0o755)
 		return override
 	}

@@ -15,8 +15,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -235,4 +237,33 @@ func (stubEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, err
 		out[i] = []float32{1, 2, 3}
 	}
 	return out, nil
+}
+
+// TestLending_AnnouncesEachModelOnce: the operator should learn that something
+// started spending their credentials, and on what — but not once per request.
+// A line per generation scales with the caller's traffic and buries the
+// server's own output; a local run logs nothing per call at all.
+func TestLending_AnnouncesEachModelOnce(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	srv, _, _ := newTestServer(t)
+	h, _ := lending(t, srv, nil)
+	for range 3 {
+		if got := post(t, h, "/generate", lendToken, `{"model":"vertex:x"}`).Code; got != http.StatusOK {
+			t.Fatalf("status = %d", got)
+		}
+	}
+	if n := strings.Count(buf.String(), "lending: first generation"); n != 1 {
+		t.Errorf("announced %d times across 3 requests, want 1:\n%s", n, buf.String())
+	}
+	// A second model announces itself too — the point is per-model, not once ever.
+	if got := post(t, h, "/generate", lendToken, `{"model":"vertex:y"}`).Code; got != http.StatusOK {
+		t.Fatalf("status = %d", got)
+	}
+	if n := strings.Count(buf.String(), "lending: first generation"); n != 2 {
+		t.Errorf("announced %d times for two models, want 2", n)
+	}
 }
