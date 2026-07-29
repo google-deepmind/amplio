@@ -23,6 +23,7 @@ import (
 	"amplio/internal/db"
 	"amplio/internal/eventstream"
 	"amplio/internal/lessons"
+	"amplio/internal/llm"
 	"amplio/internal/runtime"
 	"amplio/internal/skills"
 	"amplio/internal/sysstat"
@@ -56,6 +57,10 @@ type Server struct {
 	// deferred return signals "delta below threshold, previous report unchanged"
 	// so the handler can respond 200 (deferred) vs 201 (created).
 	genReport func(ctx context.Context, runID string) (report *critic.RunReport, deferred bool, err error)
+
+	// lendProvider builds a provider for the lending listener; nil unless
+	// LendingHandler was called (see llmapi.go).
+	lendProvider func(spec string) (llm.Provider, error)
 
 	// testLLM validates an agent-LLM spec (build the provider + one trivial Call),
 	// for the About page's pre-flight tester. nil = unconfigured (endpoint 501).

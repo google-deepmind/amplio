@@ -45,7 +45,7 @@ const (
 	EnvEmbedModel    = "AMPLIO_EMBED_MODEL"
 	EnvSkillDirs     = "AMPLIO_SKILL_DIRS" // OS path-list separated (filepath.SplitList)
 	EnvSessionID     = "AMPLIO_SESSION_ID" // bash subprocess: the agent's own session (notify default target)
-	EnvNotify        = "AMPLIO_NOTIFY"     // bash subprocess: path to the amplio binary for `notify`
+	EnvNotify        = "AMPLIO_NOTIFY"     // DEPRECATED: the whole binary, kept for scripts/agents already using it
 )
 
 // --- Data directories ---
@@ -64,6 +64,30 @@ func SetDataDir(dir string) {
 
 // DataDir returns the per-user data directory. Precedence: --data-dir (via
 // SetDataDir) > $AMPLIO_DATA_DIR > ~/.amplio.
+// The amplio binary is exposed to agent subprocesses under two names from one
+// shim directory, which is prepended to their PATH:
+//
+//	amplio-notify  the narrow entry point the SYSTEM PROMPT teaches: it dispatches
+//	               to `notify` and nothing else, so a half-remembered
+//	               `amplio-notify client cancel …` does nothing.
+//	amplio         the full CLI, taught on demand by the task-manager skill.
+//
+// The split is editorial, not a privilege boundary — an agent has shell access
+// and can read the server token out of this very directory, so it could drive
+// the API with curl regardless. What the split buys is that the common path is
+// simple and typo-proof, and that run management is something an agent learns
+// deliberately rather than has in front of it.
+const (
+	NotifyShimName = "amplio-notify"
+	CLIShimName    = "amplio"
+)
+
+// ShimDir is <data-dir>/bin, prepended to the PATH of agent subprocesses.
+func ShimDir() string { return filepath.Join(DataDir(), "bin") }
+
+// NotifyShimPath is <data-dir>/bin/amplio-notify.
+func NotifyShimPath() string { return filepath.Join(ShimDir(), NotifyShimName) }
+
 func DataDir() string {
 	if dataDirOverride != "" {
 		return dataDirOverride

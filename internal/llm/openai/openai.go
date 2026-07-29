@@ -43,10 +43,11 @@ const requestTimeout = 30 * time.Minute
 // bytes each and arrive many-per-chunk.
 const sseMaxLine = 4 << 20
 
-// clientOnlyArgs never reach the request body: they configure US. Everything
-// else in the spec query is passed through verbatim (see buildBody), so a
+// ClientArgs are the arguments this provider interprets — the `{k=v}` block in
+// a spec (see internal/llm/spec.go). They never reach the request body.
+// Everything else is passed through verbatim (see buildBody), so a
 // server-specific knob needs no code change here.
-var clientOnlyArgs = map[string]bool{
+var ClientArgs = map[string]bool{
 	"base_url":         true,
 	"api_key_env":      true,
 	"profile":          true,
@@ -102,8 +103,8 @@ type provider struct {
 // See docs/llm.md for the spec grammar; args not in clientOnlyArgs are injected
 // into the request body via dotted paths (reasoning.effort=high →
 // {"reasoning":{"effort":"high"}}), mirroring the vertex-claude convention.
-func New(model string, maxTokens int, args url.Values) (llm.Provider, error) {
-	base := args.Get("base_url")
+func New(model string, maxTokens int, clientArgs, args url.Values) (llm.Provider, error) {
+	base := clientArgs.Get("base_url")
 	if base == "" {
 		base = os.Getenv("OPENAI_BASE_URL")
 	}
@@ -115,7 +116,7 @@ func New(model string, maxTokens int, args url.Values) (llm.Provider, error) {
 	// Default the profile from the endpoint: the hosted OpenAI API is the only
 	// one we can identify by URL, and everything else is safer treated as
 	// unknown. An explicit profile= always wins.
-	profName := args.Get("profile")
+	profName := clientArgs.Get("profile")
 	if profName == "" {
 		if base == defaultBaseURL {
 			profName = "openai"
@@ -127,13 +128,13 @@ func New(model string, maxTokens int, args url.Values) (llm.Provider, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown profile %q; known: generic, litellm, ollama, openai, vllm", profName)
 	}
-	if v := args.Get("max_tokens_field"); v != "" {
+	if v := clientArgs.Get("max_tokens_field"); v != "" {
 		if v != "max_tokens" && v != "max_completion_tokens" {
 			return nil, fmt.Errorf("max_tokens_field=%q; want max_tokens or max_completion_tokens", v)
 		}
 		prof.maxTokensField = v
 	}
-	if v := args.Get("stream_usage"); v != "" {
+	if v := clientArgs.Get("stream_usage"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
 			return nil, fmt.Errorf("stream_usage=%q: %w", v, err)
@@ -141,7 +142,7 @@ func New(model string, maxTokens int, args url.Values) (llm.Provider, error) {
 		prof.streamUsage = b
 	}
 	capture := false
-	if v := args.Get("capture_extras"); v != "" {
+	if v := clientArgs.Get("capture_extras"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
 			return nil, fmt.Errorf("capture_extras=%q: %w", v, err)
@@ -152,7 +153,7 @@ func New(model string, maxTokens int, args url.Values) (llm.Provider, error) {
 	// The key names an ENV VAR rather than carrying a secret, so several
 	// endpoints can coexist in one config file without any of them holding
 	// credentials. A missing key is not fatal: local servers ignore auth.
-	keyEnv := args.Get("api_key_env")
+	keyEnv := clientArgs.Get("api_key_env")
 	if keyEnv == "" {
 		keyEnv = "OPENAI_API_KEY"
 	}
@@ -177,17 +178,15 @@ func New(model string, maxTokens int, args url.Values) (llm.Provider, error) {
 func (p *provider) ModelID() string { return p.model }
 func (p *provider) MaxTokens() int  { return p.maxTokens }
 
-// expandArgs turns non-client spec args into a nested body fragment, so dotted
-// keys nest (reasoning.effort → {"reasoning":{"effort":…}}). Values are coerced
-// to the most specific JSON type. We deliberately do NOT validate keys: the
-// server is the authority on what it accepts, and an allowlist here would make
-// every new server knob a code change.
+// expandArgs turns model args into a nested body fragment, so dotted keys nest
+// (reasoning.effort → {"reasoning":{"effort":…}}). Values are coerced to the
+// most specific JSON type. We deliberately do NOT validate keys: the server is
+// the authority on what it accepts, and an allowlist here would make every new
+// server knob a code change. Client args never reach here — they are split off
+// before construction (llm.ClientArgs).
 func expandArgs(args url.Values) (map[string]any, error) {
 	out := map[string]any{}
 	for k := range args {
-		if clientOnlyArgs[k] {
-			continue
-		}
 		if err := setPath(out, k, coerce(args.Get(k))); err != nil {
 			return nil, fmt.Errorf("spec arg %q: %w", k, err)
 		}
@@ -258,8 +257,10 @@ func (p *provider) buildBody(req llm.Request, stream bool) map[string]any {
 			body["stream_options"] = map[string]any{"include_usage": true}
 		}
 	}
-	// Spec args last: an explicit ?max_tokens=4096 or ?temperature=0 overrides
-	// what we derived above, which is the least surprising precedence.
+	// Model args last: an explicit temperature=0 overrides what we derived above,
+	// which is the least surprising precedence. (max_tokens is a CLIENT arg — it
+	// sets p.maxTokens, which lands in the profile's field above — so it cannot
+	// arrive here and produce a second, conflicting cap.)
 	for k, v := range p.extra {
 		body[k] = v
 	}

@@ -1,15 +1,44 @@
 # LLM Providers
 
-Amplio resolves a model from a **spec string** of the form:
+Amplio resolves a model from a **spec string**:
 
 ```
-<provider>:<model>[?k=v&k=v…]
+<provider>[{k=v&k=v…}]:<model>[?k=v&k=v…][#nickname]
+   ^          ^              ^                ^
+   |          |              |                display label, never sent anywhere
+   |          |              model id, plus MODEL args passed through verbatim
+   |          CLIENT args: the ones amplio interprets
+   registry key
 ```
 
-`createProvider` (cmd/amplio) splits on the first `:` to pick the provider
-"class" from the registry, then splits the remainder on `?` into the model id and
-an optional query of per-model **args** that are forwarded to the request. Each
-provider family interprets the args (see [Thinking](#thinking-control) below).
+One rule decides which side an argument goes on:
+
+> **The block holds arguments amplio interprets. The query holds arguments
+> passed through untouched.**
+
+Note what that does *not* say: interpreted arguments frequently do reach the API
+— `cache_ttl=1h` becomes Anthropic's `cache_control`, `profile=litellm` sets
+several body fields. What separates them is who owns the *meaning*. The test for
+a new argument: **would it still mean the same thing pointed at a different
+provider?** If yes it is amplio's vocabulary and belongs in the block; if it is
+the upstream API's own field name, it belongs in the query and amplio never
+looks at it.
+
+```
+vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive
+openai{base_url=http://localhost:4000/v1&profile=litellm}:claude?reasoning.effort=high
+vertex-gemini:gemini-3.5-flash?thinking_budget=2048          # no client args, no block
+```
+
+A provider with nothing to configure needs no block, which is why most specs
+don't have one.
+
+`llm.ParseSpec` (internal/llm/spec.go) is the only parser. Values are
+percent-encoded where needed — `:` and `/` stay literal so URLs read normally,
+but a literal `}` is `%7D` and a literal `#` is `%23`. `Spec.String()` renders a
+canonical form (keys sorted, minimal escaping) for *matching* — menu lookup,
+dedup, cache keys — never for display, since it may reorder what the operator
+typed.
 
 ## Providers
 
@@ -19,7 +48,7 @@ provider family interprets the args (see [Thinking](#thinking-control) below).
 | `claude`        | Claude direct Anthropic API (`anthropic-sdk-go`) | `ANTHROPIC_API_KEY`; no GCP |
 | `vertex-gemini` | Gemini on Vertex AI (`google.golang.org/genai`)  | ADC + `VERTEXAI_PROJECT`/`VERTEXAI_LOCATION` |
 | `gemini`        | Gemini Developer API (`genai`)                   | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`); no GCP |
-| `openai`        | **any** OpenAI-compatible `/v1/chat/completions` | `OPENAI_API_KEY` (or `?api_key_env=`); none for a local server |
+| `openai`        | **any** OpenAI-compatible `/v1/chat/completions` | `OPENAI_API_KEY` (or `{api_key_env=…}`); none for a local server |
 | `subprocess`    | out-of-process bridge over a unix socket         | whatever the bridge needs    |
 
 All providers default to `MaxTokens` (output cap) **65536**. The Claude provider
@@ -101,15 +130,24 @@ somewhere with `base_url`:
 
 ```
 openai:gpt-5.6?reasoning.effort=high
-openai:claude?base_url=http://localhost:4000/v1&profile=litellm
-openai:qwen3:30b-a3b?base_url=http://localhost:11434/v1&profile=ollama
+openai{base_url=http://localhost:4000/v1&profile=litellm}:claude
+openai{base_url=http://localhost:11434/v1&profile=ollama}:qwen3:30b-a3b
 ```
 
 (The model id may contain colons — the spec splits on the **first** one only.)
 
 ### Client-only args
 
-These configure the client and are never sent in the request body:
+These configure the client and are never sent in the request body, so they go in
+the `{…}` block:
+
+```
+openai{base_url=http://localhost:11434/v1&profile=ollama}:qwen3.5
+```
+
+An unknown key **in the block** is an error naming what this provider accepts —
+the client owns that namespace, so a typo is catchable. Keys in the query are
+never validated: the server is the authority on what it accepts.
 
 | arg | default | meaning |
 | --- | --- | --- |
@@ -119,6 +157,7 @@ These configure the client and are never sent in the request body:
 | `max_tokens_field` | per profile | `max_tokens` vs `max_completion_tokens` |
 | `stream_usage` | per profile | send `stream_options.include_usage` |
 | `capture_extras` | `false` | keep non-standard reasoning containers on the response's `ProviderExtra` (not replayed; see below) |
+| `max_tokens` | 65536 | output cap. Accepted by **every** provider (handled centrally), and written into whichever field the profile selects — so it can no longer collide with `max_completion_tokens` |
 
 ### Profiles
 
@@ -188,14 +227,21 @@ It exercises a plain call, parallel tool calls over a live stream, and a
 tool-result round trip — the three shapes where servers actually diverge. If it
 passes, capture its SSE and add it to `testdata/` so the dialect stays pinned.
 
-## Subprocess bridges (`subprocess:`)
+## Bridges (`subprocess:`)
 
-For backends whose SDKs shouldn't be linked into the main binary (e.g.
-corp-only API), `subprocess:/path/to/bridge?model=NAME[&k=v]`
-spawns an out-of-process bridge and talks to it over a tiny HTTP/NDJSON protocol
-on a Unix domain socket. amplio manages the lifecycle: one long-lived process
-per spec (reused across runs), crash-restart with a one-shot retry, health-poll
-readiness, graceful reap on exit (+ `Pdeathsig` on Linux).
+A **bridge** is any process that speaks amplio's own NDJSON protocol over HTTP
+(`internal/llm/bridge`). Unlike a hop through a foreign schema, it carries the
+request and response types verbatim — `provider_extra` included, which is where
+thinking signatures live — so nothing is lost in translation.
+
+`subprocess{bin=/path/to/bridge}:MODEL` is the transport where **amplio owns the
+process**: it spawns the bridge and talks over a private unix socket,
+managing the lifecycle — one long-lived process per spec (reused across runs),
+crash-restart with a one-shot retry, health-poll readiness, graceful reap on
+exit (+ `Pdeathsig` on Linux). A bridge's stdout/stderr goes to the log at debug
+level, and its **last 50 stderr lines are quoted in the error** when it fails to
+start or exits unexpectedly — the diagnosis you need is otherwise invisible at
+the default log level.
 
 The bridge can be written in any language; `bridges/bridge.py` is a stdlib-only
 reference with an `echo` backend (used for smoke testing) — see
@@ -203,7 +249,7 @@ reference with an `echo` backend (used for smoke testing) — see
 your own backend. Example spec for the bundled echo backend:
 
 ```
-subprocess:/path/to/bridge.py?model=echo-model&backend=echo
+subprocess{bin=/path/to/bridge.py}:echo-model?backend=echo
 ```
 
 
@@ -216,7 +262,7 @@ system_llm_fast = "vertex-gemini:gemini-3.5-flash?thinking_budget=0"   # 0 = no 
 
 [run]
 llms = [
-  "vertex-claude:claude-opus-4-8?thinking.type=adaptive&output_config.effort=high",
+  "vertex-claude{cache_ttl=1h}:claude-opus-4-8?thinking.type=adaptive&output_config.effort=high",
   "vertex-claude:claude-opus-4-6?thinking.type=enabled&thinking.budget_tokens=4096",
   "vertex-gemini:gemini-3.1-pro-preview?thinking_budget=4096",
 ]
@@ -236,13 +282,13 @@ older `embed_model` values).
 | -------- | ------------------------------------------- | ---------------------------------------------- |
 | `vertex` | Vertex AI embeddings (`google.golang.org/genai`) | ADC + `VERTEXAI_PROJECT`/`VERTEXAI_LOCATION` |
 | `gemini` | Gemini Developer API embeddings (`genai`)   | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`); no GCP |
-| `openai` | **any** OpenAI-compatible `/v1/embeddings`  | `OPENAI_API_KEY` (or `?api_key_env=`); none for a local server |
+| `openai` | **any** OpenAI-compatible `/v1/embeddings`  | `OPENAI_API_KEY` (or `{api_key_env=…}`); none for a local server |
 
 The `openai` backend takes the same `base_url` / `api_key_env` args as the chat
 provider, which is what lets a **self-hosted** deployment use recall at all:
 
 ```toml
-embed_model = "openai:text-embedding-005?base_url=http://localhost:4000/v1"
+embed_model = "openai{base_url=http://localhost:4000/v1}:text-embedding-005"
 ```
 
 Note the cache-key subtlety: the same model name at a different endpoint is a

@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -35,9 +36,9 @@ import (
 	"amplio/internal/lessons"
 	"amplio/internal/llm"
 	anthropicprovider "amplio/internal/llm/anthropic"
+	bridgeprovider "amplio/internal/llm/bridge"
 	geminiprovider "amplio/internal/llm/gemini"
 	openaiprovider "amplio/internal/llm/openai"
-	subprocessprovider "amplio/internal/llm/subprocess"
 	amlog "amplio/internal/log"
 	"amplio/internal/observer"
 	"amplio/internal/runspec"
@@ -76,7 +77,45 @@ func resolveConfig(cmd *cobra.Command) (config.Config, error) {
 	})
 }
 
+// shimName is the single-purpose entry point installed in <data-dir>/bin and
+// pointed at by $AMPLIO_NOTIFY. Dispatching on argv[0] (the busybox / git-* idiom)
+// rather than shipping a wrapper script is deliberate: a symlink adds NO process,
+// so `notify` still sees the CALLER as its parent — and that ppid is what stamps
+// the sender, letting a revived agent identify and kill a stale notifier. A
+// non-exec wrapper would record the wrapper's pid, which exits immediately and
+// whose number the kernel then recycles onto some unrelated process.
+//
+// It also narrows what a new agent can do: the prompt teaches `amplio-notify`,
+// and through this name the full CLI is not reachable. $AMPLIO_NOTIFY (the whole
+// binary) stays for agents and scripts already written against it.
+const shimName = "amplio-notify"
+
+// dispatchShim runs the notify command directly when invoked through the shim,
+// reporting whether it handled the call.
+func dispatchShim() (handled bool, err error) {
+	if filepath.Base(os.Args[0]) != shimName {
+		return false, nil
+	}
+	// No compatibility shimming here on purpose. The old interface still exists
+	// unchanged — $AMPLIO_NOTIFY is the binary, and `amplio notify …` works as it
+	// always did — so this name is free to have exactly one calling convention.
+	// Stripping an optional leading "notify" would have made a message that IS
+	// the word "notify" unsendable, and given one call two spellings.
+	cmd := notifyCmd()
+	cmd.SetArgs(os.Args[1:])
+	// The root command sets this; the shim bypasses the root, so set it here too
+	// or cobra prints the error and exitCodeFor prints it again.
+	cmd.SilenceErrors = true
+	return true, cmd.Execute()
+}
+
 func main() {
+	if handled, err := dispatchShim(); handled {
+		if err != nil {
+			os.Exit(exitCodeFor(err))
+		}
+		return
+	}
 	var (
 		dataDir   string
 		logLevel  string
@@ -138,14 +177,21 @@ func main() {
 
 	root.AddCommand(serveCmd(), notifyCmd(), headlessCmd(), clientCmd())
 	if err := root.Execute(); err != nil {
-		var ce *codedError
-		if errors.As(err, &ce) {
-			fmt.Fprintln(os.Stderr, "Error:", ce.msg)
-			os.Exit(ce.code)
-		}
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitCodeFor prints err and returns the process exit code: notify's stable
+// codes (usage / unreachable / refused) survive, everything else is 1. Shared
+// with the shim path so `amplio notify` and `amplio-notify` agree.
+func exitCodeFor(err error) int {
+	var ce *codedError
+	if errors.As(err, &ce) {
+		fmt.Fprintln(os.Stderr, "Error:", ce.msg)
+		return ce.code
+	}
+	fmt.Fprintln(os.Stderr, "Error:", err)
+	return 1
 }
 
 func runCmd() *cobra.Command {
@@ -401,7 +447,7 @@ func printRecallStatus(w io.Writer, st recallStatus) {
 	line("knowledge", st.knowledge)
 }
 
-func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, cfg config.Config) (*skills.Index, *lessons.Index) {
+func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, cfg config.Config) (*skills.Index, *lessons.Index, embed.Embedder) {
 	var st recallStatus
 	defer func() { printRecallStatus(os.Stderr, st) }()
 
@@ -411,7 +457,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		// Set --embed-model / $AMPLIO_EMBED_MODEL / embed_model.
 		st.skills = recallDisabled("no embed model configured")
 		st.knowledge = recallDisabled("no embed model configured")
-		return nil, nil
+		return nil, nil, nil
 	}
 	st.embedModel = embedModel
 	embedder, err := createEmbedder(ctx, embedModel)
@@ -419,7 +465,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		reason := fmt.Sprintf("embedder unavailable: %s", err)
 		st.skills = recallDisabled(reason)
 		st.knowledge = recallDisabled(reason)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Lessons ("knowledge"): synchronous; reads from the DB, populated by
@@ -437,7 +483,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 	var skillIx *skills.Index
 	if len(dirs) == 0 {
 		st.skills = recallDisabled("no skill dirs configured")
-		return skillIx, lessonIx
+		return skillIx, lessonIx, embedder
 	}
 	sources := make([]skills.Source, 0, len(dirs))
 	for _, d := range dirs {
@@ -458,7 +504,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		} else {
 			st.skills = recallEnabled(fmt.Sprintf("%d skills", skillIx.Size()))
 		}
-		return skillIx, lessonIx
+		return skillIx, lessonIx, embedder
 	}
 
 	// Stage 2: background reconcile against the on-disk corpus. During this
@@ -474,7 +520,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		}
 		slog.Info("skill index reconciled", "elapsed", time.Since(start).Round(time.Second))
 	}()
-	return skillIx, lessonIx
+	return skillIx, lessonIx, embedder
 }
 
 // bindCLITools prepends the configured amplio bin dirs to $PATH (so shipped 1p
@@ -598,23 +644,40 @@ func waitForRun(ctx context.Context, mgr *runtime.RunManager, runID string) {
 // coding agents emit long replies/edits; thinking budgets are separate.
 const defaultMaxOutputTokens = 65536
 
-// providerFactory builds a provider from a model and optional spec args (the
-// `?k=v` query, passed through to the model — e.g. thinking controls).
-type providerFactory func(model string, maxTokens int, args url.Values) (llm.Provider, error)
+// providerFactory builds a provider from a model and the two halves of its spec
+// args: clientArgs are the ones this provider interprets (the `{k=v}` block),
+// args are passed through to the model untouched (the `?k=v` query). See
+// internal/llm/spec.go for the rule that decides which is which.
+type providerFactory func(model string, maxTokens int, clientArgs, args url.Values) (llm.Provider, error)
 
-// providerRegistry maps an LLM spec prefix (the provider "class") to its
-// constructor. A spec is "<prefix>:<model>[?k=v&...]"; the provider parses the
-// model and forwards the args (each family interprets them, e.g. thinking).
-var providerRegistry = map[string]providerFactory{
-	"vertex-claude": anthropicprovider.NewVertex, // Claude on Vertex AI (ADC)
-	"claude":        anthropicprovider.NewAPIKey, // Claude direct Anthropic API (ANTHROPIC_API_KEY)
-	"vertex-gemini": geminiprovider.NewVertex,    // Gemini on Vertex AI (ADC)
-	"gemini":        geminiprovider.NewAPIKey,    // Gemini Developer API (API key)
+// providerEntry is a provider class: how to build it, and which client args it
+// declares. The declaration is what lets an unknown key in the block be an
+// error instead of a silent pass-through to the server — the client owns that
+// namespace, so a typo in it is knowable.
+type providerEntry struct {
+	new        providerFactory
+	clientArgs map[string]bool
+}
+
+// providerRegistry maps an LLM spec prefix (the provider "class") to its entry.
+// A spec is "<prefix>[{k=v&…}]:<model>[?k=v&…]".
+var providerRegistry = map[string]providerEntry{
+	// Claude on Vertex AI (ADC) and the direct Anthropic API (ANTHROPIC_API_KEY).
+	"vertex-claude": {anthropicprovider.NewVertex, anthropicprovider.ClientArgs},
+	"claude":        {anthropicprovider.NewAPIKey, anthropicprovider.ClientArgs},
+	// Gemini on Vertex AI (ADC) and the Developer API (API key). Its spec args
+	// are a closed, typed set of model knobs; it has no client args of its own.
+	"vertex-gemini": {geminiprovider.NewVertex, nil},
+	"gemini":        {geminiprovider.NewAPIKey, nil},
 	// Any OpenAI-compatible /v1/chat/completions server — the hosted API by
-	// default, or whatever ?base_url= points at (vLLM, ollama, LiteLLM,
+	// default, or whatever base_url= points at (vLLM, ollama, LiteLLM,
 	// OpenRouter, a corp gateway). One provider, most of the ecosystem.
-	"openai":     openaiprovider.New,
-	"subprocess": subprocessprovider.New, // out-of-process bridge (e.g. a corp-only API); see bridges/README.md
+	"openai": {openaiprovider.New, openaiprovider.ClientArgs},
+	// Bridges: any process speaking amplio's own NDJSON protocol. We spawn
+	// and own the process for subprocess:, and dial existing server for bridge:.
+	// See bridges/README.md.
+	"subprocess": {bridgeprovider.NewSubprocess, bridgeprovider.ClientArgsSubprocess},
+	"bridge":     {bridgeprovider.NewBridge, bridgeprovider.ClientArgsBridge},
 }
 
 // createEmbedder builds an Embedder from a "<backend>:<model>[?k=v&…]" spec,
@@ -625,56 +688,77 @@ var providerRegistry = map[string]providerFactory{
 // name (no ":") defaults to the vertex backend for back-compat with older
 // embed_model config values. Note model availability is backend-specific (e.g.
 // text-embedding-005 is Vertex-only; gemini-embedding-001 works on both).
+// embedClientArgs are the client args an embed spec accepts. Only the openai
+// backend has any; the genai-backed ones take the model and nothing else.
+var embedClientArgs = map[string]bool{
+	"base_url":    true,
+	"api_key_env": true,
+	"url":         true, // bridge: endpoint
+	"token_env":   true, // bridge: which variable holds the bearer token
+}
+
 func createEmbedder(ctx context.Context, spec string) (embed.Embedder, error) {
-	base := llm.BaseSpec(spec) // strip a "#nickname" display override, as createProvider does
-	backend, rest, ok := strings.Cut(base, ":")
-	if !ok {
-		backend, rest = "vertex", base // bare name => vertex (back-compat)
+	// A bare model name (no backend) predates the spec grammar and still means
+	// vertex, so it is resolved before parsing.
+	if base := llm.BaseSpec(spec); !strings.Contains(base, ":") {
+		if base == "" {
+			return nil, fmt.Errorf("invalid embed model spec %q; want <backend>:<model>", spec)
+		}
+		return embed.NewVertex(ctx, base)
 	}
-	// Split the model from its args on the FIRST "?" only; the model itself may
-	// contain colons (e.g. an ollama tag), which the Cut above already preserved.
-	model, rawArgs, _ := strings.Cut(rest, "?")
-	if model == "" {
-		return nil, fmt.Errorf("invalid embed model spec %q; want <backend>:<model>", spec)
-	}
-	args, err := url.ParseQuery(rawArgs)
+	sp, err := llm.ParseSpec(spec)
 	if err != nil {
-		return nil, fmt.Errorf("parse embed spec args in %q: %w", spec, err)
+		return nil, err
 	}
+	model, _, err := sp.Model() // an embed backend takes no model args today
+	if err != nil {
+		return nil, fmt.Errorf("invalid embed model spec %q: %w", spec, err)
+	}
+	clientArgs, err := llm.ClientArgs(sp.Client, embedClientArgs)
+	if err != nil {
+		return nil, fmt.Errorf("embed model spec %q: %w", spec, err)
+	}
+	backend := sp.Provider
 	switch backend {
 	case "vertex":
 		return embed.NewVertex(ctx, model)
 	case "gemini":
 		return embed.NewAPIKey(ctx, model)
 	case "openai":
-		return embed.NewOpenAI(model, args.Get("base_url"), args.Get("api_key_env"))
+		return embed.NewOpenAI(model, clientArgs.Get("base_url"), clientArgs.Get("api_key_env"))
+	case "bridge":
+		return bridgeprovider.NewEmbedder(model, clientArgs)
 	default:
-		return nil, fmt.Errorf("unknown embed backend %q in %q; known: gemini, openai, vertex", backend, spec)
+		return nil, fmt.Errorf("unknown embed backend %q in %q; known: bridge, gemini, openai, vertex", backend, spec)
 	}
 }
 
 func createProvider(spec string) (llm.Provider, error) {
-	// Drop any "#nickname" display override before parsing: it is a harness-side
-	// label (see internal/llm/label.go) and no provider ever sees it. Errors below
-	// still quote the ORIGINAL spec, so what the operator reads matches what they
+	// ParseSpec drops any "#nickname" display override: it is a harness-side
+	// label (see internal/llm/label.go) and no provider ever sees it. Its errors
+	// quote the ORIGINAL spec, so what the operator reads matches what they
 	// configured.
-	prefix, rest, ok := strings.Cut(llm.BaseSpec(spec), ":")
-	if !ok || rest == "" {
-		return nil, fmt.Errorf("invalid LLM spec %q; want <provider>:<model>[?k=v&...]", spec)
-	}
-	model, rawArgs, _ := strings.Cut(rest, "?")
-	if model == "" {
-		return nil, fmt.Errorf("invalid LLM spec %q; empty model", spec)
-	}
-	args, err := url.ParseQuery(rawArgs)
+	sp, err := llm.ParseSpec(spec)
 	if err != nil {
-		return nil, fmt.Errorf("parse LLM spec args in %q: %w", spec, err)
+		return nil, err
 	}
-	factory, ok := providerRegistry[prefix]
+	model, args, err := sp.Model()
+	if err != nil {
+		return nil, fmt.Errorf("invalid LLM spec %q: %w", spec, err)
+	}
+	entry, ok := providerRegistry[sp.Provider]
 	if !ok {
-		return nil, fmt.Errorf("unknown LLM provider %q in %q; known: %s", prefix, spec, knownProviders())
+		return nil, fmt.Errorf("unknown LLM provider %q in %q; known: %s", sp.Provider, spec, knownProviders())
 	}
-	return factory(model, defaultMaxOutputTokens, args)
+	clientArgs, err := llm.ClientArgs(sp.Client, entry.clientArgs)
+	if err != nil {
+		return nil, fmt.Errorf("LLM spec %q: %w", spec, err)
+	}
+	maxTokens, err := llm.MaxTokensArg(clientArgs, defaultMaxOutputTokens)
+	if err != nil {
+		return nil, fmt.Errorf("LLM spec %q: %w", spec, err)
+	}
+	return entry.new(model, maxTokens, clientArgs, args)
 }
 
 func knownProviders() string {

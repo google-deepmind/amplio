@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,7 +31,10 @@ import (
 	"amplio/internal/agent/critic"
 	"amplio/internal/config"
 	"amplio/internal/db"
+	"amplio/internal/embed"
 	"amplio/internal/eventstream"
+	"amplio/internal/llm"
+	"amplio/internal/llm/bridge"
 	amlog "amplio/internal/log"
 	"amplio/internal/runtime"
 	"amplio/internal/server"
@@ -259,6 +263,13 @@ func executeServe(cfg config.Config, listenOverride string) error {
 	srv.SetSecureCookie(useTLS)
 	srv.SetLLMTester(testLLM)
 	srv.SetFollowupSuggester(makeFollowupSuggester(store, sysEnv.systemHQ))
+	if cfg.LendLLM != "" {
+		stopLending, err := serveLending(cfg, srv, sysEnv.embedder)
+		if err != nil {
+			return err
+		}
+		defer stopLending()
+	}
 	go srv.Bridge(ctx)
 
 	// HTTP log middleware: quiet by default (2xx → Debug, hidden at info level),
@@ -406,4 +417,62 @@ func safeFinalize(fin *critic.Finalizer, ctx context.Context, runID string) {
 		}
 	}()
 	fin.OnMainAgentConcluded(ctx, runID)
+}
+
+// serveLending starts the LLM lending listener and returns a stop function.
+//
+// A second listener rather than routes on the main one. This port serves generations, embeddings
+// and the model list, and nothing else exists on it to reach.
+func serveLending(cfg config.Config, srv *server.Server, embedder embed.Embedder) (func(), error) {
+	tokenEnv := cfg.LendLLMTokenEnv
+	if tokenEnv == "" {
+		// The same default the bridge provider reads, so both ends of a tunnel
+		// are configured alike.
+		tokenEnv = bridge.DefaultTokenEnv
+	}
+	token := os.Getenv(tokenEnv)
+	if token == "" {
+		// Refusing beats defaulting: an open lending port is an invitation to
+		// spend someone else's model budget. Its own secret, too — the server
+		// token also authorises starting runs, i.e. a shell here.
+		return nil, fmt.Errorf("lend_llm is set but %s is empty; set it to a shared secret "+
+			"that callers will present as a bearer token", tokenEnv)
+	}
+	// Cached: a served API builds a provider per request, and construction mints
+	// credentials and builds the connection pool that makes the second request
+	// fast. A run builds one provider and uses it for hours.
+	handler := srv.LendingHandler(token, llm.CacheProviders(createProvider), lentEmbedder(embedder))
+
+	ln, err := net.Listen("tcp", cfg.LendLLM)
+	if err != nil {
+		return nil, fmt.Errorf("listen for lending on %s: %w", cfg.LendLLM, err)
+	}
+	lendSrv := &http.Server{
+		Handler: handler,
+		// No write timeout: a generation streams for minutes. Reading headers is
+		// the part an idle connection can abuse.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := lendSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("lending listener stopped", "error", err)
+		}
+	}()
+	slog.Warn("lending LLM: authenticated callers on this port may spend this machine's model credentials",
+		"addr", ln.Addr().String(), "models", len(cfg.Run.LLMs), "token_env", tokenEnv)
+
+	return func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = lendSrv.Shutdown(shutdownCtx)
+	}, nil
+}
+
+// lentEmbedder maps a nil embed.Embedder to a nil interface: an interface value
+// holding a nil pointer passes a != nil check and then panics on first use.
+func lentEmbedder(e embed.Embedder) bridge.Embedder {
+	if e == nil {
+		return nil
+	}
+	return e
 }

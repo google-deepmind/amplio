@@ -51,7 +51,7 @@ func liveProvider(t *testing.T) llm.Provider {
 	if p := os.Getenv("AMPLIO_OPENAI_TEST_PROFILE"); p != "" {
 		args.Set("profile", p)
 	}
-	p, err := New(model, 2048, args)
+	p, err := newFromFlatArgs(model, 2048, args)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -28,14 +28,22 @@ import (
 // <data-dir>/config.toml. Go is the single source of truth: DefaultConfig holds
 // the fallback values and the TOML file overrides only the keys it sets.
 type Config struct {
-	Listen        string       `toml:"listen"`          // HTTP bind address for `serve`
-	DB            string       `toml:"db"`              // sqlite path; defaults to <data-dir>/amplio.db
-	Token         string       `toml:"token"`           // web auth token; random per `serve` when empty
-	SystemLLMHQ   string       `toml:"system_llm_hq"`   // observer phase summaries / reports (server-level)
-	SystemLLMFast string       `toml:"system_llm_fast"` // observer step summaries (server-level)
-	EmbedModel    string       `toml:"embed_model"`     // Vertex embedding model (skills + lessons recall)
-	Run           RunDefaults  `toml:"run"`             // defaults applied to new runs
-	Skills        SkillsConfig `toml:"skills"`          // skill corpus sources
+	Listen        string      `toml:"listen"`          // HTTP bind address for `serve`
+	DB            string      `toml:"db"`              // sqlite path; defaults to <data-dir>/amplio.db
+	Token         string      `toml:"token"`           // web auth token; random per `serve` when empty
+	SystemLLMHQ   string      `toml:"system_llm_hq"`   // observer phase summaries / reports (server-level)
+	SystemLLMFast string      `toml:"system_llm_fast"` // observer step summaries (server-level)
+	EmbedModel    string      `toml:"embed_model"`     // Vertex embedding model (skills + lessons recall)
+	Run           RunDefaults `toml:"run"`             // defaults applied to new runs
+	// LendLLM is the bind address for the LLM lending listener, e.g.
+	// "127.0.0.1:26760". Empty (the default) disables lending entirely.
+	//
+	// A SEPARATE listener, not a route on the main one.
+	LendLLM string `toml:"lend_llm"`
+	// LendLLMTokenEnv names the variable holding the bearer token the lending
+	// listener requires. Its own secret.
+	LendLLMTokenEnv string       `toml:"lend_llm_token_env"`
+	Skills          SkillsConfig `toml:"skills"` // skill corpus sources
 	// AmplioBinPaths are directories prepended to $PATH at startup so amplio's
 	// shipped 1p CLI tools (e.g. web_search) resolve by bare name for both our
 	// probes and the agent's bash subprocesses. Omitted → the built-in default;
@@ -208,7 +216,6 @@ func Resolve(dataDir string, o Overrides) (Config, error) {
 	return cfg, nil
 }
 
-// firstNonEmpty returns the first non-empty string, or "" if all are empty.
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {

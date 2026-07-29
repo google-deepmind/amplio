@@ -140,6 +140,14 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "content is required")
 		return
 	}
+	// A mistyped --session is the obvious failure mode now that the target is
+	// named, and an FK violation surfacing as a 500 tells the caller nothing.
+	if _, err := s.store.GetSession(r.Context(), id, sid); err != nil {
+		writeErr(w, http.StatusNotFound,
+			fmt.Sprintf("no session %q in run %q", sid, id))
+		return
+	}
+
 	// Flood guard: refuse once this step has absorbed its budget. 429 rather
 	// than a silent drop, because the caller is a script — `amplio notify` maps
 	// non-2xx to exit code 3 and prints the body on stderr, so a runaway loop

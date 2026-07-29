@@ -16,6 +16,7 @@ package llm
 
 import (
 	"net/url"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 )
@@ -55,6 +56,12 @@ const maxLabelLen = 40
 const nicknameSep = "#"
 
 // SplitNickname separates a spec from its optional display nickname.
+//
+// A plain cut at the first '#' is correct even with client blocks in play,
+// because a literal '#' inside a block must be percent-encoded (see spec.go) —
+// so the first raw one always introduces the nickname. Unlike ParseSpec this
+// never fails: it runs on operator-typed text that may not be a valid spec at
+// all, and labelling and dedup still have to do something reasonable with it.
 func SplitNickname(spec string) (base, nickname string) {
 	base, nickname, _ = strings.Cut(spec, nicknameSep)
 	return strings.TrimSpace(base), strings.TrimSpace(nickname)
@@ -72,19 +79,52 @@ func BaseSpec(spec string) string {
 // comment for the three rules that constrain it — in particular, callers must
 // keep the full spec visible alongside.
 func ShortLabel(spec string) string {
-	base, nickname := SplitNickname(spec)
-	if nickname != "" {
-		return truncateLabel(nickname) // an explicit override wins outright
+	sp, err := ParseSpec(spec)
+	if err != nil {
+		// Not a spec we can parse — the new-run form accepts arbitrary text.
+		// Show it as-is, still honouring a nickname if one is discernible.
+		base, nickname := SplitNickname(spec)
+		if nickname != "" {
+			return truncateLabel(nickname)
+		}
+		return truncateLabel(base)
 	}
-	prefix, rest, ok := strings.Cut(base, ":")
-	if !ok || rest == "" {
-		return truncateLabel(base) // not a spec we recognise; show it as-is
+	if sp.Nickname != "" {
+		return truncateLabel(sp.Nickname) // an explicit override wins outright
 	}
-	model, rawArgs, _ := strings.Cut(rest, "?")
-	args, _ := url.ParseQuery(rawArgs) // best effort: unparseable args just yield no facets
+	model, args, err := sp.Model()
+	if err != nil {
+		// Best effort: unparseable args just yield no facets.
+		m, _, _ := strings.Cut(sp.Tail, "?")
+		return truncateLabel(m)
+	}
+	// Labelling also reads the query, unlike everything else: a menu row written
+	// before the block existed is still displayed, long after it stopped being
+	// constructible.
+	arg := func(k string) string {
+		if v := sp.Client.Get(k); v != "" {
+			return v
+		}
+		return args.Get(k)
+	}
+
+	if sp.Provider == "bridge" {
+		// A bridged model is labelled by what it IS, not by how it is reached, so
+		// recurse on the handle: a spec handle gets the same treatment it would
+		// get locally (family prefix dropped, effort surfaced), and a nickname
+		// handle is already the label its operator chose. The endpoint follows as
+		// a facet, because two bridges serving the same model are otherwise
+		// indistinguishable. Returns early: the tail carries its own args, so the
+		// generic effort facet below would repeat what the recursion found.
+		label := "\u21c4 " + ShortLabel(sp.Tail)
+		if h := endpointLabel(sp.Client.Get("url")); h != "" {
+			label += " @" + h
+		}
+		return truncateLabel(label)
+	}
 
 	var facets []string
-	switch prefix {
+	switch sp.Provider {
 	case "vertex-claude", "claude":
 		// "claude-opus-5" -> "opus-5": the family name is redundant with the model
 		// name, which stays recognisable without it. NOT done for Gemini, whose
@@ -92,18 +132,20 @@ func ShortLabel(spec string) string {
 		// left, which identifies nothing.
 		model = strings.TrimPrefix(model, "claude-")
 	case "subprocess":
-		// The bridge name occupies the model position and the real model is an
-		// argument, so the raw spec is actively MISLEADING in a chip: every run
-		// through a given bridge looks identical.
-		if m := args.Get("model"); m != "" {
-			model = m
+		// With bin= the model position IS the model. A row stored before that put
+		// the binary there instead, with the model in the query; without this,
+		// every model behind one bridge renders as the same chip.
+		if sp.Client.Get("bin") == "" {
+			if m := arg("model"); m != "" {
+				model = m
+			}
 		}
 	case "openai":
 		// One provider fronts the whole OpenAI-compatible ecosystem, so the server
 		// is often the only thing distinguishing two entries (a local ollama from a
 		// proxy from the hosted API). Host, including port, since ports are exactly
 		// what separates two local servers.
-		if h := hostOf(args.Get("base_url")); h != "" {
+		if h := hostOf(arg("base_url")); h != "" {
 			facets = append(facets, "@"+h)
 		}
 	}
@@ -125,6 +167,16 @@ func effortOf(args url.Values) string {
 		}
 	}
 	return ""
+}
+
+// endpointLabel names a bridge endpoint compactly: the host for a network
+// endpoint, the socket's file name for a unix one (where a full path would eat
+// the whole chip and the last component is the distinguishing part anyway).
+func endpointLabel(raw string) string {
+	if socket, ok := strings.CutPrefix(strings.TrimSpace(raw), "unix://"); ok {
+		return filepath.Base(socket)
+	}
+	return hostOf(raw)
 }
 
 // hostOf extracts host:port from a base_url, tolerating a bare "host:port" with

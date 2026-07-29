@@ -81,3 +81,37 @@ func TestBaseSpec(t *testing.T) {
 		}
 	}
 }
+
+// TestShortLabel_SubprocessShapes: a chip must name the MODEL, not the bridge —
+// four endpoints behind one bridge rendered identically before this.
+func TestShortLabel_SubprocessShapes(t *testing.T) {
+	for _, tc := range []struct{ spec, want string }{
+		{"subprocess{bin=/opt/bridges/corp}:exp-endpoint-7", "exp-endpoint-7"},
+		{"subprocess:/opt/bridges/corp?model=exp-endpoint-7", "exp-endpoint-7"},
+		{"subprocess{bin=/opt/bridges/corp}:exp-endpoint-7#rc2", "rc2"},
+	} {
+		if got := ShortLabel(tc.spec); got != tc.want {
+			t.Errorf("ShortLabel(%q) = %q, want %q", tc.spec, got, tc.want)
+		}
+	}
+}
+
+// TestShortLabel_Bridge: a bridged model must be labelled by what it IS, with
+// the endpoint as a facet — two bridges serving the same model are otherwise
+// indistinguishable in the picker.
+func TestShortLabel_Bridge(t *testing.T) {
+	for _, tc := range []struct{ spec, want string }{
+		{"bridge{url=https://ws.corp:26759/api/llm}:opus-xhigh", "⇄ opus-xhigh @ws.corp:26759"},
+		{"bridge{url=https://ws.corp:26759/api/llm}:vertex-claude:claude-opus-5?output_config.effort=xhigh",
+			"⇄ opus-5 · xhigh @ws.corp:26759"},
+		// A unix socket's file name is the distinguishing part; the path would eat
+		// the chip.
+		{"bridge{url=unix:///tmp/dev-bridge.sock}:vertex-claude:claude-opus-5", "⇄ opus-5 @dev-bridge.sock"},
+		// An explicit nickname still wins outright, as everywhere else.
+		{"bridge{url=https://ws:26759}:vertex-claude:claude-opus-5#remote opus", "remote opus"},
+	} {
+		if got := ShortLabel(tc.spec); got != tc.want {
+			t.Errorf("ShortLabel(%q) =\n %q\nwant %q", tc.spec, got, tc.want)
+		}
+	}
+}

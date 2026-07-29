@@ -57,13 +57,17 @@ func serveJSON(t *testing.T, status int, body string) (*httptest.Server, *map[st
 	return srv, &got
 }
 
+// newProvider builds a provider the way createProvider does: one flat arg set,
+// divided by llm.SplitArgs using this provider's declaration. Going through the
+// real splitter (rather than hand-sorting the two maps here) means these tests
+// also pin which side each arg lands on.
 func newProvider(t *testing.T, base string, extra ...string) llm.Provider {
 	t.Helper()
 	args := url.Values{"base_url": {base}}
 	for i := 0; i+1 < len(extra); i += 2 {
 		args.Set(extra[i], extra[i+1])
 	}
-	p, err := New("test-model", 4096, args)
+	p, err := newFromFlatArgs("test-model", 4096, args)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -565,8 +569,14 @@ func TestBuildBody_SpecArgPassthrough(t *testing.T) {
 	if body["logprobs"] != true {
 		t.Errorf("logprobs = %#v, want bool true", body["logprobs"])
 	}
+	// max_tokens is a CLIENT arg: it sets our cap, which buildBody then writes
+	// into whichever field the profile selects — rather than being passed through
+	// as a second, possibly conflicting, body field.
 	if body["max_tokens"] != float64(128) {
-		t.Errorf("max_tokens = %#v, want the spec arg (128) to win", body["max_tokens"])
+		t.Errorf("max_tokens = %#v, want the client arg (128) to set the cap", body["max_tokens"])
+	}
+	if _, both := body["max_completion_tokens"]; both {
+		t.Error("body carries both max_tokens and max_completion_tokens")
 	}
 	// Client-only args configure us and must never reach the server.
 	for _, k := range []string{"base_url", "profile", "api_key_env", "stream_usage", "max_tokens_field", "capture_extras"} {
@@ -611,19 +621,49 @@ func TestConvertMessages_ToolResultImages(t *testing.T) {
 	}
 }
 
+// newFromFlatArgs mirrors createProvider's split for tests that express a spec
+// as a single query.
+func newFromFlatArgs(model string, maxTokens int, args url.Values) (llm.Provider, error) {
+	// Sort the flat set the way a spec's block/query split would, so these tests
+	// exercise the same classification production uses.
+	block, query := url.Values{}, url.Values{}
+	for k, v := range args {
+		if ClientArgs[k] || k == "max_tokens" {
+			block[k] = v
+		} else {
+			query[k] = v
+		}
+	}
+	clientArgs, err := llm.ClientArgs(block, ClientArgs)
+	if err != nil {
+		return nil, err
+	}
+	modelArgs := query
+	maxTokens, err = llm.MaxTokensArg(clientArgs, maxTokens)
+	if err != nil {
+		return nil, err
+	}
+	return New(model, maxTokens, clientArgs, modelArgs)
+}
+
 func TestNew_Validation(t *testing.T) {
-	if _, err := New("m", 10, url.Values{"profile": {"nope"}}); err == nil {
+	if _, err := newFromFlatArgs("m", 10, url.Values{"profile": {"nope"}}); err == nil {
 		t.Error("unknown profile should fail fast at construction")
 	}
-	if _, err := New("m", 10, url.Values{"max_tokens_field": {"tokens"}}); err == nil {
+	if _, err := newFromFlatArgs("m", 10, url.Values{"max_tokens_field": {"tokens"}}); err == nil {
 		t.Error("bogus max_tokens_field should fail fast")
 	}
-	if _, err := New("m", 10, url.Values{"stream_usage": {"yes-please"}}); err == nil {
+	if _, err := newFromFlatArgs("m", 10, url.Values{"stream_usage": {"yes-please"}}); err == nil {
 		t.Error("non-boolean stream_usage should fail fast")
+	}
+	// An undeclared key in the BLOCK is an error — the half we own is knowable,
+	// so a typo is caught here instead of being shipped to the server.
+	if _, err := llm.ClientArgs(url.Values{"bse_url": {"http://x"}}, ClientArgs); err == nil {
+		t.Error("unknown client arg should fail fast")
 	}
 	// A model id containing a colon (ollama's "qwen3:30b-a3b") is normal: the
 	// spec splits on the FIRST colon only, so it arrives here intact.
-	p, err := New("qwen3:30b-a3b", 10, url.Values{"base_url": {"http://x/v1"}})
+	p, err := newFromFlatArgs("qwen3:30b-a3b", 10, url.Values{"base_url": {"http://x/v1"}})
 	if err != nil {
 		t.Fatalf("New with a colon in the model: %v", err)
 	}
