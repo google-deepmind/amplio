@@ -15,6 +15,7 @@
 package server
 
 import (
+	"amplio/internal/llm"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -29,6 +30,21 @@ import (
 // it is already known to the server; this just surfaces it in one place (some
 // of it, like the data dir, was previously only visible in the serve banner /
 // logs).
+// modelRef is one configured model: what is written in the config, and the
+// short label derived from it (internal/llm.ShortLabel) — the same pair the run
+// DTOs carry, so a model reads the same wherever it appears.
+type modelRef struct {
+	Spec  string `json:"spec"`
+	Label string `json:"label"`
+}
+
+func toModelRef(spec string) modelRef {
+	if spec == "" {
+		return modelRef{}
+	}
+	return modelRef{Spec: spec, Label: llm.ShortLabel(spec)}
+}
+
 type aboutInfo struct {
 	// Build identity (from version.Build()).
 	Channel   string `json:"channel"`              // dev / nightly / vX.Y.Z
@@ -43,10 +59,12 @@ type aboutInfo struct {
 	LogsDir    string `json:"logs_dir"`
 
 	// Configured LLM tiers (what powers agents / observer / compaction / recall).
-	DefaultLLM    string   `json:"default_llm"`
-	Models        []string `json:"models"` // the configured agent-model menu
-	SystemLLMHQ   string   `json:"system_llm_hq"`
-	SystemLLMFast string   `json:"system_llm_fast"`
+	// Each carries the full spec plus its short display label, so the page can
+	// lead with the name a human recognises without hiding what is configured.
+	DefaultLLM    modelRef   `json:"default_llm"`
+	Models        []modelRef `json:"models"` // the configured agent-model menu
+	SystemLLMHQ   modelRef   `json:"system_llm_hq"`
+	SystemLLMFast modelRef   `json:"system_llm_fast"`
 
 	// Server identity / access.
 	Owner  string `json:"owner"`         // username running the server
@@ -60,6 +78,10 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 	if !b.Time.IsZero() {
 		buildTime = b.Time.UTC().Format(time.RFC3339)
 	}
+	models := make([]modelRef, 0, len(s.defaults.LLMs))
+	for _, spec := range s.defaults.LLMs {
+		models = append(models, toModelRef(spec))
+	}
 	writeJSON(w, http.StatusOK, aboutInfo{
 		Channel:       b.Channel,
 		Commit:        b.Commit,
@@ -69,10 +91,10 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 		DataDir:       config.DataDir(),
 		ConfigPath:    config.ConfigPath(config.DataDir()),
 		LogsDir:       config.LogsDir(),
-		DefaultLLM:    s.defaults.LLM,
-		Models:        s.defaults.LLMs,
-		SystemLLMHQ:   s.defaults.SystemLLMHQ,
-		SystemLLMFast: s.defaults.SystemLLMFast,
+		DefaultLLM:    toModelRef(s.defaults.LLM),
+		Models:        models,
+		SystemLLMHQ:   toModelRef(s.defaults.SystemLLMHQ),
+		SystemLLMFast: toModelRef(s.defaults.SystemLLMFast),
 		Owner:         s.owner,
 		AuthOn:        s.token != "",
 		Caller:        s.authed(r),

@@ -43,6 +43,11 @@ import (
 // shells out and reaches the SAME server its parent runs in).
 //
 // For headless / no-server execution see `amplio headless` instead.
+// Stream convention for every `client` subcommand: stdout carries the datum a
+// script consumes (a run id, a count, a table, JSON); stderr carries anything
+// addressed to a human (confirmations, hints, the URL with its token). So
+// `$(amplio client …)` captures the value and nothing else, while an interactive
+// terminal still shows both.
 func clientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "client",
@@ -59,6 +64,8 @@ func clientCmd() *cobra.Command {
 		clientRestartCmd(),
 		clientStatusCmd(),
 		clientListCmd(),
+		clientAPICmd(),
+		clientMonitorCmd(),
 	)
 	return cmd
 }
@@ -72,6 +79,7 @@ func clientSubmitCmd() *cobra.Command {
 		workspace string
 		agentType string
 		llmSpec   string
+		briefings []string
 	)
 	cmd := &cobra.Command{
 		Use:   "submit [task]",
@@ -81,18 +89,19 @@ func clientSubmitCmd() *cobra.Command {
 			" the run id.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 1 {
-				task = args[0]
+			task, err := resolveTask(cmd, args, task)
+			if err != nil {
+				return err
 			}
-			if task == "" {
-				return fmt.Errorf("a task is required (positional arg or --task)")
-			}
-			body := map[string]string{
+			body := map[string]any{
 				"task":      task,
 				"title":     title,
 				"workspace": workspace,
 				"agent":     agentType,
 				"llm":       llmSpec,
+			}
+			if len(briefings) > 0 {
+				body["briefings"] = briefings
 			}
 			var out struct {
 				RunID string `json:"run_id"`
@@ -104,16 +113,178 @@ func clientSubmitCmd() *cobra.Command {
 			if err := json.Unmarshal(raw, &out); err != nil {
 				return fmt.Errorf("parse server response: %w", err)
 			}
-			fmt.Printf("run started: %s\n  %s/?token=%s\n", out.RunID, info.URL, info.Token)
+			// The id alone on stdout, so `RUN=$(amplio client submit …)` needs no
+			// parser. The human line carries the server token, so it must not land
+			// in that capture either.
+			fmt.Fprintf(cmd.ErrOrStderr(), "run started: %s\n  %s/?token=%s\n", out.RunID, info.URL, info.Token)
+			fmt.Fprintln(cmd.OutOrStdout(), out.RunID)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&task, "task", "", "Task description (or pass as a positional arg)")
+	cmd.Flags().StringVar(&task, "task", "", "Task text, or - to read it from stdin (or pass the text as a positional arg)")
+	// A task that starts with "-" (YAML front matter, say) cannot be a positional
+	// argument: the flag parser claims it before the command runs, and reports
+	// only "bad flag syntax". Measured: SetInterspersed(false) does NOT rescue
+	// that case (the task is the first token either way) and breaks the ordinary
+	// `submit "task" --llm=x`, so the fix is to say what to do instead.
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return fmt.Errorf("%w\nif the task text begins with \"-\" (e.g. YAML front matter), pass it on stdin: amplio client submit --task=- < task.md", err)
+	})
 	cmd.Flags().StringVar(&title, "title", "", "Run title (default: server auto-generates from the task). Handy to tag/compare runs, e.g. a model-name suffix.")
-	cmd.Flags().StringVar(&workspace, "workspace", "", "Working directory (default: server-side run.workspace)")
-	cmd.Flags().StringVar(&agentType, "agent", "", "Agent type (default: server-side run.agent_type)")
-	cmd.Flags().StringVar(&llmSpec, "llm", "", "Agent LLM spec (default: server-side run.llm)")
+	cmd.Flags().StringVar(&workspace, "workspace", "", "Working directory (default: the server's working directory)")
+	cmd.Flags().StringVar(&agentType, "agent", "", "Agent type: standard_agent | chatbot (default standard_agent)")
+	cmd.Flags().StringVar(&llmSpec, "llm", "", "Agent LLM spec (default: first entry of config [run] llms)")
+	cmd.Flags().StringArrayVar(&briefings, "briefing", nil,
+		"Briefing to add to this run's prompt (repeatable; list them with: amplio client api /api/briefings)")
 	return cmd
+}
+
+// resolveTask picks the task text from exactly ONE source: a positional
+// argument, --task=<text>, or --task=- (stdin). Supplying two is an error rather
+// than a precedence rule — quietly preferring one is how the wrong task gets
+// submitted and nobody notices until the run is half done.
+//
+// Stdin is opt-in for the same reason `submit` must be usable inside a loop that
+// is itself reading stdin (`while read spec; do … done < models.tsv`): a command
+// that consumes stdin implicitly would eat the loop's input, which is what the
+// fd-3 workarounds in the task-manager docs exist to dodge.
+func resolveTask(cmd *cobra.Command, args []string, taskFlag string) (string, error) {
+	fromFlag := cmd.Flags().Changed("task")
+	switch {
+	case fromFlag && len(args) == 1:
+		return "", fmt.Errorf("task given twice: as an argument and as --task; pass it once")
+	case fromFlag && taskFlag == "-":
+		if f, ok := cmd.InOrStdin().(*os.File); ok {
+			// A character device is either the terminal (where io.ReadAll would
+			// block and the command would look hung) or /dev/null (where it would
+			// read nothing). Neither can carry a task, so say so before reading
+			// rather than hanging or failing obscurely. Phrased by what was
+			// observed — "not a file or pipe" — since we cannot tell the two apart
+			// without a terminal dependency.
+			if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+				return "", fmt.Errorf("--task=- reads the task from stdin, but stdin is not a file or pipe: redirect a task file (< task.md) or pipe one in")
+			}
+		}
+		b, err := io.ReadAll(cmd.InOrStdin())
+		if err != nil {
+			return "", fmt.Errorf("read task from stdin: %w", err)
+		}
+		if task := strings.TrimSpace(string(b)); task != "" {
+			return task, nil
+		}
+		return "", fmt.Errorf("--task=- given but stdin was empty")
+	case fromFlag && strings.TrimSpace(taskFlag) != "":
+		return taskFlag, nil
+	case fromFlag:
+		return "", fmt.Errorf("--task was empty; pass text, or - to read the task from stdin")
+	case len(args) == 1 && strings.TrimSpace(args[0]) != "":
+		return args[0], nil
+	}
+	return "", fmt.Errorf("a task is required: pass it as an argument, --task=<text>, or --task=- to read stdin")
+}
+
+// --- API passthrough -------------------------------------------------------
+
+// clientAPICmd is the escape hatch: any endpoint, any method, with auth and
+// endpoint resolution handled. It exists so the CLI does not have to grow a verb
+// per route, and so callers stop hand-rolling `read server.json, then curl`.
+//
+// It supplies access, not semantics: the body goes to stdout exactly as the
+// server sent it. Pipe it to jq. Deciding which session is "the" session, or
+// which key in a response matters, belongs to the caller.
+func clientAPICmd() *cobra.Command {
+	var (
+		method  string
+		data    string
+		timeout time.Duration
+	)
+	cmd := &cobra.Command{
+		Use:   "api <path>",
+		Short: "Call any server API endpoint (authenticated passthrough)",
+		Long: "Send an authenticated request to the server for the current data" +
+			" directory and print the raw response body. The path is server-relative" +
+			" (/api/runs/...). Any method is allowed: the caller can already read the" +
+			" token from server.json, so this grants no new access — it removes the" +
+			" plumbing. Non-2xx responses print the body on stderr and exit non-zero.",
+		Args: cobra.ExactArgs(1),
+		Example: "  amplio client api /api/runs/$ID/sessions/main-agent/chat | jq -r '.[].content'\n" +
+			"  amplio client api -X POST /api/runs/$ID/report --timeout=10m\n" +
+			"  amplio client api -X PATCH /api/runs/$ID --data '{\"starred\":true}'",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			if !strings.HasPrefix(path, "/") {
+				path = "/" + path
+			}
+			body, err := requestBody(cmd, data)
+			if err != nil {
+				return err
+			}
+			// curl's rule: a body implies POST unless a method was named.
+			if !cmd.Flags().Changed("method") && body != nil {
+				method = http.MethodPost
+			}
+			ctx := cmd.Context()
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			_, resp, err := clientRequest(ctx, strings.ToUpper(method), path, body)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close() //nolint:errcheck
+			// Streamed, not buffered: a chat log or event dump can be far larger
+			// than the cap the parsing subcommands impose on themselves.
+			sink := cmd.OutOrStdout()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				sink = cmd.ErrOrStderr()
+			}
+			n, copyErr := io.Copy(sink, resp.Body)
+			if n > 0 {
+				fmt.Fprintln(sink)
+			}
+			if copyErr != nil {
+				return fmt.Errorf("read response: %w", copyErr)
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return fmt.Errorf("%s %s: server returned %s", strings.ToUpper(method), path, resp.Status)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&method, "method", "X", http.MethodGet, "HTTP method")
+	cmd.Flags().StringVar(&data, "data", "", "Request body: JSON text, @file, or - for stdin (implies POST unless -X is given)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Client-side timeout; 0 disables it (some endpoints run an LLM and take minutes)")
+	return cmd
+}
+
+// requestBody resolves --data: literal JSON, @file, or - for stdin. The JSON is
+// validated here so a typo fails locally with the text in hand, rather than as a
+// 400 from the server.
+func requestBody(cmd *cobra.Command, data string) (io.Reader, error) {
+	if !cmd.Flags().Changed("data") {
+		return nil, nil
+	}
+	raw := []byte(data)
+	switch {
+	case data == "-":
+		b, err := io.ReadAll(cmd.InOrStdin())
+		if err != nil {
+			return nil, fmt.Errorf("read body from stdin: %w", err)
+		}
+		raw = b
+	case strings.HasPrefix(data, "@"):
+		b, err := os.ReadFile(strings.TrimPrefix(data, "@"))
+		if err != nil {
+			return nil, fmt.Errorf("read body file: %w", err)
+		}
+		raw = b
+	}
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("--data is not valid JSON (the API speaks JSON): %s", firstLine(string(raw)))
+	}
+	return bytes.NewReader(raw), nil
 }
 
 // --- Cancel ----------------------------------------------------------------
@@ -131,7 +302,7 @@ func clientCancelCmd() *cobra.Command {
 			if _, _, err := clientDo(cmd.Context(), http.MethodPost, "/api/runs/"+runID+"/cancel", nil); err != nil {
 				return err
 			}
-			fmt.Printf("cancellation requested for %s\n", runID)
+			fmt.Fprintf(cmd.ErrOrStderr(), "cancellation requested for %s\n", runID)
 			return nil
 		},
 	}
@@ -157,7 +328,8 @@ func clientRestartCmd() *cobra.Command {
 				Revived int `json:"revived"`
 			}
 			_ = json.Unmarshal(raw, &out)
-			fmt.Printf("restart requested for %s: %d session(s) revived\n", runID, out.Revived)
+			fmt.Fprintf(cmd.ErrOrStderr(), "restart requested for %s: %d session(s) revived\n", runID, out.Revived)
+			fmt.Fprintln(cmd.OutOrStdout(), out.Revived)
 			return nil
 		},
 	}
@@ -182,13 +354,14 @@ func clientStatusCmd() *cobra.Command {
 				return err
 			}
 			if asJSON {
-				fmt.Print(string(raw))
+				out := cmd.OutOrStdout()
+				fmt.Fprint(out, string(raw))
 				if len(raw) > 0 && raw[len(raw)-1] != '\n' {
-					fmt.Println()
+					fmt.Fprintln(out)
 				}
 				return nil
 			}
-			return printRunDetail(raw)
+			return printRunDetail(cmd.OutOrStdout(), raw)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the raw RunDetail JSON (scripting / agent consumption)")
@@ -197,7 +370,7 @@ func clientStatusCmd() *cobra.Command {
 
 // printRunDetail renders a runDetail JSON blob as an aligned key/value block
 // plus a small sessions table. Mirrors the overview page's metadata card.
-func printRunDetail(raw []byte) error {
+func printRunDetail(out io.Writer, raw []byte) error {
 	var d struct {
 		RunID         string    `json:"run_id"`
 		Title         string    `json:"title"`
@@ -224,7 +397,7 @@ func printRunDetail(raw []byte) error {
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return fmt.Errorf("parse run detail: %w", err)
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "run_id\t%s\n", d.RunID)
 	if d.Title != "" {
 		fmt.Fprintf(w, "title\t%s\n", d.Title)
@@ -263,9 +436,9 @@ func printRunDetail(raw []byte) error {
 	if len(d.Sessions) == 0 {
 		return nil
 	}
-	fmt.Println()
-	fmt.Println("sessions:")
-	sw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "sessions:")
+	sw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(sw, "  SESSION\tAGENT\tSTATUS\tSTEP\tPARENT")
 	for _, s := range d.Sessions {
 		parent := s.ParentID
@@ -323,10 +496,10 @@ func clientListCmd() *cobra.Command {
 				if len(out) == 0 {
 					out = json.RawMessage("[]")
 				}
-				fmt.Println(string(out))
+				fmt.Fprintln(cmd.OutOrStdout(), string(out))
 				return nil
 			}
-			return printRunSummaries(page.Runs, page.HasMore)
+			return printRunSummaries(cmd.OutOrStdout(), cmd.ErrOrStderr(), page.Runs, page.HasMore)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the runSummary[] JSON array")
@@ -337,7 +510,7 @@ func clientListCmd() *cobra.Command {
 
 // printRunSummaries renders one page of the dashboard's run list as an aligned
 // table. hasMore appends a hint that more runs exist beyond this page.
-func printRunSummaries(raw []byte, hasMore bool) error {
+func printRunSummaries(out, errOut io.Writer, raw []byte, hasMore bool) error {
 	var runs []struct {
 		RunID       string  `json:"run_id"`
 		Title       string  `json:"title"`
@@ -354,10 +527,10 @@ func printRunSummaries(raw []byte, hasMore bool) error {
 		return fmt.Errorf("parse runs: %w", err)
 	}
 	if len(runs) == 0 {
-		fmt.Println("(no runs)")
+		fmt.Fprintln(errOut, "(no runs)")
 		return nil
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "RUN_ID\tSTATUS\tSTEP\tFLAGS\tTITLE")
 	for _, r := range runs {
 		title := r.Title
@@ -386,7 +559,7 @@ func printRunSummaries(raw []byte, hasMore bool) error {
 		return err
 	}
 	if hasMore {
-		fmt.Printf("\n… more runs beyond this page (showing %d; use --limit, or the web UI to page).\n", len(runs))
+		fmt.Fprintf(errOut, "\n… more runs beyond this page (showing %d; use --limit, or the web UI to page).\n", len(runs))
 	}
 	return nil
 }
@@ -398,19 +571,45 @@ func printRunSummaries(raw []byte, hasMore bool) error {
 // serverInfo too so callers can render the user-facing URL in success messages
 // (banner URL, not the loopback used for the request itself — the banner host
 // may be a non-loopback FQDN that's unreachable from this process).
+// clientDo issues an authenticated request and returns the whole response body.
+// Convenience wrapper over clientRequest for the subcommands that parse a small
+// JSON document: 15s is plenty for those, and 1 MiB bounds a runaway body.
 func clientDo(ctx context.Context, method, path string, body any) (serverInfo, []byte, error) {
-	dataDir := config.DataDir()
-	info, err := readServerInfo(dataDir)
-	if err != nil {
-		return serverInfo{}, nil, fmt.Errorf("no running server for %s (start one with `amplio serve`): %w", dataDir, err)
-	}
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return info, nil, err
+			return serverInfo{}, nil, err
 		}
 		reader = bytes.NewReader(b)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	info, resp, err := clientRequest(ctx, method, path, reader)
+	if err != nil {
+		return info, nil, err
+	}
+	defer resp.Body.Close()                                     //nolint:errcheck
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) //nolint:errcheck
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return info, respBody, fmt.Errorf("server returned %s: %s", resp.Status, string(respBody))
+	}
+	return info, respBody, nil
+}
+
+// clientRequest sends an authenticated request to the server for the current
+// data directory and returns the LIVE response — the caller closes the body and
+// decides what counts as success. Timeouts belong to the caller's ctx: a report
+// generation can run for minutes, while a status poll should not.
+//
+// The target is whatever data dir is in effect (--data-dir / $AMPLIO_DATA_DIR),
+// so pointing the CLI at a second amplio is a matter of setting that, not of
+// passing an address and a token around.
+func clientRequest(ctx context.Context, method, path string, body io.Reader) (serverInfo, *http.Response, error) {
+	dataDir := config.DataDir()
+	info, err := readServerInfo(dataDir)
+	if err != nil {
+		return serverInfo{}, nil, fmt.Errorf("no running server for %s (start one with `amplio serve`): %w", dataDir, err)
 	}
 	// Talk over loopback (Addr); the banner URL may go through a reverse proxy
 	// and be unreachable / time out on auth.
@@ -418,9 +617,7 @@ func clientDo(ctx context.Context, method, path string, body any) (serverInfo, [
 	if base == "" {
 		base = info.URL
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, base+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
 	if err != nil {
 		return info, nil, err
 	}
@@ -432,21 +629,9 @@ func clientDo(ctx context.Context, method, path string, body any) (serverInfo, [
 	if err != nil {
 		return info, nil, fmt.Errorf("contact server at %s (is it still running?): %w", base, err)
 	}
-	defer resp.Body.Close()                                     //nolint:errcheck
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) //nolint:errcheck
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return info, respBody, fmt.Errorf("server returned %s: %s", resp.Status, string(respBody))
-	}
-	return info, respBody, nil
+	return info, resp, nil
 }
 
-// loopbackHTTPClient returns an HTTP client suitable for talking to the local
-// amplio server. For HTTPS-to-loopback (mkcert / self-signed dev certs on
-// 127.0.0.1 / ::1 / localhost), TLS verification is skipped: the connection
-// is local-only, the server is the same user's own process, and demanding
-// the client side trust the mkcert CA would require finding and loading it.
-// For HTTP, this is just http.DefaultClient. For HTTPS to non-loopback, full
-// verification stays on.
 func loopbackHTTPClient(serverURL string) *http.Client {
 	u, err := url.Parse(serverURL)
 	if err != nil || u.Scheme != "https" || !isLoopback(u.Hostname()) {

@@ -22,6 +22,7 @@ import (
 	"amplio/internal/agent/critic"
 	"amplio/internal/agent/eventloop"
 	"amplio/internal/blob"
+	"amplio/internal/briefing"
 	"amplio/internal/cli"
 	"amplio/internal/config"
 	"amplio/internal/session"
@@ -48,7 +49,7 @@ const completionSnippet = "\n\n## Completion\n\n" +
 const AgentType = "standard_agent"
 
 func init() {
-	agent.Register(AgentType, factory)
+	agent.Register(AgentType, factory, agent.Traits{})
 }
 
 func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
@@ -67,10 +68,16 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 	// Use a pointer so the closure can reference it after assignment.
 	var ag *eventloop.EventLoopAgent
 
+	artifactDir := config.ArtifactDir(env.RunID)
+	// Operator-selected briefings, appended last so they read as additions to the
+	// harness's own guidance rather than interleaved with it. A run's root agent
+	// also receives scope:root briefings; sub-agents do not.
+	briefings := briefing.ForRun(context.Background(), env.Store, env.RunID, cfg.ParentID == "")
+
 	tools := []*tool.Tool{
 		bash.New(cwd, env.RunID, cfg.SessionID),
-		viewfile.New(cwd, config.ArtifactDir(env.RunID)),
-		editfile.New(cwd, config.ArtifactDir(env.RunID)),
+		viewfile.New(cwd, artifactDir),
+		editfile.New(cwd, artifactDir),
 		coordination.SendMessage(coordDeps, cfg.SessionID),
 		coordination.SessionCancel(coordDeps),
 		coordination.AwaitEvent(coordDeps, cfg.SessionID, func() *session.Handle {
@@ -113,9 +120,9 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 			eventloop.EnvironmentPromptSnippet() +
 			eventloop.ToolUsageStrategyPromptSnippet +
 			eventloop.SubAgentStrategyPromptSnippet +
-			eventloop.CrossRunInspectionPromptSnippet +
 			completionSnippet +
-			bash.ArtifactDirPromptSnippet,
+			bash.ArtifactDirPromptSnippet +
+			briefings,
 		Tools:         tools,
 		InitialRecall: initialRecall,
 		CLITools:      cli.DefaultTools(),

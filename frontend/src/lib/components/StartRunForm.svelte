@@ -20,6 +20,7 @@
 	import { goto } from '$app/navigation';
 	import { peekRunPrefill, takeRunPrefill } from '$lib/runPrefill.svelte';
 	import ModelSelect from './ModelSelect.svelte';
+	import BriefingSelect from './BriefingSelect.svelte';
 	import WorkspaceField from './WorkspaceField.svelte';
 	import {
 		CommandIcon,
@@ -34,6 +35,7 @@
 	let title = $state('');
 	let llm = $state('');
 	let workspace = $state('.');
+	let briefings = $state<string[]>([]);
 	// Bound from WorkspaceField — the short label ("new · jj", "my-alias",
 	// basename of path). Used on the Start button during the resolving stage
 	// so the user sees WHICH workspace is being created without bloating the
@@ -131,7 +133,8 @@
 			const common = {
 				title: title.trim() || undefined,
 				llm: llm || undefined,
-				workspace: wsForStart
+				workspace: wsForStart,
+				briefings: briefings.length > 0 ? briefings : undefined
 			};
 			if (interactive) {
 				const { run_id } = await api.startRun({ interactive: true, message: text, ...common });
@@ -229,6 +232,7 @@
 				ondirty={() => (dirty = true)}
 			/>
 			<ModelSelect bind:value={llm} onpick={() => taEl?.focus()} />
+			<BriefingSelect bind:selected={briefings} ondirty={() => (dirty = true)} />
 			<!-- Button label varies by stage. Idle: action verb + keycap hint.
 			     Resolving: just the workspace summary (e.g. "new · jj") —
 			     the spinner conveys "in progress" so the text doesn't need

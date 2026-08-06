@@ -26,7 +26,7 @@ import (
 //
 // These represent the last-known state of a session, not real-time status.
 // Every non-ongoing status is restartable; what differs is the trigger
-// (see docs/session_lifecycle.md).
+// (see docs/internals/session_lifecycle.md).
 //
 //   - ongoing:   has unfinished work (not necessarily executing right now).
 //   - awaiting:  parked via await_event (an explicit wake predicate).
@@ -65,7 +65,7 @@ const (
 	ClassInput
 )
 
-// Classify sorts a stream event into its class (see docs/session_lifecycle.md):
+// Classify sorts a stream event into its class (see docs/internals/session_lifecycle.md):
 //
 //   - UserEvent (operator/user input) → Input.
 //   - MessageEvent (agent send_message OR environment $AMPLIO_NOTIFY) → Input.
@@ -73,7 +73,7 @@ const (
 //     (runtime.NewCommitNotifier) additionally refuses to revive a *finished*
 //     session (concluded/crashed/cancelled) from an *environment* notification
 //     — the environment can't resurrect a deliberately-finished/stopped agent
-//     (see docs/session_lifecycle.md). Agent send_messages still revive them.
+//     (see docs/internals/session_lifecycle.md). Agent send_messages still revive them.
 //     Classify stays a pure function of the event; that state-dependent gate
 //     (and its own status set) lives at the wake path, not here.
 //   - ChildResultEvent verdict concluded → Input; crashed/cancelled → Notice
@@ -186,6 +186,15 @@ func IsSpine(s SessionRecord) bool {
 	default:
 		return false
 	}
+}
+
+// ReportGrade is one iteration's keen-critic grade. Run.ReportGrade caches only
+// the LAST one; the full series lives in the run_report observations, one per
+// iteration, and is what cross-run analysis actually wants.
+type ReportGrade struct {
+	Iteration int       // report version: 1 for the first report, 2 for the next…
+	Grade     int       // critic grade, 1..len(gradeNames); 0 when the report carried none
+	CreatedAt time.Time // when that iteration's report was written
 }
 
 type EventRecord struct {

@@ -32,7 +32,7 @@ func TestPromptsBuildInvariants(t *testing.T) {
 	if !strings.Contains(step, "EXAMPLES:") || !strings.Contains(step, "BAD:") {
 		t.Errorf("stepSystemPrompt lost its EXAMPLES/BAD scaffolding")
 	}
-	phase := phaseSystemPrompt()
+	phase := phaseSystemPrompt(false)
 	if !strings.Contains(phase, phaseArtifactIdentifiers) {
 		t.Errorf("phaseSystemPrompt does not embed phaseArtifactIdentifiers fragment")
 	}

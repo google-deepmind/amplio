@@ -1276,8 +1276,13 @@ func TestServer_About(t *testing.T) {
 	if info.GoVersion == "" || info.DataDir == "" {
 		t.Errorf("about missing core fields: %+v", info)
 	}
-	if info.DefaultLLM != "vertex:x" || len(info.Models) != 2 {
-		t.Errorf("about model fields = %q / %v", info.DefaultLLM, info.Models)
+	if info.DefaultLLM.Spec != "vertex:x" || len(info.Models) != 2 {
+		t.Errorf("about model fields = %+v / %v", info.DefaultLLM, info.Models)
+	}
+	// Each entry carries the display label alongside the spec, so the page can
+	// lead with the name without hiding what is configured.
+	if info.Models[0].Label == "" || info.Models[0].Spec == "" {
+		t.Errorf("model entry missing spec or label: %+v", info.Models[0])
 	}
 }
 

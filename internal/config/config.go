@@ -142,10 +142,16 @@ func LogsDir() string {
 	return dir
 }
 
+// BriefingsDir is where an operator's own briefings live, scanned recursively
+// at startup. Absent is the normal case.
+func BriefingsDir() string { return filepath.Join(DataDir(), "briefings") }
+
+// ArtifactDir answers where a run's artifacts live. Pure — naming a directory
+// does not create it. The directory is created once, when the run is created
+// (RunManager.createRun), so every later caller can treat it as existing; a
+// missing one means it was removed by hand mid-run.
 func ArtifactDir(runID string) string {
-	dir := filepath.Join(DataDir(), "artifacts", runID)
-	_ = os.MkdirAll(dir, 0o755)
-	return dir
+	return filepath.Join(DataDir(), "artifacts", runID)
 }
 
 // BlobDir is the on-disk directory for a run's content-addressed blobs (e.g.
@@ -165,6 +171,13 @@ type RunConfig struct {
 	LLM       string `json:"llm,omitempty"`
 	AgentType string `json:"agent_type,omitempty"`
 	AgentsMD  string `json:"agents_md,omitempty"`
+	// Briefings are the operator-selected prompt sections for this run, RESOLVED
+	// at creation (see internal/briefing): names only, since the text is
+	// composed at agent spawn and lands in the session's step-0 system-prompt
+	// event, which is what makes a session's prompt reproducible. Empty covers
+	// both "deliberately none" and "created before briefings existed" — the same
+	// state, so no migration is needed.
+	Briefings []string `json:"briefings,omitempty"`
 }
 
 // --- Required config resolution ---

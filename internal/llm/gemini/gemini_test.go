@@ -471,3 +471,88 @@ func TestWithRetryHonorsContextCancel(t *testing.T) {
 		t.Errorf("attempts=%d, want 1 (cancel before the second try)", n)
 	}
 }
+
+// The signature rides the LAST part of a turn: a function call when the model
+// calls one, the text otherwise. Measured against Vertex (gemini-3.5-flash):
+// a text-only turn returns ~1.5-2KB of signature on its text part, and dropping
+// it costs the model its reasoning context on the next turn — silently, since
+// unlike function-call signatures the API does not validate it.
+func TestRespAcc_TextPartSignature(t *testing.T) {
+	var acc respAcc
+	acc.add(&genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+		Content: &genai.Content{Parts: []*genai.Part{
+			{Text: "reasoning", Thought: true},
+			{Text: "the answer", ThoughtSignature: []byte("textsig")},
+		}},
+	}}})
+	r := acc.response()
+	want := base64.StdEncoding.EncodeToString([]byte("textsig"))
+	if got := r.ProviderExtra[textSigKey]; got != want {
+		t.Errorf("text signature = %v, want %v", got, want)
+	}
+	if _, ok := r.ProviderExtra[sigKey]; ok {
+		t.Error("no tool calls, so no per-call signature list belongs in ProviderExtra")
+	}
+}
+
+// Streaming delivers the text in pieces and signs only the last one.
+func TestRespAcc_TextSignatureAcrossStreamChunks(t *testing.T) {
+	var acc respAcc
+	chunk := func(text string, sig []byte) *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: []*genai.Part{{Text: text, ThoughtSignature: sig}}},
+		}}}
+	}
+	acc.add(chunk("hel", nil))
+	acc.add(chunk("lo ", nil))
+	acc.add(chunk("world", []byte("late-sig")))
+	r := acc.response()
+	if r.Content != "hello world" {
+		t.Errorf("content = %q", r.Content)
+	}
+	if got, want := r.ProviderExtra[textSigKey], base64.StdEncoding.EncodeToString([]byte("late-sig")); got != want {
+		t.Errorf("text signature = %v, want %v", got, want)
+	}
+}
+
+// Round trip: what the accumulator emits must come back out of a persisted
+// message and land on the text part of the replayed turn.
+func TestConvertMessages_ReplaysTextSignature(t *testing.T) {
+	extra := map[string]any{textSigKey: base64.StdEncoding.EncodeToString([]byte("sigT"))}
+	// Survive the DB: ProviderExtra is persisted as JSON.
+	blob, err := json.Marshal(extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revived map[string]any
+	if err := json.Unmarshal(blob, &revived); err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := convertMessages([]llm.Message{
+		{Role: llm.RoleUser, Content: "hi"},
+		{Role: llm.RoleAssistant, Content: "hello", ProviderExtra: revived},
+		{Role: llm.RoleUser, Content: "again"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := contents[1].Parts
+	if len(parts) != 1 || parts[0].Text != "hello" {
+		t.Fatalf("assistant parts = %+v", parts)
+	}
+	if string(parts[0].ThoughtSignature) != "sigT" {
+		t.Errorf("text part signature = %q, want sigT", parts[0].ThoughtSignature)
+	}
+}
+
+// An assistant turn with no signature must not grow an empty one.
+func TestConvertMessages_NoSignatureNoField(t *testing.T) {
+	contents, err := convertMessages([]llm.Message{{Role: llm.RoleAssistant, Content: "hello"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents[0].Parts[0].ThoughtSignature) != 0 {
+		t.Errorf("unexpected signature %q", contents[0].Parts[0].ThoughtSignature)
+	}
+}

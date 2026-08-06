@@ -6,159 +6,80 @@
   * Sub-agent session trees are automatically resumed upon server recovery.
 * **Autonomous**: Each run can be fully driven by the autonomous agent, or cooperatively driven with user interactions.
 
+![Amplio runs list](docs/guide/images/amplio-main.webp)
+
 ## Installation
 
-Amplio is a single binary with an embedded frontend.
 
 
+Amplio is a single binary with an embedded frontend. To build it yourself you need Go (see `go.mod` for the version) and Node.js 22+:
 
-**Build from source**: Needs Go (see `go.mod` for the version) and Node.js 22+ (try
-[fnm](https://github.com/Schniz/fnm)). Then run `make build` in the root folder.
+```bash
+make build
+```
 
-## Initial Setup
+## Quick start
 
-Amplio primarily needs two things:
+Amplio needs two things: a **data directory** (a local SQLite database and
+everything else it owns) and an **LLM provider**.
 
-1. **A data directory**: Amplio stores all agent runs in a local SQLite
-   database under a data directory (`--data-dir` > `$AMPLIO_DATA_DIR` >
-   `~/.amplio`). It also holds `config.toml`, per-run artifacts, blobs, and
-   logs. No external database to provision.
-2. **An LLM provider**: Amplio currently uses Vertex AI (via ADC) for Claude
-   and Gemini, the Gemini Developer API (via API key), or an out-of-process
-   `subprocess` bridge for backends that can't be linked into the binary.
-
-### Configuration
-
-Settings live in `<data-dir>/config.toml`. A minimal config:
+Write `~/.amplio/config.toml`:
 
 ```toml
-# LLMs for system tasks such as auto critic. REQUIRED. Can also be
-# specified via env vars AMPLIO_SYSTEM_LLM_HQ and AMPLIO_SYSTEM_LLM_FAST
-system_llm_hq   = "vertex-claude:claude-opus-4-8"
-system_llm_fast = "vertex-claude:claude-sonnet-4-6"
+# For bookkeeping: run reports, summaries, compaction.
+system_llm_hq   = "vertex-gemini:gemini-3.1-pro-preview"
+system_llm_fast = "vertex-gemini:gemini-3.6-flash"
 
-# If not set, recall (skills and knowledge) sub-system will be disabled.
-# Can also be specified via env var AMPLIO_EMBED_MODEL
+# Enables skill + lesson search. Recommended.
 embed_model     = "vertex:text-embedding-005"
 
-[run]
-# list of models available to select from the new-run form
+[run]  # The model menu in the new-run form.
 llms = [
-  "vertex-claude:claude-opus-4-8",
-  "vertex-gemini:gemini-3.5-flash",
+  "vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive&thinking.display=summarized",
+  "vertex-gemini:gemini-3.6-flash",
 ]
 ```
 
-For the Vertex AI providers, point ADC at your GCP project in `~/.bashrc`:
+Please consult [GCP prompt caching doc](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/prompt-caching)
+before using the `{cache_ttl=1h}` control on the `vertex-claude` provider.
+For Vertex AI, point ADC at your GCP project:
 
 ```bash
 export VERTEXAI_PROJECT=<your-gcp-project>
 export VERTEXAI_LOCATION=global
+gcloud auth application-default login
 ```
 
-See [docs/llm.md](docs/llm.md) for more details on supported LLM providers,
-thinking controls, and calling arbitrary LLM endpoint via out-of-process
-bridge.
-
-## Workflow
-
-### Running the Web Server
-
-Start the long-lived server. It owns the data directory (DB, observer),
-recovers interrupted runs, and serves both the JSON API and the UI:
+Then start the server and open the URL it prints:
 
 ```bash
 amplio serve
 ```
 
-The server prints a URL with an access token on startup. The bind address is
-`--listen` > `$AMPLIO_LISTEN` > `config.toml [listen]`. Starting, stopping, and
-resuming runs can all be done from the web UI.
+From there, describe a task in the composer and start a run.
 
-The default listen address is `0.0.0.0:26759` — reachable from any host
-that can route to the machine, convenient for a corp network environment
-(workstation + corp laptop). 
+## Guide
 
-For solo single-machine use or SSH-tunneled access, bind to loopback instead
-(`localhost:26759`) so amplio is only reachable locally or through the 
-authenticated SSH tunnel. In this case, setting up TLS is recommended,
-as modern browsers have 6-connection HTTP/1.1 cap on a single origin,
-amplio UI may stop auto updating when multiple tabs are open, 
-see [docs/tls.md](docs/tls.md).
+| Doc | Summary |
+|---|---|
+| [Runs](docs/guide/runs.md) | autonomous and interactive runs, sub-agents, reports and grades |
+| [Configuration](docs/guide/configuration.md) | the data directory, `config.toml`, precedence, recall |
+| [Models](docs/guide/models.md) | LLM provider specs, thinking controls, bridges, embedders |
+| [Command line](docs/guide/cli.md) | `serve`, `client`, `headless`, and scripting them |
+| [What the agent knows](docs/guide/prompt-context.md) | AGENTS.md, briefings, skills and lessons |
+| [Operations](docs/guide/operations.md) | multiple instances, access and tokens, backups, logs |
 
-Note: the printed URL contains a token for authentication — clicking on the
-link directly will authenticate you and save the auth info in a cookie.
-Without the token or cookie, a readonly view is shown. So in a corp
-environment, you can share the link of your running server with a teammate,
-but do **not** share the printed-out token.
+Design notes on how amplio works inside are in [docs/internals](docs/internals).
 
-### Autonomous Run vs Interactive Run
+## Security caveats
 
-When starting a new Run, we can choose to start it in two modes:
+Amplio does **not** sandbox the agent's shell: an agent runs commands as the
+user that started the server, with that user's filesystem access, network access
+and credentials. Run it somewhere you are comfortable with that.
 
-* **Autonomous Mode**: an autonomous `main-agent` will be started
-  to work on the given task, it will run until task completion (or crash / manual
-  cancellation). When concluded, a run report will be generated. The user can
-  read the run report, or start a companion chatbot to investigate the outcome.
-  In the run report, the user can also provide a follow up prompt to start a new
-  iteration of follow up (autonomous) run.
-* **Interactive Mode**: the initial text is just the first message to the
-  chatbot. The operator work interactively with the chatbot to drive the work.
-  The chatbot is fully agent, can do the task by itself or spawn sub-agents to
-  do focused long running tasks. A run report will not be auto-generated in this
-  mode because there is no natural completion point, but the operator can manually
-  trigger it via the generation report button on the Web UI.
-
-## Multi-instances
-
-One amplio server can host multiple runs. If for some reason you want to run multiple
-independent instances, you can specify a different listening port and data dir via:
-
-```bash
-AMPLIO_DATA_DIR=</path/to/data/dir> AMPLIO_LISTEN=0.0.0.0:<PORT> amplio serve
-```
-
-## Headless Run (Eval Workflow)
-
-Amplio support headless run, useful to be used as harness in eval or training. It
-will start / resume a single run, and exit when the run completes.
-
-Note: to run multiple headless runs on the same machine, use the multi-instance
-setup above with different data dirs and ports.
-
-```bash
-amplio headless run --task="$(cat /path/to/task.md)" --workspace=/path/to/repo
-```
-
-
-
-
-To resume a crashed run (its LLM, workspace, and agent are reconstructed from
-the run's stored config, so no extra flags are needed):
-
-```bash
-amplio headless resume <run-id>
-```
-
-### AGENTS.md
-
-Operator instructions injected into the agent's context at every session
-bootstrap. Two source files, both optional, both snapshotted ONCE at
-run-start and inherited by every agent in the run (root + sub-agents):
-
-- `<data-dir>/AGENTS.md` — rules that apply to every run on this machine.
-- `<workspace>/AGENTS.md` — rules that apply to runs started from this
-  workspace. Read from the workspace the run was launched against.
-
-If both exist, they're concatenated with section headers labeling the source
-path, and stored as a single `SystemEvent` (marker `agents_md`) at step 0.
-Mid-run edits don't affect ongoing runs — the system prompt is immutable
-after bootstrap. Restart the run to pick up edits.
-
-## Security Caveats
-
-Note there is *no* sandboxing in Amplio's bash tool calls. It is recommended
-to run Amplio inside a sandboxed environment when security is a concern.
+Reads are also open to anyone who can reach the port — the token in the startup
+URL gates *writes*, not reads. See [operations](docs/guide/operations.md) for
+what that means and how to bind it down.
 
 ## Disclaimer
 

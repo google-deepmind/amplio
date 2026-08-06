@@ -44,7 +44,7 @@ func init() {
 	agent.Register("spawn_link_test_agent", func(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		linkCaptured = env.Workspace
 		return &noopAgent{id: cfg.SessionID}, nil
-	})
+	}, agent.Traits{})
 }
 
 func gitRepo(t *testing.T) string {

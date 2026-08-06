@@ -112,13 +112,39 @@
 			<h3>Models</h3>
 			<dl class="kv">
 				<dt>default</dt>
-				<dd class="mono">{info.default_llm || '—'}</dd>
+				<dd>
+					{#if info.default_llm.spec}
+						<span class="label">{info.default_llm.label}</span>
+						<span class="mono spec">{info.default_llm.spec}</span>
+					{:else}—{/if}
+				</dd>
 				<dt>menu</dt>
-				<dd class="mono">{info.models.length ? info.models.join(', ') : '—'}</dd>
+				<dd>
+					{#if info.models.length}
+						<ul class="models">
+							{#each info.models as m (m.spec)}
+								<li>
+									<span class="label">{m.label}</span>
+									<span class="mono spec">{m.spec}</span>
+								</li>
+							{/each}
+						</ul>
+					{:else}—{/if}
+				</dd>
 				<dt>system (hq)</dt>
-				<dd class="mono">{info.system_llm_hq || '—'}</dd>
+				<dd>
+					{#if info.system_llm_hq.spec}
+						<span class="label">{info.system_llm_hq.label}</span>
+						<span class="mono spec">{info.system_llm_hq.spec}</span>
+					{:else}—{/if}
+				</dd>
 				<dt>system (fast)</dt>
-				<dd class="mono">{info.system_llm_fast || '—'}</dd>
+				<dd>
+					{#if info.system_llm_fast.spec}
+						<span class="label">{info.system_llm_fast.label}</span>
+						<span class="mono spec">{info.system_llm_fast.spec}</span>
+					{:else}—{/if}
+				</dd>
 			</dl>
 		</section>
 
@@ -199,6 +225,25 @@
 		margin: 0;
 		min-width: 0;
 		overflow-wrap: anywhere;
+		/* Match the label: a value set larger than its own dt reads as a heading
+		   for the row below it. */
+		font-size: var(--fs-sm);
+	}
+	/* A model reads as "the name you recognise" first, with the configured spec
+	   after it for the times you need to copy or compare the real thing. */
+	.models {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+	.label {
+		margin-right: 0.5rem;
+	}
+	.spec {
+		color: var(--text-dim);
 	}
 	.path {
 		display: inline-flex;

@@ -215,7 +215,7 @@ func executeServe(cfg config.Config, listenOverride, lendOverride string) error 
 	// try `mkcert` to generate them; otherwise fall back to plain HTTP.
 	// HTTPS unlocks HTTP/2 (Go's net/http auto-negotiates on ServeTLS), which
 	// removes the browser's per-origin 6-connection cap that throttles SSE
-	// across multi-tab sessions. See docs/tls.md.
+	// across multi-tab sessions. See docs/internals/tls.md.
 	certFile, keyFile, terr := resolveTLS(ctx, dataDir)
 	if terr != nil {
 		slog.Warn("TLS setup failed; serving plain HTTP", "error", terr)

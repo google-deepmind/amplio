@@ -41,12 +41,6 @@ var ToolUsageStrategyPromptSnippet string
 //go:embed prompts/sub_agent_strategy.md
 var SubAgentStrategyPromptSnippet string
 
-// CrossRunInspectionPromptSnippet is shared by standard + chatbot: the
-// inspection tools accept an optional run_id to read a prior run's data.
-//
-//go:embed prompts/cross_run_inspection.md
-var CrossRunInspectionPromptSnippet string
-
 // EnvironmentPromptSnippet returns the 1P internal environment guidance, or ""
 // in OSS. The OSS build keeps this stub; the internal build overrides it via
 // init() in prompts_internal.go and serves the embedded MD.

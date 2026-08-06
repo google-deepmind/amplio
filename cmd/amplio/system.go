@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"amplio/internal/agent/critic"
+	"amplio/internal/briefing"
 	"amplio/internal/config"
 	"amplio/internal/db"
 	"amplio/internal/db/sqlite"
@@ -94,6 +95,10 @@ func setupSystem(ctx context.Context, cfg config.Config, opts systemOpts) (*syst
 		_ = store.Close()
 		return nil, fmt.Errorf("create system_llm_hq: %w", err)
 	}
+
+	// Operator briefings: read once at startup, like the skill dirs. The
+	// selection a run stores is resolved against whatever is loaded here.
+	briefing.LoadDir(config.BriefingsDir())
 
 	mgr := buildManager(store)
 	mgr.SetSystemProviders(systemFast, systemHQ)

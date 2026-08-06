@@ -90,7 +90,7 @@ type chatFeed struct {
 //
 // The projection itself is identical in both modes and works for any session,
 // not just a chatbot: an autonomous agent's turns render as the same bubbles.
-// Tool results are pinned to their call's step (see docs/step_model.md), so a
+// Tool results are pinned to their call's step (see docs/internals/step_model.md), so a
 // range never splits a call from its result.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	id, sid := r.PathValue("id"), r.PathValue("sid")

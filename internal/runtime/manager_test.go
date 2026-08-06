@@ -42,7 +42,7 @@ var recoverSeen = make(chan string, 64)
 func init() {
 	agent.Register("recover_test_agent", func(_ *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		return &recorderAgent{sid: cfg.SessionID}, nil
-	})
+	}, agent.Traits{})
 }
 
 func TestRecoverRun(t *testing.T) {

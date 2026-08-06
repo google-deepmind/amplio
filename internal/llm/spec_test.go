@@ -259,7 +259,7 @@ func TestSpecMatchesLegacyParsing(t *testing.T) {
 		"subprocess:corp_bridge?model=some-thought-summarizer",
 		"subprocess:corp_bridge?model=exp-endpoint-7#candidate rc2",
 		"openai:claude?base_url=http://localhost:4000/v1&profile=litellm",
-		// docs/llm.md and the provider tests
+		// docs/guide/models.md and the provider tests
 		"openai:gpt-5.4-nano?profile=openai",
 		"openai:qwen3.5?base_url=http://localhost:11434/v1&profile=ollama",
 		"openai:nomic-embed-text:latest?base_url=http://localhost:11434/v1",

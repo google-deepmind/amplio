@@ -191,6 +191,11 @@ type Store interface {
 	// max(current, step). Bumped by the observer after closing a phase.
 	SetLastPhasedStep(ctx context.Context, runID, sessionID string, step int) error
 
+	// ReportGrades returns each run's keen-critic grades, one per report
+	// iteration, ordered oldest first. Batched over run ids so a list page costs
+	// one query, not one per row. Runs with no report are absent from the map.
+	ReportGrades(ctx context.Context, runIDs []string) (map[string][]ReportGrade, error)
+
 	// SumStepSummaryChars returns the total char_count of this session's
 	// step_summary rows in (stepLowerExclusive, stepUpperInclusive] — the phase
 	// trigger's accumulator.

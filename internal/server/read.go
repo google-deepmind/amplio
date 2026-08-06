@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"amplio/internal/agent/critic"
+	"amplio/internal/briefing"
 	"amplio/internal/config"
 	"amplio/internal/db"
 	"amplio/internal/llm"
@@ -72,9 +74,21 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// One batched query for the whole page: per-row would be a join per run.
+	// A failure here degrades the grade series to empty rather than failing the
+	// list — the dashboard needs the page far more than it needs the grades.
+	ids := make([]string, 0, len(runs))
+	for _, rw := range runs {
+		ids = append(ids, rw.Run.RunID)
+	}
+	grades, err := s.store.ReportGrades(r.Context(), ids)
+	if err != nil {
+		slog.Warn("list runs: report grades failed", "error", err)
+		grades = nil
+	}
 	out := make([]runSummary, 0, len(runs))
 	for _, rw := range runs {
-		out = append(out, toRunSummary(rw))
+		out = append(out, toRunSummary(rw, grades[rw.Run.RunID]))
 	}
 	// next_cursor encodes the LAST returned run's (created_at, run_id) as the
 	// keyset anchor for the next page, fed back as ?before. Empty when there's no
@@ -85,6 +99,29 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		nextCursor = last.CreatedAt.Format(time.RFC3339Nano) + "|" + last.RunID
 	}
 	writeJSON(w, http.StatusOK, runsPage{Runs: out, HasMore: hasMore, NextCursor: nextCursor})
+}
+
+// briefingInfo is one entry of the library the new-run form offers. Body is
+// deliberately absent: the picker needs identity and description, not several
+// KB of prompt per row.
+type briefingInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Scope       string `json:"scope"`
+	Source      string `json:"source"`
+}
+
+// handleListBriefings serves the briefing library, name-ordered.
+func (s *Server) handleListBriefings(w http.ResponseWriter, r *http.Request) {
+	all := briefing.List()
+	out := make([]briefingInfo, 0, len(all))
+	for _, b := range all {
+		out = append(out, briefingInfo{
+			Name: b.Name, Description: b.Description,
+			Scope: string(b.Scope), Source: string(b.Source),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleRunCounts returns the dashboard banner's exact, global tally over
@@ -132,6 +169,16 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		AgentsMD:      run.Config.AgentsMD,
 		CreatedAt:     run.CreatedAt,
 		UpdatedAt:     run.UpdatedAt,
+		ArtifactDir:   config.ArtifactDir(id),
+		Briefings:     run.Config.Briefings,
+	}
+	if d.Briefings == nil {
+		d.Briefings = []string{} // a JSON array is easier to consume than null
+	}
+	if grades, err := s.store.ReportGrades(r.Context(), []string{id}); err != nil {
+		slog.Warn("get run: report grades failed", "run", id, "error", err)
+	} else {
+		d.Grades = toGradeEntries(grades[id])
 	}
 	for _, sess := range sessions {
 		d.Sessions = append(d.Sessions, toSessionDTO(sess))
@@ -145,6 +192,11 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d.HasUpdates = runHasUpdates(db.RunWithSessions{Run: *run, RootSessions: roots})
+	// Same primaryRoot rule the summary uses, so a caller holding one run does
+	// not have to re-derive "which session is the run" from the sessions list.
+	if root := primaryRoot(roots); root != nil {
+		d.RootSessionID = root.SessionID
+	}
 	// Report coverage: describes the gap between the latest report's main-agent
 	// watermark and the main-agent's current step, using the SAME rule the
 	// critic finalizer applies (critic.ReportSkipMinSteps). Lets the UI

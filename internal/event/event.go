@@ -227,7 +227,7 @@ func (e *CompactionEvent) ToText() string {
 // ($AMPLIO_NOTIFY) are Input-class in db.Classify. SenderType additionally gates
 // ONE thing at the wake path (runtime.NewCommitNotifier): an environment
 // notification does not revive a deliberately finished session. See
-// docs/session_lifecycle.md.
+// docs/internals/session_lifecycle.md.
 const (
 	SenderTypeAgent       = "agent"
 	SenderTypeEnvironment = "environment"
@@ -288,7 +288,7 @@ func (e *ChildResultEvent) ToText() string {
 }
 
 // RecoverEvent is the "resumed" marker appended by run-level Recover to a
-// crash-recovered session's own stream (see docs/session_lifecycle.md). Recover
+// crash-recovered session's own stream (see docs/internals/session_lifecycle.md). Recover
 // is the only producer (never normal agent flow) and sets Content to the marker
 // text the LLM sees. It is a user-role event (providers require the last
 // pre-assistant message to be a user/tool-result message) and classifies as Input.

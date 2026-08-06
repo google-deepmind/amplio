@@ -18,12 +18,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"amplio/internal/agent"
+	"amplio/internal/briefing"
 	"amplio/internal/config"
 	"amplio/internal/db"
 	"amplio/internal/event"
@@ -193,6 +195,13 @@ func (m *RunManager) StartRun(ctx context.Context, cfg StartRunConfig) (string, 
 		title = extractMarkdownTitle(titleBasis)
 	}
 
+	names, unknown := briefing.Resolve(cfg.Briefings)
+	if len(unknown) > 0 {
+		// A typo must not fail the run, but it must not pass silently either.
+		slog.Warn("start run: unknown briefings ignored", "unknown", unknown)
+	}
+	cfg.RunConfig.Briefings = names
+
 	runID, err := m.createRun(ctx, db.RunRecord{
 		Config:    cfg.RunConfig,
 		Title:     title,
@@ -230,6 +239,14 @@ func (m *RunManager) createRun(ctx context.Context, rec db.RunRecord) (string, e
 		rec.RunID = db.NewRunID()
 		err := m.store.CreateRun(ctx, rec)
 		if err == nil {
+			// A run owns its artifact directory from the moment it exists, so
+			// nothing downstream — agent, tools, report loop — has to wonder
+			// whether the path it was handed is real. Failing here rather than
+			// at the agent's first write turns a silent ENOENT twenty steps in
+			// into an error at submit time.
+			if err := os.MkdirAll(config.ArtifactDir(rec.RunID), 0o755); err != nil {
+				return "", fmt.Errorf("create artifact dir for run %s: %w", rec.RunID, err)
+			}
 			return rec.RunID, nil
 		}
 		if !db.IsUniqueViolation(err) {
@@ -578,4 +595,8 @@ type StartRunConfig struct {
 	FirstMessage  string // opening chat message (chat runs); seeded at step 1
 	RunConfig     config.RunConfig
 	RootSessionID string
+	// Briefings names the prompt sections this run should carry. Validated into
+	// RunConfig.Briefings by StartRun — the one place a run is created, which is
+	// what keeps the UI, `client submit`, headless and the raw API agreeing.
+	Briefings []string
 }

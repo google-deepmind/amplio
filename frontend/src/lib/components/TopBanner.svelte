@@ -75,11 +75,11 @@
 				</a>
 				<a href="/recall" class="nav-item">
 					<BookOpenIcon size={14} weight="bold" />
-					<span>recall</span>
+					<span>Recall</span>
 				</a>
 				<a href="/about" class="nav-item">
 					<InfoIcon size={14} weight="bold" />
-					<span>about</span>
+					<span>About</span>
 				</a>
 			</nav>
 		</div>

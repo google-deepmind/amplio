@@ -98,26 +98,53 @@ type Factory func(env *Env, cfg *Config) (Agent, error)
 
 // --- Registry ---
 
+// Traits are the facts about an agent TYPE that the rest of the system needs
+// without holding (or being able to construct) an instance. Declared once at
+// registration, next to the factory, so a new agent type states them itself
+// rather than having callers special-case its name.
+type Traits struct {
+	// Interactive marks an operator-driven agent: a bare no-tool turn parks it
+	// idle awaiting the next message instead of concluding. The observer reads
+	// this to choose how to phase the session — what counts as a phase boundary
+	// in a conversation is not what counts in an autonomous run.
+	Interactive bool
+}
+
+type registration struct {
+	factory Factory
+	traits  Traits
+}
+
 var (
 	registryMu sync.RWMutex
-	registry   = make(map[string]Factory)
+	registry   = make(map[string]registration)
 )
 
-// Register adds an agent factory under the given name.
-func Register(name string, factory Factory) {
+// Register adds an agent factory, with its traits, under the given name.
+func Register(name string, factory Factory, traits Traits) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	if _, exists := registry[name]; exists {
 		panic(fmt.Sprintf("agent type %q already registered", name))
 	}
-	registry[name] = factory
+	registry[name] = registration{factory: factory, traits: traits}
+}
+
+// IsInteractive reports whether the named agent type is operator-driven.
+// Unknown names report false: the registry is populated by blank imports in the
+// entrypoint, so a binary that never links an agent type simply treats sessions
+// of that type as autonomous, which is the conservative default.
+func IsInteractive(name string) bool {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return registry[name].traits.Interactive
 }
 
 // Get returns the factory for the given agent type name.
 func Get(name string) (Factory, error) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-	f, ok := registry[name]
+	r, ok := registry[name]
 	if !ok {
 		// Build the available-names list inline rather than calling Names() (which
 		// re-takes registryMu.RLock): RWMutex RLock is not reentrant, so a second
@@ -128,7 +155,7 @@ func Get(name string) (Factory, error) {
 		}
 		return nil, fmt.Errorf("unknown agent type %q; available: %v", name, names)
 	}
-	return f, nil
+	return r.factory, nil
 }
 
 // Names returns all registered agent type names.

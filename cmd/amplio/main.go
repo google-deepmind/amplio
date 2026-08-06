@@ -215,9 +215,9 @@ func runCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&task, "task", "", "Task description (or pass as a positional arg)")
-	cmd.Flags().StringVar(&workspace, "workspace", "", "Working directory (default run.workspace)")
-	cmd.Flags().StringVar(&llmSpec, "llm", "", "Agent LLM spec (default run.llm)")
-	cmd.Flags().StringVar(&agentType, "agent", "", "Agent type (default run.agent_type)")
+	cmd.Flags().StringVar(&workspace, "workspace", "", "Working directory (default \".\")")
+	cmd.Flags().StringVar(&llmSpec, "llm", "", "Agent LLM spec (default: first entry of config [run] llms)")
+	cmd.Flags().StringVar(&agentType, "agent", "", "Agent type: standard_agent | chatbot (default standard_agent)")
 	return cmd
 }
 

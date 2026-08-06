@@ -18,5 +18,5 @@
 // The step counter bumps BEFORE LLM generation. The AssistantEvent and its
 // tool results are written at the previous step (the "call step"). Events
 // arriving during generation land at the bumped step (next turn).
-// See docs/step_model.md for the full design.
+// See docs/internals/step_model.md for the full design.
 package eventloop

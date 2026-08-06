@@ -30,13 +30,14 @@ import (
 
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Task        string `json:"task"`
-		Title       string `json:"title"`
-		Workspace   string `json:"workspace"`
-		Agent       string `json:"agent"`
-		LLM         string `json:"llm"`
-		Interactive bool   `json:"interactive"` // interactive run (chatbot root, empty task)
-		Message     string `json:"message"`     // opening message (interactive mode)
+		Task        string   `json:"task"`
+		Title       string   `json:"title"`
+		Workspace   string   `json:"workspace"`
+		Agent       string   `json:"agent"`
+		LLM         string   `json:"llm"`
+		Interactive bool     `json:"interactive"` // interactive run (chatbot root, empty task)
+		Message     string   `json:"message"`     // opening message (interactive mode)
+		Briefings   []string `json:"briefings"`   // prompt sections for the new run; opt-in
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -94,6 +95,7 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 			AgentType: agentType,
 			AgentsMD:  agentsMD,
 		},
+		Briefings:     req.Briefings,
 		RootSessionID: rootSessionID,
 	})
 	if err != nil {
@@ -121,7 +123,7 @@ const errEnvNoticeCapped = "env_notice_capped"
 // job's completion reaches an agent that merely forgot to await_event — but it
 // does NOT revive a FINISHED session (concluded/crashed/cancelled): the
 // environment can't resurrect a deliberately-finished agent (the wake-path gate
-// in runtime.NewCommitNotifier). See docs/session_lifecycle.md.
+// in runtime.NewCommitNotifier). See docs/internals/session_lifecycle.md.
 //
 // Because a notification to a finished session still PERSISTS (it is simply not
 // acted on), an abandoned notifier can append for as long as it runs; hence the

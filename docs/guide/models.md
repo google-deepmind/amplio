@@ -227,30 +227,44 @@ It exercises a plain call, parallel tool calls over a live stream, and a
 tool-result round trip — the three shapes where servers actually diverge. If it
 passes, capture its SSE and add it to `testdata/` so the dialect stays pinned.
 
-## Bridges (`subprocess:`)
+## Bridges
 
-A **bridge** is any process that speaks amplio's own NDJSON protocol over HTTP
-(`internal/llm/bridge`). Unlike a hop through a foreign schema, it carries the
-request and response types verbatim — `provider_extra` included, which is where
-thinking signatures live — so nothing is lost in translation.
+A **bridge** is any process that speaks amplio's own NDJSON protocol
+(`internal/llm/bridge`), which lets amplio use a backend it cannot link in —
+another API family, an internal service, a model on a machine that holds the
+credentials. The bridge can be written in any language; `bridges/bridge.py` is a
+stdlib-only reference with an `echo` backend, and
+[bridges/README.md](../../bridges/README.md) documents the protocol.
 
-`subprocess{bin=/path/to/bridge}:MODEL` is the transport where **amplio owns the
-process**: it spawns the bridge and talks over a private unix socket,
-managing the lifecycle — one long-lived process per spec (reused across runs),
-crash-restart with a one-shot retry, health-poll readiness, graceful reap on
-exit (+ `Pdeathsig` on Linux). A bridge's stdout/stderr goes to the log at debug
-level, and its **last 50 stderr lines are quoted in the error** when it fails to
-start or exits unexpectedly — the diagnosis you need is otherwise invisible at
-the default log level.
-
-The bridge can be written in any language; `bridges/bridge.py` is a stdlib-only
-reference with an `echo` backend (used for smoke testing) — see
-[bridges/README.md](../bridges/README.md) for the protocol and how to add
-your own backend. Example spec for the bundled echo backend:
+There are two modes, differing in who owns the process: `subprocess:` — 
+amplio owns the process, e.g.
 
 ```
 subprocess{bin=/path/to/bridge.py}:echo-model?backend=echo
 ```
+
+Amplio spawns the bridge and manages its lifecycle: one long-lived process per
+spec (reused across runs), crash-restart with a one-shot retry, health-poll
+readiness, graceful reap on exit (plus `Pdeathsig` on Linux). Its stdout/stderr
+go to the log at debug level, and its **last 50 stderr lines are quoted in the
+error** when it fails to start or exits unexpectedly — otherwise that diagnosis
+is invisible at the default log level.
+
+`bin=` is the only client arg. The rest of the spec — client block and query
+alike — is forwarded verbatim to the bridge as `$AMPLIO_BRIDGE_SPEC`, because
+from amplio's side a bridge is opaque: we cannot know which of its knobs
+configure the client and which configure the model. That whole spec is also the
+reuse key, so two specs differing in any argument get their own process.
+
+`bridge:` — amplio dials a server, e.g.
+
+```
+bridge{url=http://127.0.0.1:26760}:model-name?temperature=0.2
+bridge{url=unix:///tmp/bridge.sock}:model-name
+```
+
+Amplio makes requests to a bridge someone else is running. The underlying
+protocol is the same for `bridge` and `subprocess` modes.
 
 
 

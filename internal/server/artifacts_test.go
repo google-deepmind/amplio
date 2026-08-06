@@ -15,9 +15,12 @@
 package server
 
 import (
+	"amplio/internal/db"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,6 +40,9 @@ func TestServer_Artifacts(t *testing.T) {
 
 	// Populate the run's artifact dir: a file + a subdir with a file.
 	base := config.ArtifactDir(testRun)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(base, "plan.md"), []byte("# Plan\nstep 1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -117,5 +123,39 @@ func TestServer_Artifacts(t *testing.T) {
 	want := []string{"plan.md", "sub/note.txt"}
 	if len(gotPaths) != len(want) || gotPaths[0] != want[0] || gotPaths[1] != want[1] {
 		t.Errorf("recursive files = %v, want %v", gotPaths, want)
+	}
+}
+
+// Naming a run's artifact dir must never create it: deleting a run that wrote
+// nothing used to leave an empty directory behind, made by the very call that
+// asked where to delete.
+func TestArtifactDir_IsPureAndReadsDoNotCreate(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(config.EnvDataDir, dir)
+	path := config.ArtifactDir("never-wrote-anything")
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ArtifactDir created %s (stat err = %v)", path, err)
+	}
+
+	srv, _, store := newTestServer(t)
+	if err := store.CreateRun(context.Background(), db.RunRecord{RunID: "never-wrote-anything"}); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	// Listing is an empty result, not a 500 and not a mkdir.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/never-wrote-anything/artifacts", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("list = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	// A missing file under a missing dir is 404, not an internal error.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs/never-wrote-anything/artifacts/raw?path=x.txt", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("raw = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a GET created %s", path)
 	}
 }

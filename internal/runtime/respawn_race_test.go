@@ -95,7 +95,7 @@ func TestRespawnDoesNotRivalLiveParkedSession(t *testing.T) {
 			runs:     &runs,
 			awakened: awakened,
 		}, nil
-	})
+	}, agent.Traits{})
 
 	store, err := sqlite.Open(":memory:")
 	if err != nil {

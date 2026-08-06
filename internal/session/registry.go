@@ -217,7 +217,7 @@ func (r *Registry) CancelAll() {
 }
 
 // CancelSession is the canceller-driven cancel primitive, applied recursively
-// (see docs/session_lifecycle.md). Whoever cancels does all the work; the target
+// (see docs/internals/session_lifecycle.md). Whoever cancels does all the work; the target
 // agent just stops when its ctx is interrupted. It is safe on a cold (no
 // goroutine) or already-terminal session.
 //

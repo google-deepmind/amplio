@@ -27,6 +27,7 @@
 	import { auth } from '$lib/auth.svelte';
 	import { prefetchWorkspaceInfo } from '$lib/workspaceInfo';
 	import { prefetchModelMenu } from '$lib/modelMenu';
+	import { prefetchBriefings } from '$lib/briefingLibrary';
 	import { clearRunPrefill } from '$lib/runPrefill.svelte';
 	import { pageTitle } from '$lib/title';
 
@@ -185,6 +186,7 @@
 		refresh();
 		prefetchWorkspaceInfo(); // warm caches so the composer opens without a flicker
 		prefetchModelMenu();
+		prefetchBriefings();
 		const close = openStream(null, (ev) => {
 			// Ignore signals that change no persisted state the dashboard renders:
 			// token previews and sysstat (handled by its own store). Keep this in
@@ -272,7 +274,11 @@
 		</div>
 	</div>
 	{#if error}<p class="err">{error}</p>{/if}
-	<section class="runs">
+	<!-- The scroller is wrapped so the fade can be pinned to its bottom edge:
+	     rows dissolve into the page rather than being cut off against the
+	     composer. -->
+	<div class="runs-wrap">
+		<section class="runs">
 		<RunList {runs} onmutated={refresh} />
 		{#if runs.length === 0 && anyFilterActive}
 			<p class="more-hint dim small">No runs match the current filters.</p>
@@ -285,6 +291,7 @@
 			</button>
 		{/if}
 	</section>
+	</div>
 	{#if auth.authed}
 		<div class="compose">
 			<StartRunForm />
@@ -303,14 +310,38 @@
 		flex-direction: column;
 		gap: 0.8rem;
 	}
+	.runs-wrap {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+		display: flex;
+	}
 	.runs {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
 	}
+	/* Fade the tail of the list into the page background, so scrolled rows read
+	   as passing UNDER the composer instead of stopping at a hard edge. Purely
+	   decorative: transparent to the pointer, and invisible when the list is
+	   short (a gradient from transparent to --bg drawn over --bg). */
+	.runs-wrap::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 2.5rem;
+		background: linear-gradient(to bottom, transparent, var(--bg));
+		pointer-events: none;
+	}
 	/* Pagination affordance at the scroll-tail of the list. Centered so it reads
 	   as a list control, not a stray button bumping the composer. */
 	.load-more {
+		/* Above the tail fade: a control that looks half-dissolved reads as
+		   disabled, and this one is the only way to reach older runs. */
+		position: relative;
+		z-index: 1;
 		display: block;
 		margin: 0.8rem auto 0.4rem;
 		padding: 0.4rem 1.1rem;

@@ -22,6 +22,7 @@ import (
 	"amplio/internal/agent/critic"
 	"amplio/internal/agent/eventloop"
 	"amplio/internal/blob"
+	"amplio/internal/briefing"
 	"amplio/internal/cli"
 	"amplio/internal/config"
 	"amplio/internal/session"
@@ -71,7 +72,7 @@ func systemPromptFor(env *agent.Env, sessionID string) string {
 const AgentType = config.ChatbotAgentType
 
 func init() {
-	agent.Register(AgentType, factory)
+	agent.Register(AgentType, factory, agent.Traits{Interactive: true})
 }
 
 func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
@@ -110,6 +111,11 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		tools = append(tools, recall.Search(env.SkillIndex, env.LessonIndex), recall.Load(env.SkillIndex, env.LessonIndex))
 	}
 
+	// Operator-selected briefings, appended last so they read as additions to the
+	// harness's own guidance rather than interleaved with it. A run's root agent
+	// also receives scope:root briefings; sub-agents do not.
+	briefings := briefing.ForRun(context.Background(), env.Store, env.RunID, cfg.ParentID == "")
+
 	ag = eventloop.New(env, eventloop.Config{
 		SessionID:    cfg.SessionID,
 		Task:         cfg.Task,
@@ -121,8 +127,8 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 			eventloop.EnvironmentPromptSnippet() +
 			eventloop.ToolUsageStrategyPromptSnippet +
 			eventloop.SubAgentStrategyPromptSnippet +
-			eventloop.CrossRunInspectionPromptSnippet +
-			bash.ArtifactDirPromptSnippet,
+			bash.ArtifactDirPromptSnippet +
+			briefings,
 		Tools:       tools,
 		Interactive: true,
 		CLITools:    cli.DefaultTools(),

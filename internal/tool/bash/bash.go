@@ -75,7 +75,7 @@ func agentEnv(runID, sessionID string) []string {
 	}
 	env := []string{
 		config.EnvRunID + "=" + runID,
-		config.EnvArtifactDir + "=" + config.ArtifactDir(runID), // also creates the dir
+		config.EnvArtifactDir + "=" + config.ArtifactDir(runID),
 	}
 	if sessionID != "" {
 		env = append(env, config.EnvSessionID+"="+sessionID)

@@ -43,6 +43,16 @@ var gradeNames = [...]string{"", "garbage", "bad", "meh", "good", "excellent"}
 // gradeToString converts a stored integer grade (0=ungraded, 1=garbage..
 // 5=excellent) to its boundary string form, returning nil for ungraded (0) and
 // for any out-of-range value so the JSON field renders as null.
+// toGradeEntries renders the store's per-iteration grades in the DTO vocabulary.
+// Always non-nil: a JSON array (possibly empty) is easier to consume than null.
+func toGradeEntries(gs []db.ReportGrade) []gradeEntry {
+	out := make([]gradeEntry, 0, len(gs))
+	for _, g := range gs {
+		out = append(out, gradeEntry{Iteration: g.Iteration, Grade: gradeToString(g.Grade)})
+	}
+	return out
+}
+
 func gradeToString(g int) *string {
 	if g < 1 || g >= len(gradeNames) {
 		return nil
@@ -97,6 +107,14 @@ type rootInfo struct {
 // (workspace, llm, agent-type) without a per-session fetch.
 // runCounts is the GET /api/runs/counts response: the dashboard banner's exact,
 // global tallies over non-archived runs, independent of list pagination.
+// gradeEntry is one report iteration's grade, in the same vocabulary as the
+// `grade` / `report_grade` fields. The series is what tells you whether a run
+// improved across iterations; report_grade only ever shows the last one.
+type gradeEntry struct {
+	Iteration int     `json:"iteration"`
+	Grade     *string `json:"grade"`
+}
+
 type runCounts struct {
 	Active  int `json:"active"`
 	Updates int `json:"updates"`
@@ -145,9 +163,17 @@ type runSummary struct {
 	// changed since the run was last seen. Replaces the former client-side
 	// localStorage comparison so the badge is global and pagination-independent.
 	HasUpdates bool `json:"has_updates"`
+	// Grades is every report iteration's grade, oldest first (empty when the
+	// critic has not run). ArtifactDir is where this run's artifacts live on the
+	// server's filesystem — reported so a caller does not have to know the
+	// layout, which matters when the caller is driving a DIFFERENT amplio
+	// instance and its own paths would be the wrong answer. Local path: only
+	// meaningful to something on the same machine as the server.
+	Grades      []gradeEntry `json:"grades"`
+	ArtifactDir string       `json:"artifact_dir"`
 }
 
-func toRunSummary(rw db.RunWithSessions) runSummary {
+func toRunSummary(rw db.RunWithSessions, grades []db.ReportGrade) runSummary {
 	wm := runWorkspaceMeta(rw.RootSessions, rw.Run.Config.Workspace)
 	s := runSummary{
 		RunID:              rw.Run.RunID,
@@ -167,6 +193,8 @@ func toRunSummary(rw db.RunWithSessions) runSummary {
 		LLM:                rw.Run.Config.LLM,
 		LLMName:            llm.ShortLabel(rw.Run.Config.LLM),
 		SessionCount:       len(rw.RootSessions),
+		Grades:             toGradeEntries(grades),
+		ArtifactDir:        config.ArtifactDir(rw.Run.RunID),
 		Roots:              make([]rootInfo, 0, len(rw.RootSessions)),
 	}
 	for _, r := range rw.RootSessions {
@@ -287,17 +315,32 @@ type runDetail struct {
 	// Grade is the human grade as a string ("garbage".. "excellent"), or null
 	// when ungraded. ReportGrade is the cached keen-critic grade the human grade
 	// overrides; null when the critic hasn't graded the run.
-	Grade              *string `json:"grade"`
-	ReportGrade        *string `json:"report_grade"`
-	Archived           bool    `json:"archived"`
-	Workspace          string  `json:"workspace"`                      // full resolved path (tooltip / detail)
-	WorkspaceName      string  `json:"workspace_name"`                 // cheap display name (basename / numeric id)
-	WorkspaceKind      string  `json:"workspace_kind"`                 // "citc"/"plain"/"jj"/"external"/""
-	WorkspaceAlias     string  `json:"workspace_alias,omitempty"`      // set only by backends that name workspaces
-	WorkspaceNumericID int     `json:"workspace_numeric_id,omitempty"` // set only by backends that have one
-	CiderURL           string  `json:"cider_url,omitempty"`            // editor URL, when the backend provides one
-	LLM                string  `json:"llm"`                            // full spec (Overview shows it verbatim)
-	LLMName            string  `json:"llm_name"`                       // cheap display label, derived — never show it without llm reachable
+	Grade       *string `json:"grade"`
+	ReportGrade *string `json:"report_grade"`
+	// RootSessionID is the session that represents the run — the autonomous root
+	// if there is one, else the chatbot root (primaryRoot). Served here as well
+	// as on the summary so a caller holding one run does not have to re-derive
+	// the rule from the sessions list, which is how "just assume main-agent"
+	// creeps into scripts.
+	RootSessionID string `json:"root_session_id"`
+	// Briefings are the operator-selected prompt sections this run resolved at
+	// creation — shown on Overview so the run's configuration is legible after
+	// the fact, and because a user briefing marked default:true would otherwise
+	// apply invisibly.
+	Briefings []string `json:"briefings"`
+	// Grades is every report iteration's grade, oldest first; ArtifactDir is
+	// where this run's artifacts live on the server's filesystem (see runSummary).
+	Grades             []gradeEntry `json:"grades"`
+	ArtifactDir        string       `json:"artifact_dir"`
+	Archived           bool         `json:"archived"`
+	Workspace          string       `json:"workspace"`                      // full resolved path (tooltip / detail)
+	WorkspaceName      string       `json:"workspace_name"`                 // cheap display name (basename / numeric id)
+	WorkspaceKind      string       `json:"workspace_kind"`                 // "citc"/"plain"/"jj"/"external"/""
+	WorkspaceAlias     string       `json:"workspace_alias,omitempty"`      // set only by backends that name workspaces
+	WorkspaceNumericID int          `json:"workspace_numeric_id,omitempty"` // set only by backends that have one
+	CiderURL           string       `json:"cider_url,omitempty"`            // editor URL, when the backend provides one
+	LLM                string       `json:"llm"`                            // full spec (Overview shows it verbatim)
+	LLMName            string       `json:"llm_name"`                       // cheap display label, derived — never show it without llm reachable
 	// Configured at run creation; full picture of the run's persisted RunConfig
 	// so the Overview page can show "everything we know about this run" without
 	// needing extra round-trips.

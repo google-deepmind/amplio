@@ -57,7 +57,7 @@ const InflightKindReport = "report"
 // report always lands, regardless of length.
 //
 // The threshold exists to debounce trivial re-conclusions after the main-agent
-// is revived by a stray environment notification (see docs/session_lifecycle.md
+// is revived by a stray environment notification (see docs/internals/session_lifecycle.md
 // on Input-class events reviving `concluded` sessions). Such reactivations
 // typically add 1-3 steps of "nothing to do here" before the agent re-concludes,
 // which would otherwise produce a bad-grade report per reactivation.

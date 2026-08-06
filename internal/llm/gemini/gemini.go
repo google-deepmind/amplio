@@ -38,11 +38,17 @@ import (
 	"google.golang.org/genai"
 )
 
-// sigKey is the provider-namespaced ProviderExtra key holding per-tool-call
-// thought signatures: a []string of base64 blobs, index-aligned to the assistant
-// turn's tool calls. Replayed onto the FunctionCall parts so Gemini can resume
-// its chain of thought across tool turns.
-const sigKey = "gemini.fc_sigs_b64"
+// Provider-namespaced ProviderExtra keys for the thought signatures Gemini
+// returns, replayed on the next request so the model can resume its chain of
+// thought. The signature rides the LAST part of a turn, which is a tool call
+// when the model calls one and the text otherwise — hence two keys:
+//
+//	sigKey     []string of base64 blobs, index-aligned to the turn's tool calls
+//	textSigKey one base64 blob for the turn's text part
+const (
+	sigKey     = "gemini.fc_sigs_b64"
+	textSigKey = "gemini.text_sig_b64"
+)
 
 // maxAttempts is the total number of tries (1 initial + retries) for a
 // transient-failing generate call. The genai SDK does NOT retry content
@@ -377,7 +383,11 @@ func convertMessages(msgs []llm.Message) ([]*genai.Content, error) {
 			sigs := decodeSigs(m.ProviderExtra)
 			var parts []*genai.Part
 			if m.Content != "" {
-				parts = append(parts, &genai.Part{Text: m.Content})
+				text := &genai.Part{Text: m.Content}
+				if raw, err := base64.StdEncoding.DecodeString(decodeTextSig(m.ProviderExtra)); err == nil {
+					text.ThoughtSignature = raw
+				}
+				parts = append(parts, text)
 			}
 			for i, tc := range m.ToolCalls {
 				names[tc.ID] = tc.Name
@@ -466,6 +476,12 @@ func decodeSigs(extra map[string]any) []string {
 	return sigs
 }
 
+// decodeTextSig reads the text part's signature, "" when absent.
+func decodeTextSig(extra map[string]any) string {
+	s, _ := extra[textSigKey].(string)
+	return s
+}
+
 func synthID() string {
 	var b [6]byte
 	_, _ = rand.Read(b[:])
@@ -479,6 +495,7 @@ type respAcc struct {
 	thoughts strings.Builder
 	calls    []llm.ToolCall
 	sigs     []string // base64 per call, index-aligned to calls
+	textSig  string   // base64 signature carried by the turn's text part
 	usage    *genai.GenerateContentResponseUsageMetadata
 	finish   genai.FinishReason
 	anySig   bool
@@ -522,6 +539,11 @@ func (a *respAcc) add(resp *genai.GenerateContentResponse) {
 		case part.Text != "":
 			a.content.WriteString(part.Text)
 		}
+		// Streaming splits the text across chunks and signs only the last one,
+		// so keep the most recent signature seen outside a function call.
+		if part.FunctionCall == nil && len(part.ThoughtSignature) > 0 {
+			a.textSig = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+		}
 	}
 }
 
@@ -540,8 +562,14 @@ func (a *respAcc) response() *llm.Response {
 			CacheReadTokens:  int(a.usage.CachedContentTokenCount),
 		}
 	}
-	if a.anySig {
-		r.ProviderExtra = map[string]any{sigKey: a.sigs}
+	if a.anySig || a.textSig != "" {
+		r.ProviderExtra = map[string]any{}
+		if a.anySig {
+			r.ProviderExtra[sigKey] = a.sigs
+		}
+		if a.textSig != "" {
+			r.ProviderExtra[textSigKey] = a.textSig
+		}
 	}
 	return r
 }

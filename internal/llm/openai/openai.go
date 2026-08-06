@@ -100,7 +100,7 @@ type provider struct {
 }
 
 // New builds a provider for ANY OpenAI-compatible /v1/chat/completions endpoint.
-// See docs/llm.md for the spec grammar; args not in clientOnlyArgs are injected
+// See docs/guide/models.md for the spec grammar; args not in clientOnlyArgs are injected
 // into the request body via dotted paths (reasoning.effort=high →
 // {"reasoning":{"effort":"high"}}), mirroring the vertex-claude convention.
 func New(model string, maxTokens int, clientArgs, args url.Values) (llm.Provider, error) {

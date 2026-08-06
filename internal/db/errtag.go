@@ -260,6 +260,11 @@ func (t *taggedStore) SetLastPhasedStep(ctx context.Context, runID, sessionID st
 	return tag(t.s.SetLastPhasedStep(ctx, runID, sessionID, step))
 }
 
+func (t *taggedStore) ReportGrades(ctx context.Context, runIDs []string) (map[string][]ReportGrade, error) {
+	r, err := t.s.ReportGrades(ctx, runIDs)
+	return r, tag(err)
+}
+
 func (t *taggedStore) SumStepSummaryChars(ctx context.Context, runID, sessionID string, stepLowerExclusive, stepUpperInclusive int) (int, error) {
 	n, err := t.s.SumStepSummaryChars(ctx, runID, sessionID, stepLowerExclusive, stepUpperInclusive)
 	return n, tag(err)

@@ -28,7 +28,7 @@ func TestPromptsNoCorpIdentifiersOSS(t *testing.T) {
 	corp := []string{"xid/", "/cns/", "blaze", "fileutil"}
 	for _, prompt := range []struct{ name, text string }{
 		{"step", stepSystemPrompt()},
-		{"phase", phaseSystemPrompt()},
+		{"phase", phaseSystemPrompt(false)},
 		{"phase-schema", phaseSummarySchema()},
 	} {
 		for _, id := range corp {

@@ -261,7 +261,7 @@ func (a *EventLoopAgent) Run(ctx context.Context) error {
 }
 
 // reconcileResume performs one-shot crash recovery when entering an existing
-// (non-fresh) session, derived purely from DB state (see docs/step_model.md).
+// (non-fresh) session, derived purely from DB state (see docs/internals/step_model.md).
 // It returns handled=true if it finalized the session (the caller should
 // return). Otherwise it returns needsAdvance for the first loop iteration.
 func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRecord) (handled, needsAdvance bool, err error) {
@@ -708,7 +708,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		// land at the bumped step). The session is still ongoing, so ANY queued
 		// event counts here, Notice or Input alike: react to it rather than
 		// finishing. The Notice/Input distinction only gates whether a *dormant*
-		// session is revived (see docs/session_lifecycle.md) — an ongoing loop
+		// session is revived (see docs/internals/session_lifecycle.md) — an ongoing loop
 		// always processes what's queued. So e.g. a child_result(crashed) that
 		// lands as we're about to conclude pulls us back for one more turn to see
 		// it, which is intended.
@@ -720,7 +720,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		}
 
 		// A bare no-tool-call turn means "done for now". What it produces
-		// depends on the agent's nature (see docs/session_lifecycle.md).
+		// depends on the agent's nature (see docs/internals/session_lifecycle.md).
 		if !a.cfg.Interactive {
 			// Accidental-conclusion guard: an autonomous agent's final turn text IS
 			// its result, so an EMPTY message with no tool calls is almost always a

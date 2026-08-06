@@ -354,6 +354,10 @@
 			<dt>workspace</dt><dd class="mono">{detail.workspace || '—'}</dd>
 			<dt>model</dt><dd class="mono">{detail.llm || '—'}</dd>
 			<dt>agent type</dt><dd class="mono">{detail.agent_type || '—'}</dd>
+			{#if detail.briefings?.length}
+				<dt title="Prompt sections this run was started with">briefings</dt>
+				<dd class="mono">{detail.briefings.join(', ')}</dd>
+			{/if}
 			<dt>system (hq)</dt><dd class="mono">{detail.system_llm_hq || '—'}</dd>
 			<dt>system (fast)</dt><dd class="mono">{detail.system_llm_fast || '—'}</dd>
 			<dt>created</dt><dd class="mono">{formatLocalIso(detail.created_at)}</dd>

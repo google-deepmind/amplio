@@ -1063,6 +1063,45 @@ func (s *sqliteStore) SetLastPhasedStep(ctx context.Context, runID, sessionID st
 	return nil
 }
 
+// ReportGrades reads the grade out of each run_report observation with
+// json_extract rather than shipping the whole report (summary, phases,
+// artifacts) to Go just to read two integers out of it.
+func (s *sqliteStore) ReportGrades(ctx context.Context, runIDs []string) (map[string][]db.ReportGrade, error) {
+	if len(runIDs) == 0 {
+		return map[string][]db.ReportGrade{}, nil
+	}
+	// The id list travels as ONE json array parameter (json_each), not as a
+	// generated "?,?,?" cluster: the query text stays static, which keeps it
+	// obviously injection-free and out of gosec's G202.
+	ids, err := json.Marshal(runIDs)
+	if err != nil {
+		return nil, fmt.Errorf("report grades: %w", err)
+	}
+	rows, err := s.sqlDB.QueryContext(ctx, `
+		SELECT run_id,
+		       COALESCE(json_extract(data, '$.version'), 0),
+		       COALESCE(json_extract(data, '$.grade'), 0),
+		       created_at
+		FROM Observation
+		WHERE kind = 'run_report' AND run_id IN (SELECT value FROM json_each(?))
+		ORDER BY run_id, 2`, string(ids))
+	if err != nil {
+		return nil, fmt.Errorf("report grades: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	out := map[string][]db.ReportGrade{}
+	for rows.Next() {
+		var runID, createdAt string
+		var g db.ReportGrade
+		if err := rows.Scan(&runID, &g.Iteration, &g.Grade, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan report grade: %w", err)
+		}
+		g.CreatedAt = parseTime(createdAt)
+		out[runID] = append(out[runID], g)
+	}
+	return out, rows.Err()
+}
+
 func (s *sqliteStore) SumStepSummaryChars(ctx context.Context, runID, sessionID string, lo, hi int) (int, error) {
 	var sum sql.NullInt64
 	err := s.sqlDB.QueryRowContext(ctx,

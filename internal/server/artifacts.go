@@ -15,6 +15,7 @@
 package server
 
 import (
+	"errors"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -62,8 +63,12 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sub := cleanArtifactSub(r.URL.Query().Get("path"))
 
-	base := config.ArtifactDir(id) // creates the base
+	base := config.ArtifactDir(id)
 	root, err := os.OpenRoot(base)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeJSON(w, http.StatusOK, artifactListing{Path: sub, Entries: []artifactEntry{}})
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "open artifact dir: "+err.Error())
 		return
@@ -123,8 +128,12 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 // via os.Root, and capped at maxArtifactWalk entries.
 func (s *Server) handleArtifactsAll(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	base := config.ArtifactDir(id) // creates the base
+	base := config.ArtifactDir(id)
 	root, err := os.OpenRoot(base)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeJSON(w, http.StatusOK, []string{})
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "open artifact dir: "+err.Error())
 		return
@@ -173,6 +182,10 @@ func (s *Server) handleArtifactRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	root, err := os.OpenRoot(config.ArtifactDir(id))
+	if errors.Is(err, fs.ErrNotExist) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "open artifact dir: "+err.Error())
 		return

@@ -173,6 +173,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/recall/item", s.handleRecallItem)
 	mux.HandleFunc("GET /api/lessons", s.handleListLessons)
 	mux.HandleFunc("GET /api/about", s.handleAbout)
+	mux.HandleFunc("GET /api/briefings", s.handleListBriefings)
 	mux.HandleFunc("GET /api/runs/{id}/report", s.handleGetReport)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
 	mux.HandleFunc("GET /api/stream", s.handleGlobalStream)

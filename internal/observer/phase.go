@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"amplio/internal/agent"
 	"amplio/internal/db"
 	"amplio/internal/event"
 	"amplio/internal/llm"
@@ -42,17 +43,55 @@ const (
 	phaseCharHardCap = 800_000
 )
 
-// phaseSystemPrompt is built lazily (not a package var) so the artifact-identifier
-// vocabulary reflects any build-tag override applied in an init() — package-var
-// initializers run before init(), which would otherwise capture the OSS default.
-var phaseSystemPrompt = sync.OnceValue(func() string {
+// autonomousBoundaryClause and interactiveBoundaryClause define what ends a
+// phase, and are the only part of the phase prompt that differs by session kind.
+//
+// They differ because the transcripts differ. An autonomous run is one long arc
+// of work whose seams are activity shifts and milestones. An interactive session
+// is driven by an operator's requests, and those arrive constantly: taking each
+// completed request as a phase yields one phase per message, which tells a
+// reviewer nothing. So for interactive sessions the unit is the operator's
+// subject, not the request — a phase ends when their attention moves, not when a
+// task finishes.
+const (
+	autonomousBoundaryClause = "a distinct semantic transition: an activity shift (exploration → implementation → experiment → debugging), a milestone (a test passes, a script completes), or a hard pivot (abandoning a failing approach)"
+
+	interactiveBoundaryClause = "a macro-level shift in the user's overarching goal or domain of focus: a scope transition (moving between distinct subsystems, components, or functional modules), or a thematic pivot (shifting to a new hypothesis, analytical angle, or deliverable)"
+
+	boundaryClausePlaceholder = "__BOUNDARY_CLAUSE__"
+)
+
+// phaseSystemPrompt returns the phase-summarizer system prompt for one kind of
+// session. Interactive is a registered trait of the agent type (agent.Traits),
+// not a guess from the session id.
+func phaseSystemPrompt(interactive bool) string {
+	if interactive {
+		return phaseSystemPromptInteractive()
+	}
+	return phaseSystemPromptAutonomous()
+}
+
+var (
+	phaseSystemPromptAutonomous = sync.OnceValue(func() string {
+		return strings.Replace(phaseSystemPromptTemplate(), boundaryClausePlaceholder, autonomousBoundaryClause, 1)
+	})
+	phaseSystemPromptInteractive = sync.OnceValue(func() string {
+		return strings.Replace(phaseSystemPromptTemplate(), boundaryClausePlaceholder, interactiveBoundaryClause, 1)
+	})
+)
+
+// phaseSystemPromptTemplate is built lazily (not a package var) so the
+// artifact-identifier vocabulary reflects any build-tag override applied in an
+// init() — package-var initializers run before init(), which would otherwise
+// capture the OSS default. It still carries boundaryClausePlaceholder.
+var phaseSystemPromptTemplate = sync.OnceValue(func() string {
 	return `You are an expert AI behavior analyst producing a phase-level evaluation of an autonomous research agent's trajectory. You receive a chunk of raw execution events and the previous phase's summary for narrative context.
 
 Your output MUST be a valid JSON object matching the schema in the user prompt. Output no other text, markdown, or explanation outside the JSON object.
 
 Your objectives:
 
-1. FIND THE BOUNDARY. Identify the FIRST point in the chunk where the current coherent unit of work ends — a distinct semantic transition: an activity shift (exploration → implementation → experiment → debugging), a milestone (a test passes, a script completes), or a hard pivot (abandoning a failing approach). If the chunk is one continuous phase with no clear transition, set end_step to the final step in the chunk. end_step MUST be a step that exists in the events.
+1. FIND THE BOUNDARY. Identify the FIRST point in the chunk where the current coherent unit of work ends — __BOUNDARY_CLAUSE__. If the chunk is one continuous phase with no clear transition, set end_step to the final step in the chunk. end_step MUST be a step that exists in the events.
 
 2. EVALUATE PRODUCTIVITY & BEHAVIOR. Write a judgmental, analytical summary. Don't just narrate — assess how well the agent did: was it systematic and hypothesis-driven, or thrashing (blind guessing, repetitive debugging loops, ignoring errors, abandoning task prematurely, acknowleding gaps but not closing them)? What progress was made, what stalled? Ground every critique by citing specific step numbers, tool calls, error messages, or metric values from the events.
 
@@ -106,7 +145,7 @@ var phaseSummarySchema = sync.OnceValue(func() string {
 // so the caller still advances its cursor. end_step resolution: out-of-range LLM
 // values are clamped to the last step; force-close overrides to the last step
 // (no carryover).
-func summarizePhase(ctx context.Context, llmHQ llm.Provider, sessionID string, startStep int, prevSummary string, records []db.EventRecord, forceClose bool) (map[string]any, int) {
+func summarizePhase(ctx context.Context, llmHQ llm.Provider, sessionID string, startStep int, prevSummary string, records []db.EventRecord, forceClose, interactive bool) (map[string]any, int) {
 	maxStep := startStep
 	for _, r := range records {
 		if r.Step > maxStep {
@@ -114,7 +153,7 @@ func summarizePhase(ctx context.Context, llmHQ llm.Provider, sessionID string, s
 		}
 	}
 	resp, err := llmHQ.Call(ctx, llm.Request{
-		SystemPrompt: phaseSystemPrompt(),
+		SystemPrompt: phaseSystemPrompt(interactive),
 		Messages:     []llm.Message{{Role: llm.RoleUser, Content: buildPhaseUserPrompt(sessionID, startStep, prevSummary, records, forceClose)}},
 	})
 	if err != nil {
@@ -272,6 +311,8 @@ func (o *Observer) closePhases(ctx context.Context, key sessionKey) {
 	// Force-close the trailing phase once a session settles: the complement of
 	// the crash-recovery spine, minus idle (interactive parks there constantly).
 	forceClose := !db.IsSpine(*sess) && sess.Status != db.SessionIdle
+	// Which notion of a phase boundary applies — see the boundary clauses.
+	interactive := agent.IsInteractive(sess.AgentType)
 	watermark := sess.LastSummarizedStep
 	lastPhased := sess.LastPhasedStep
 
@@ -298,7 +339,7 @@ func (o *Observer) closePhases(ctx context.Context, key sessionKey) {
 		}
 		recs = truncateChunkToCap(recs, phaseCharHardCap)
 		prev := o.readPrevPhaseSummary(ctx, key, lastPhased)
-		payload, endStep := summarizePhase(ctx, o.llmHQ, key.sessionID, lastPhased+1, prev, recs, forceClose)
+		payload, endStep := summarizePhase(ctx, o.llmHQ, key.sessionID, lastPhased+1, prev, recs, forceClose, interactive)
 		es := endStep
 		if err := o.store.AppendObservation(ctx, db.ObservationRecord{
 			ObsID:     phaseSummaryObsID(key.sessionID, endStep),
