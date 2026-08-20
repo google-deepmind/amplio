@@ -27,6 +27,7 @@ import (
 )
 
 func TestServer_Notify(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 1)
 	ts := httptest.NewServer(srv.Handler())
@@ -72,6 +73,7 @@ func TestServer_Notify(t *testing.T) {
 // DB space, and every one of them is replayed into the model's context on the
 // next turn. Real floods reached 785 notices at a single step.
 func TestServer_NotifyFloodCap(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 1)
 	ts := httptest.NewServer(srv.Handler())

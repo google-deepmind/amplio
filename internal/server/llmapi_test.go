@@ -56,6 +56,7 @@ func post(t *testing.T, h http.Handler, path, token, body string) *httptest.Resp
 // every GET on the MAIN server is unauthenticated (the read-only share view), so
 // the port forwarded to a container must expose generations and nothing else.
 func TestLending_SurfaceIsOnlyLLM(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	h, _ := lending(t, srv, nil)
 
@@ -80,6 +81,7 @@ func TestLending_SurfaceIsOnlyLLM(t *testing.T) {
 }
 
 func TestLending_RequiresItsOwnToken(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	h, _ := lending(t, srv, nil)
 	// "secret" is the SERVER token in newTestServer: it must not open this door,
@@ -97,6 +99,7 @@ func TestLending_RequiresItsOwnToken(t *testing.T) {
 // TestLending_MenuIsTheAllowlist: a caller may ask for what the model picker
 // shows — config plus models added through the new-run form — and nothing else.
 func TestLending_MenuIsTheAllowlist(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	if err := store.AddCustomModel(context.Background(), "openai{base_url=http://localhost:4000/v1}:claude#proxy"); err != nil {
 		t.Fatal(err)
@@ -146,6 +149,7 @@ func TestLending_MenuIsTheAllowlist(t *testing.T) {
 }
 
 func TestLending_ListsModels(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	h, _ := lending(t, srv, nil)
 
@@ -174,6 +178,7 @@ func TestLending_ListsModels(t *testing.T) {
 }
 
 func TestLending_Embed(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 
 	// No embedder configured → the route is absent, rather than returning
@@ -243,6 +248,7 @@ func (stubEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, err
 // started spending their credentials, and on what — but not once per request.
 // A line per generation scales with the caller's traffic and buries the
 // server's own output; a local run logs nothing per call at all.
+// Not parallel: it swaps the process-wide slog default to capture output.
 func TestLending_AnnouncesEachModelOnce(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()

@@ -14,7 +14,7 @@
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.1",
 		"@sveltejs/adapter-static": "^3.0.10",
-		"@sveltejs/kit": "^2.70.1",
+		"@sveltejs/kit": "^2.70.2",
 		"@sveltejs/vite-plugin-svelte": "^7.0.0",
 		"@types/node": "^25.9.2",
 		"svelte": "^5.55.2",
@@ -23,7 +23,7 @@
 		"vite": "^8.0.7"
 	},
 	"dependencies": {
-		"dompurify": "^3.4.12",
+		"dompurify": "^3.4.13",
 		"highlight.js": "^11.11.1",
 		"marked": "^18.0.5",
 		"marked-highlight": "^2.2.4",

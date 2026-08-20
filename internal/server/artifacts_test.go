@@ -31,6 +31,7 @@ import (
 	"amplio/internal/config"
 )
 
+// Not parallel: config.SetDataDir pins the data dir for the whole process.
 func TestServer_Artifacts(t *testing.T) {
 	config.SetDataDir(t.TempDir())
 	t.Cleanup(func() { config.SetDataDir("") })

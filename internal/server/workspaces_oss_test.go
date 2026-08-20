@@ -23,12 +23,14 @@ import "testing"
 // into a failure at run start. Machine-independent by construction: no probe
 // can add a mode here.
 func TestExtraWorkspaceModes_NoneOffered(t *testing.T) {
+	t.Parallel()
 	if got := extraWorkspaceModes(); len(got) != 0 {
 		t.Errorf("extra workspace modes = %v, want none", got)
 	}
 }
 
 func TestWorkspaceRecentRoot_Unset(t *testing.T) {
+	t.Parallel()
 	if workspaceRecentRoot != "" {
 		t.Errorf("recent-workspace root = %q, want empty", workspaceRecentRoot)
 	}

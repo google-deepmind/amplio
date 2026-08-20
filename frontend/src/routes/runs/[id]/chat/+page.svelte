@@ -21,7 +21,7 @@
 	import { api, errorText } from '$lib/api';
 	import { getRunStore } from '$lib/runContext.svelte';
 	import { pageTitle } from '$lib/title';
-	import type { ChatBubble, PhaseCard, ChatUsage } from '$lib/types';
+	import type { ChatBubble, ChatFeed, PhaseCard, ChatUsage, SessionDTO } from '$lib/types';
 	import MessageBox from '$lib/components/MessageBox.svelte';
 	import { auth } from '$lib/auth.svelte';
 	import ChatMessages from '$lib/components/ChatMessages.svelte';
@@ -30,7 +30,7 @@
 	import { goto } from '$app/navigation';
 	import { renderMarkdown } from '$lib/markdown';
 	import { logHref } from '$lib/logView.svelte';
-	import { AndroidLogoIcon, FolderIcon, ScrollIcon } from 'phosphor-svelte';
+	import { AndroidLogoIcon, FolderIcon, PathIcon, ScrollIcon } from 'phosphor-svelte';
 	import { iconForName } from '$lib/sessionIcon';
 	import { toolIcon } from '$lib/toolIcon';
 
@@ -44,9 +44,56 @@
 	const unhealthy = $derived(chatbotSession?.status === 'crashed');
 	const step = $derived(chatbotSession?.current_step ?? 0);
 	const ACTIVE = new Set(['ongoing', 'awaiting']);
-	const activeSubagents = $derived(
-		(store.detail?.sessions ?? []).filter((s) => s.parent_id === chatbotSid && ACTIVE.has(s.status))
-	);
+	// The live subtree below this chatbot, not just its direct children: agents
+	// spawn agents that spawn agents, so a one-level list reports three sub-agents
+	// while a dozen are running.
+	// A node is kept if it is active itself OR leads to one. The second case is a
+	// crashed parent whose children were left running — conclude() cascade-cancels
+	// its children, recordFailure() deliberately does not — which is exactly the
+	// situation worth seeing, so those rows render normally and their own status
+	// pill says "crashed".
+	const liveTree = $derived.by(() => {
+		const kids = new Map<string, SessionDTO[]>();
+		for (const s of store.detail?.sessions ?? []) {
+			if (!s.parent_id) continue;
+			const list = kids.get(s.parent_id);
+			if (list) list.push(s);
+			else kids.set(s.parent_id, [s]);
+		}
+		const kept = new Map<string, SessionDTO[]>();
+		const seen = new Set<string>(); // a malformed parent cycle must not hang the UI
+		let live = 0;
+		let depth = 0;
+		const walk = (id: string, level: number): boolean => {
+			if (seen.has(id)) return false;
+			seen.add(id);
+			const out: SessionDTO[] = [];
+			for (const c of kids.get(id) ?? []) {
+				const leadsToLive = walk(c.session_id, level + 1);
+				const self = ACTIVE.has(c.status);
+				if (self) live++;
+				if (self || leadsToLive) {
+					out.push(c);
+					depth = Math.max(depth, level);
+				}
+			}
+			if (out.length) kept.set(id, out);
+			return out.length > 0;
+		};
+		if (chatbotSid) walk(chatbotSid, 1);
+		return { kept, live, depth };
+	});
+
+	// Indentation: levels 1-3 cost 12px each, deeper levels 4px, total capped at
+	// 64px. A normal two-or-three-level tree is indented exactly; a runaway nine
+	// deep still fits a 235px panel instead of being pushed off its right edge.
+	// Every level keeps its own offset, so no depth marker or tooltip is needed to
+	// recover what a hard clamp would have thrown away.
+	function indentAt(level: number): number {
+		if (level <= 0) return 0;
+		return Math.min(level <= 3 ? 12 * level : 36 + 4 * (level - 3), 64);
+	}
+	const indentStep = (level: number) => indentAt(level) - indentAt(level - 1);
 
 	let messages = $state<ChatBubble[]>([]);
 	let phaseCards = $state<PhaseCard[]>([]);
@@ -82,6 +129,43 @@
 		}
 	}
 
+	// previewFinalized: has the assistant's turn at `step` landed in the feed?
+	// Pure, so the rule can be reasoned about (and tested) without a DOM: either
+	// the committed message is visible, or it has already been rolled into a
+	// closed phase. step 0 means the preview never carried one — treat any
+	// chatbot message as the finalize, which is the old behaviour.
+	function previewFinalized(step: number, feed: ChatFeed): boolean {
+		if (step <= 0) return feed.messages.some((m) => m.kind === 'chatbot');
+		return (
+			feed.messages.some((m) => m.kind === 'chatbot' && m.step >= step) ||
+			feed.phase_cards.some((c) => c.end_step >= step)
+		);
+	}
+
+	// appendChunk folds a stream_chunk into the live preview. Every chunk of one
+	// LLM call carries that call's step, and each call is committed as its own
+	// chatbot message, so a step change means a new message has started.
+	function appendChunk(
+		prev: { text: string; thoughts: string; step: number } | null,
+		step: number,
+		textDelta: string,
+		thoughtsDelta: string
+	): { text: string; thoughts: string; step: number } {
+		// A chunk for a DIFFERENT step belongs to a different assistant message, so
+		// appending would merge two answers into one block — the new turn's thoughts
+		// tacked onto the old thinking block, its text run on below. That only
+		// happens when the previous preview was never retired (a cancelled turn, or
+		// a finalize we missed), and it is worth surviving rather than trusting.
+		// step 0 means the event carried none: treat it as the same turn.
+		const sameTurn = prev !== null && (step === 0 || prev.step === 0 || prev.step === step);
+		const base = sameTurn ? prev : { text: '', thoughts: '', step };
+		return {
+			text: base.text + textDelta,
+			thoughts: base.thoughts + thoughtsDelta,
+			step: step || base.step
+		};
+	}
+
 	async function load(sid: string) {
 		try {
 			const feed = await api.getChat(store.runId, sid);
@@ -89,15 +173,20 @@
 			// (fast session switch, or a session_bump racing the initial load).
 			if (sid !== chatbotSid) return;
 			// Clear the streaming preview ONLY when the assistant's own message has
-			// finalized — detected by a new chatbot message appearing in the feed —
-			// so the live bubble swaps seamlessly into the committed one. A refetch
-			// triggered by a PEER message (operator / sub-agent) arriving mid-stream
-			// must NOT wipe the preview: that peer message renders above (in
-			// `messages`) while the stream keeps accumulating below. Comparing
-			// chatbot-message counts (not just the tail) also handles a peer + a
-			// finalize landing in the same refetch.
-			const countChatbot = (ms: typeof messages) => ms.filter((m) => m.kind === 'chatbot').length;
-			const finalized = countChatbot(feed.messages) > countChatbot(messages);
+			// finalized, so the live text swaps seamlessly into the committed one. A
+			// refetch triggered by a PEER message (operator / sub-agent) arriving
+			// mid-stream must NOT wipe it: that peer renders above (in `messages`)
+			// while the stream keeps accumulating below.
+			//
+			// Ask whether the preview's OWN step is accounted for, rather than
+			// whether the feed grew. The live list is not monotonic: /chat rolls
+			// closed phases into cards and drops those steps from `messages`, so a
+			// phase closing mid-turn — likeliest during a long generation, which is
+			// exactly when it hurts — leaves FEWER messages than before and made a
+			// count comparison read "not finalized". The committed message then
+			// rendered above a preview that was never retired: the same text twice,
+			// until a reload.
+			const finalized = previewFinalized(preview?.step ?? 0, feed);
 			messages = feed.messages;
 			phaseCards = feed.phase_cards;
 			usage = feed.usage;
@@ -216,12 +305,19 @@
 		}
 	});
 
-	const SIDE_PANEL_MIN = 1100; // px; below this there's no room for the aside at all
+	// px; below this there's no room for the aside at all. Measured, not guessed:
+	// the conversation column has priority, so the panel gets width ~= viewport
+	// - 1062, and a worst-case sub-agent row (longest nickname + "awaiting" badge)
+	// needs ~240px before its status badge overflows. At the old 1100 the panel was
+	// 47px wide -- narrower than a session name -- so the aside appeared long
+	// before it could show anything. Below this the sub-agent count still shows in
+	// the status bar, which is the honest rendering at that width.
+	const SIDE_PANEL_MIN = 1320;
 	let viewportW = $state(typeof window !== 'undefined' ? window.innerWidth : 1400);
 	const panelMode = $derived(viewportW >= SIDE_PANEL_MIN);
 	// The aside renders when there's room AND something to show — either ambient
 	// content or the artifacts browser. Never shown just because it COULD be.
-	const asideVisible = $derived(panelMode && (activeSubagents.length > 0 || artifactsOpen));
+	const asideVisible = $derived(panelMode && (liveTree.live > 0 || artifactsOpen));
 
 	// Open an artifact file (from a $AMPLIO_ARTIFACT_DIR/ pill). Only makes sense
 	// with panel room; on a narrow viewport we send the operator to the full
@@ -319,12 +415,7 @@
 			if (ev.kind === 'session_bump') {
 				load(sid); // load() clears the preview once the real message is in
 			} else if (ev.kind === 'stream_chunk') {
-				const base = preview ?? { text: '', thoughts: '', step: ev.step ?? 0 };
-				preview = {
-					text: base.text + (ev.text_delta ?? ''),
-					thoughts: base.thoughts + (ev.thoughts_delta ?? ''),
-					step: ev.step ?? base.step
-				};
+				preview = appendChunk(preview, ev.step ?? 0, ev.text_delta ?? '', ev.thoughts_delta ?? '');
 				maybeScroll();
 			} else if (ev.kind === 'ephemeral_agents' && ev.ephemeral_kind === 'compaction') {
 				// Context compaction for THIS session (session_id == sid, gated above)
@@ -443,14 +534,36 @@
 		         there's no room for an aside at all) and in the aside's own footer
 		         once artifacts is open. -->
 		{#snippet subagentsRows()}
-			{#each activeSubagents as s (s.session_id)}
+			{@render subagentBranch(chatbotSid, 1)}
+		{/snippet}
+		<!-- Recursive: a branch renders its rows, then nests each row's own branch in
+		     a wrapper carrying that level's indent and guide line. Nesting (rather
+		     than a flat list with a computed padding) is what draws one rail per
+		     ancestor, which is what makes the 4px steps of a deep tree legible. -->
+		{#snippet subagentBranch(parentId: string, level: number)}
+			{#each liveTree.kept.get(parentId) ?? [] as s (s.session_id)}
 				{@const SubIcon = iconForName(s.session_id) ?? AndroidLogoIcon}
-				<a class="sa-row" href={`/runs/${store.runId}/sessions/${s.session_id}`}>
+				<a
+					class="sa-row"
+					href={`/runs/${store.runId}/sessions/${s.session_id}`}
+					title={level > 1 ? `spawned by ${parentId}` : undefined}
+				>
 					<SubIcon size={14} />
 					<span class="sa-name mono">{s.session_id}</span>
 					{#if s.task}<span class="sa-task dim small" title={s.task}>{s.task}</span>{/if}
 					<StatusBadge status={s.status} />
+					<!-- Step count: the icon form costs ~3 characters, which the row can
+					     afford where the word "step" could not. How far along a sub-agent
+					     is, is the second question after whether it is still running. -->
+					<span class="sa-step dim small" title="step {s.current_step}">
+						<PathIcon size={12} weight="bold" />{s.current_step}
+					</span>
 				</a>
+				{#if liveTree.kept.has(s.session_id)}
+					<div class="sa-kids" style="margin-left: {indentStep(level)}px">
+						{@render subagentBranch(s.session_id, level + 1)}
+					</div>
+				{/if}
 			{/each}
 		{/snippet}
 		<!-- `clickable`: only the aside's OWN footer (rendered while artifacts is
@@ -462,12 +575,12 @@
 			{#if clickable}
 				<button class="sa-compact-btn dim small" onclick={toggleArtifacts}>
 					<span class="dot working"></span>
-					<span>{activeSubagents.length} sub-agent{activeSubagents.length === 1 ? '' : 's'} active</span>
+					<span>{liveTree.live} sub-agent{liveTree.live === 1 ? '' : 's'} active</span>
 				</button>
 			{:else}
 				<span class="sa-compact dim small">
 					<span class="dot working"></span>
-					<span>{activeSubagents.length} sub-agent{activeSubagents.length === 1 ? '' : 's'} active</span>
+					<span>{liveTree.live} sub-agent{liveTree.live === 1 ? '' : 's'} active</span>
 				</span>
 			{/if}
 		{/snippet}
@@ -532,14 +645,14 @@
 				{#if compacting}
 					<span class="dot working"></span>
 					<span class="dim small">compacting context…</span>
-				{:else if working || activeSubagents.length > 0}
+				{:else if working || liveTree.live > 0}
 					<span class="dot working"></span>
 					<span class="dim small">working</span>
 					<!-- Only when the aside ISN'T showing sub-agent info (i.e. narrow
 					     viewports: on wide ones asideVisible is true whenever sub-agents are
 					     active, and the aside shows them as full rows or a compact footer).
 					     Prevents showing the count here AND in the aside simultaneously. -->
-					{#if activeSubagents.length > 0 && !asideVisible}
+					{#if liveTree.live > 0 && !asideVisible}
 						{@render subagentsCompact()}
 					{/if}
 				{:else if unhealthy}
@@ -592,8 +705,10 @@
 					{@render artifactsToggle(false)}
 				</header>
 				<div class="sp-body">
-					{#if activeSubagents.length > 0}
-						<div class="sp-ambient-head dim small">Sub-agents ({activeSubagents.length})</div>
+					{#if liveTree.live > 0}
+						<div class="sp-ambient-head dim small">
+							Sub-agents ({liveTree.live}{liveTree.depth > 1 ? ` \u00b7 ${liveTree.depth} levels` : ''})
+						</div>
 						<div class="sp-ambient-list">
 						{@render subagentsRows()}
 						</div>
@@ -612,7 +727,7 @@
 						toolbarEnd={artifactsHeaderToggle}
 					/>
 				</div>
-				{#if activeSubagents.length > 0}
+				{#if liveTree.live > 0}
 					<footer class="sp-footer">
 						{@render subagentsCompact(true)}
 					</footer>
@@ -755,6 +870,10 @@
 	   in both places. Task truncates via mask-fade (not clipped text), so
 	   hovering the row still surfaces the full string via title=. */
 	.sa-row {
+		/* A container so the step can drop out when the panel is narrow. The panel
+		   is flex: 1 1 0 — its width is whatever is left over, not a breakpoint — so
+		   a viewport media query would only be a guess at this row's width. */
+		container-type: inline-size;
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
@@ -771,9 +890,42 @@
 		color: var(--text-dim);
 	}
 	.sa-name {
-		flex-shrink: 0;
+		/* Shrinks only as a LAST resort: the task fade is flex: 1 1 0 so it gives up
+		   its width first, and the badge is fixed. Without this the worst case
+		   (deep indent + longest nickname + narrow panel) has no give left and the
+		   row overflows its own right edge. */
+		flex-shrink: 1;
+		min-width: 3rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 		font-size: var(--fs-sm);
 		font-weight: 500;
+	}
+	/* One rail per ancestor. The indent lives on the wrapper rather than as
+	   padding on the row so the rail is drawn once per level and the row keeps its
+	   full hover/click area. */
+	.sa-kids {
+		border-left: 1px solid var(--border);
+	}
+	/* Icon + number as one unit: a tighter gap than the row's own 0.4rem, so it
+	   reads as a single item rather than two. */
+	.sa-step {
+		flex-shrink: 0;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.2rem;
+		font-family: var(--mono);
+	}
+	/* Below this the step drops out: whether a sub-agent is still running beats
+	   how far along it is, and the row was already at capacity before the step
+	   existed. The number is the worst case measured, not the typical one — the
+	   longest nickname (breezy-dolphin, ~95px) + an "awaiting" badge + a 5-digit
+	   step + the icon and gaps needs ~276px before the task fade gets any width. */
+	@container (max-width: 290px) {
+		.sa-step {
+			display: none;
+		}
 	}
 	.sa-task {
 		flex: 1 1 0;

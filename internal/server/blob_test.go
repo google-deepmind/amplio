@@ -27,6 +27,7 @@ import (
 	"amplio/internal/config"
 )
 
+// Not parallel: config.SetDataDir pins the data dir for the whole process.
 func TestServer_Blob(t *testing.T) {
 	config.SetDataDir(t.TempDir())
 	srv, _, _ := newTestServer(t)

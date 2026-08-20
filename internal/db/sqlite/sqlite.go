@@ -108,7 +108,7 @@ func Open(path string) (db.Store, error) {
 	// database, so a concurrent read could hit an empty one. Pin to one
 	// connection so all reads/writes share the same in-memory DB. (File-backed
 	// DBs share the file across connections and keep WAL's read concurrency.)
-	if path == ":memory:" {
+	if path == memoryPath {
 		sqlDB.SetMaxOpenConns(1)
 	}
 	// WAL mode for concurrent reads during writes.
@@ -122,11 +122,7 @@ func Open(path string) (db.Store, error) {
 			return nil, fmt.Errorf("sqlite pragma %q: %w", pragma, err)
 		}
 	}
-	if _, err := sqlDB.Exec(schema); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("sqlite schema: %w", err)
-	}
-	if err := migrate(sqlDB); err != nil {
+	if err := initSchema(sqlDB, path); err != nil {
 		sqlDB.Close()
 		return nil, err
 	}

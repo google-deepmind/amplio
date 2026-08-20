@@ -59,10 +59,13 @@ var nouns = [...]string{
 	"vole",
 }
 
-// reservedAdj and reservedNoun are derived from the reserved nicknames.
+// reservedAdj and reservedNoun are derived from the reserved nicknames;
+// poolAdj and poolNoun are the components left for the dynamic pool.
 var (
 	reservedAdj  map[string]bool
 	reservedNoun map[string]bool
+	poolAdj      []string
+	poolNoun     []string
 )
 
 func init() {
@@ -74,12 +77,30 @@ func init() {
 		reservedAdj[parts[0]] = true
 		reservedNoun[parts[1]] = true
 	}
+	poolAdj = filter(adjectives[:], reservedAdj)
+	poolNoun = filter(nouns[:], reservedNoun)
+}
+
+func filter(words []string, drop map[string]bool) []string {
+	kept := make([]string, 0, len(words))
+	for _, w := range words {
+		if !drop[w] {
+			kept = append(kept, w)
+		}
+	}
+	return kept
 }
 
 const (
 	fallbackSuffixLen      = 3
 	fallbackMaxAttempts    = 8
 	fallbackSuffixAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+	// maxDraws bounds the rejection-sampling loop before PickUnique falls back to
+	// enumerating the pool. Draws only fail when the pool is nearly full, and 64
+	// of them cost ~1% of one enumeration: at 90% used the enumeration is reached
+	// on 0.9^64 ~ 1e-3 of calls, at 50% used essentially never.
+	maxDraws = 64
 )
 
 // PickUnique returns an adj-noun nickname not in used.
@@ -90,31 +111,28 @@ func PickUnique(used map[string]bool, rng *rand.Rand) string {
 		rng = rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())) //nolint:gosec // nicknames are not security-critical
 	}
 
-	// Build dynamic pool excluding reserved components.
-	var available []string
-	for _, a := range adjectives {
-		if reservedAdj[a] {
-			continue
-		}
-		for _, n := range nouns {
-			if reservedNoun[n] {
-				continue
-			}
-			name := a + "-" + n
-			if !used[name] {
-				available = append(available, name)
-			}
+	// Rejection sampling. Every draw is uniform over the whole adj x noun grid
+	// and is kept only if the name is free, so the accepted name is uniform over
+	// the free names (P(x) = sum_k q^k/G + q^maxDraws/m = 1/m for each of the m
+	// free names, where q is the per-draw rejection rate and G the grid size).
+	for range maxDraws {
+		name := poolAdj[rng.IntN(len(poolAdj))] + "-" + poolNoun[rng.IntN(len(poolNoun))]
+		if !used[name] {
+			return name
 		}
 	}
 
-	if len(available) > 0 {
+	// Enough collisions to suspect exhaustion: enumerate what is actually left.
+	// Only used names are ever rejected above, so no free name can be missed here,
+	// and picking uniformly from the same set keeps the overall draw unbiased.
+	if available := freeNames(used); len(available) > 0 {
 		return available[rng.IntN(len(available))]
 	}
 
 	// Pool exhausted — fallback to suffix mode.
 	for range fallbackMaxAttempts {
-		a := adjectives[rng.IntN(len(adjectives))]
-		n := nouns[rng.IntN(len(nouns))]
+		a := poolAdj[rng.IntN(len(poolAdj))]
+		n := poolNoun[rng.IntN(len(poolNoun))]
 		suffix := make([]byte, fallbackSuffixLen)
 		for i := range suffix {
 			suffix[i] = fallbackSuffixAlphabet[rng.IntN(len(fallbackSuffixAlphabet))]
@@ -129,6 +147,20 @@ func PickUnique(used map[string]bool, rng *rand.Rand) string {
 		"failed to allocate a unique fallback-suffix nickname after %d attempts",
 		fallbackMaxAttempts,
 	))
+}
+
+// freeNames returns every pool name not in used, in a fixed order.
+func freeNames(used map[string]bool) []string {
+	var available []string
+	for _, a := range poolAdj {
+		for _, n := range poolNoun {
+			// The lookup key stays on the stack; only kept names are materialised.
+			if !used[a+"-"+n] {
+				available = append(available, a+"-"+n)
+			}
+		}
+	}
+	return available
 }
 
 // IsReserved reports whether name is one of the reserved session IDs.

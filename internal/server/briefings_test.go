@@ -24,6 +24,7 @@ import (
 )
 
 func TestListBriefings(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	var got []struct{ Name, Description, Scope, Source string }
 	getJSON(t, srv.Handler(), "/api/briefings", &got)
@@ -45,6 +46,7 @@ func TestListBriefings(t *testing.T) {
 // A run carries exactly the briefings it asked for: opt-in, no server-side
 // default set to reconcile with.
 func TestStartRun_Briefings(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		body string
@@ -56,6 +58,7 @@ func TestStartRun_Briefings(t *testing.T) {
 		{"unknown dropped", `{"task":"t","workspace":".","briefings":["second-opinion","nope"]}`, []string{"second-opinion"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			srv, _, _ := newTestServer(t)
 			h := srv.Handler()
 			rec := httptest.NewRecorder()
@@ -84,6 +87,7 @@ func TestStartRun_Briefings(t *testing.T) {
 
 // Never null: Overview iterates it.
 func TestRunDetail_BriefingsAlwaysArray(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, "concluded", 1)
 	raw := getRaw(t, srv.Handler(), "/api/runs/"+testRun)

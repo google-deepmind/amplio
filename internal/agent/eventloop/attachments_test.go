@@ -83,7 +83,10 @@ func TestAttachmentNilStoreDegrades(t *testing.T) {
 // (and the ref) reflect the clamped dimensions — not the original.
 func TestStoreAttachmentClampsOversized(t *testing.T) {
 	a := newT(testCfg{BlobStore: blob.NewStore(t.TempDir())})
-	orig := pngBytes(t, 4000, 1000) // long edge 4000 > 2000 cap
+	// A sliver: storeAttachment's cap is imageutil.DefaultMaxDim (2000), so the
+	// input must really exceed 2000px, but only on one edge. 4000×16 is 250x
+	// cheaper to generate and resample than 4000×1000 and clamps the same way.
+	orig := pngBytes(t, 4000, 16) // long edge 4000 > 2000 cap
 
 	ref, ok := a.storeAttachment(event.Attachment{MimeType: "image/png", Data: orig, SourceHint: "big.png"})
 	if !ok {
@@ -105,15 +108,15 @@ func TestStoreAttachmentClampsOversized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode stored image: %v", err)
 	}
-	if cfg.Width != 2000 || cfg.Height != 500 {
-		t.Errorf("stored dims = %dx%d, want 2000x500 (clamped, aspect preserved)", cfg.Width, cfg.Height)
+	if cfg.Width != 2000 || cfg.Height != 8 {
+		t.Errorf("stored dims = %dx%d, want 2000x8 (clamped, aspect preserved)", cfg.Width, cfg.Height)
 	}
 }
 
 // An in-bounds image is stored byte-for-byte (no re-encode).
 func TestStoreAttachmentKeepsInBounds(t *testing.T) {
 	a := newT(testCfg{BlobStore: blob.NewStore(t.TempDir())})
-	orig := pngBytes(t, 800, 600)
+	orig := pngBytes(t, 80, 60)
 
 	ref, ok := a.storeAttachment(event.Attachment{MimeType: "image/png", Data: orig, SourceHint: "ok.png"})
 	if !ok {

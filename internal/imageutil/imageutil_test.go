@@ -24,6 +24,13 @@ import (
 	"testing"
 )
 
+// Fixtures are deliberately tiny. Clamp is scale-free — it compares each
+// dimension against maxDim and scales by their ratio — so a test that passes an
+// explicit maxDim hits exactly the same branch with a 400×100/maxDim=200 image
+// as with 4000×1000/maxDim=2000, at 1/100th the per-pixel cost (which under
+// -race dominated the whole test suite). Only TestClamp_DefaultMaxDim, which
+// can't choose maxDim, needs a real >2000px edge; it uses a 1px-thin sliver.
+
 // makeImage builds a w×h image with a simple gradient (so resampling has real
 // content to work on) and encodes it in the requested format.
 func makeImage(t *testing.T, w, h int, format string) []byte {
@@ -63,8 +70,8 @@ func dims(t *testing.T, data []byte) (int, int) {
 }
 
 func TestClamp_WithinBounds_ReturnsOriginal(t *testing.T) {
-	orig := makeImage(t, 800, 600, "png")
-	out, mime, resized, err := Clamp(orig, "image/png", 2000)
+	orig := makeImage(t, 80, 60, "png")
+	out, mime, resized, err := Clamp(orig, "image/png", 200)
 	if err != nil {
 		t.Fatalf("Clamp: %v", err)
 	}
@@ -81,8 +88,8 @@ func TestClamp_WithinBounds_ReturnsOriginal(t *testing.T) {
 }
 
 func TestClamp_OversizedWidth_Downscales(t *testing.T) {
-	orig := makeImage(t, 4000, 1000, "png")
-	out, mime, resized, err := Clamp(orig, "image/png", 2000)
+	orig := makeImage(t, 400, 100, "png")
+	out, mime, resized, err := Clamp(orig, "image/png", 200)
 	if err != nil {
 		t.Fatalf("Clamp: %v", err)
 	}
@@ -93,20 +100,20 @@ func TestClamp_OversizedWidth_Downscales(t *testing.T) {
 		t.Errorf("mime = %q, want image/png", mime)
 	}
 	w, h := dims(t, out)
-	if w != 2000 {
-		t.Errorf("width = %d, want 2000 (long edge clamped)", w)
+	if w != 200 {
+		t.Errorf("width = %d, want 200 (long edge clamped)", w)
 	}
-	// Aspect ratio 4:1 preserved => height 500.
-	if h != 500 {
-		t.Errorf("height = %d, want 500 (aspect preserved)", h)
+	// Aspect ratio 4:1 preserved => height 50.
+	if h != 50 {
+		t.Errorf("height = %d, want 50 (aspect preserved)", h)
 	}
 }
 
 func TestClamp_OversizedHeight_Downscales(t *testing.T) {
 	// A tall screenshot: small bytes, big pixel height — the exact case that
 	// sails past a byte-size cap but is rejected by the provider.
-	orig := makeImage(t, 1000, 5000, "png")
-	out, _, resized, err := Clamp(orig, "image/png", 2000)
+	orig := makeImage(t, 100, 500, "png")
+	out, _, resized, err := Clamp(orig, "image/png", 200)
 	if err != nil {
 		t.Fatalf("Clamp: %v", err)
 	}
@@ -114,18 +121,18 @@ func TestClamp_OversizedHeight_Downscales(t *testing.T) {
 		t.Fatal("resized = false, want true")
 	}
 	w, h := dims(t, out)
-	if h != 2000 {
-		t.Errorf("height = %d, want 2000 (long edge clamped)", h)
+	if h != 200 {
+		t.Errorf("height = %d, want 200 (long edge clamped)", h)
 	}
-	// 1000:5000 = 1:5 preserved => width 400.
-	if w != 400 {
-		t.Errorf("width = %d, want 400 (aspect preserved)", w)
+	// 100:500 = 1:5 preserved => width 40.
+	if w != 40 {
+		t.Errorf("width = %d, want 40 (aspect preserved)", w)
 	}
 }
 
 func TestClamp_JPEGStaysJPEG(t *testing.T) {
-	orig := makeImage(t, 3000, 3000, "jpeg")
-	out, mime, resized, err := Clamp(orig, "image/jpeg", 2000)
+	orig := makeImage(t, 300, 300, "jpeg")
+	out, mime, resized, err := Clamp(orig, "image/jpeg", 200)
 	if err != nil {
 		t.Fatalf("Clamp: %v", err)
 	}
@@ -136,8 +143,8 @@ func TestClamp_JPEGStaysJPEG(t *testing.T) {
 		t.Errorf("mime = %q, want image/jpeg (JPEG should stay JPEG)", mime)
 	}
 	w, h := dims(t, out)
-	if w != 2000 || h != 2000 {
-		t.Errorf("dims = %dx%d, want 2000x2000", w, h)
+	if w != 200 || h != 200 {
+		t.Errorf("dims = %dx%d, want 200x200", w, h)
 	}
 	// Confirm the output really decodes as JPEG.
 	_, format, err := image.Decode(bytes.NewReader(out))
@@ -151,9 +158,9 @@ func TestClamp_JPEGStaysJPEG(t *testing.T) {
 
 func TestClamp_GIFReencodedToPNG(t *testing.T) {
 	// Keep GIF dimensions modest: GIF encoding does palette quantization, which
-	// is slow on large gradients. maxDim=100 still exercises the oversize path.
-	orig := makeImage(t, 300, 200, "gif")
-	out, mime, resized, err := Clamp(orig, "image/gif", 100)
+	// is slow on large gradients. maxDim=30 still exercises the oversize path.
+	orig := makeImage(t, 90, 60, "gif")
+	out, mime, resized, err := Clamp(orig, "image/gif", 30)
 	if err != nil {
 		t.Fatalf("Clamp: %v", err)
 	}
@@ -173,23 +180,27 @@ func TestClamp_GIFReencodedToPNG(t *testing.T) {
 }
 
 func TestClamp_DefaultMaxDim(t *testing.T) {
-	orig := makeImage(t, 2500, 2500, "png")
+	// The only case that must genuinely exceed DefaultMaxDim, so it uses the
+	// cheapest shape that does: a sliver one pixel over the limit on one edge
+	// (16k pixels instead of 2500² = 6.3M). 8*2000/2001 = 7.996 also makes the
+	// aspect-ratio truncation observable end-to-end.
+	orig := makeImage(t, 2001, 8, "png")
 	out, _, resized, err := Clamp(orig, "image/png", 0) // 0 => DefaultMaxDim
 	if err != nil {
 		t.Fatalf("Clamp: %v", err)
 	}
 	if !resized {
-		t.Fatal("resized = false, want true (2500 > DefaultMaxDim)")
+		t.Fatal("resized = false, want true (2001 > DefaultMaxDim)")
 	}
 	w, h := dims(t, out)
-	if w != DefaultMaxDim || h != DefaultMaxDim {
-		t.Errorf("dims = %dx%d, want %dx%[3]d", w, h, DefaultMaxDim)
+	if w != DefaultMaxDim || h != 7 {
+		t.Errorf("dims = %dx%d, want %dx7", w, h, DefaultMaxDim)
 	}
 }
 
 func TestClamp_ExactlyAtLimit_NotResized(t *testing.T) {
-	orig := makeImage(t, 2000, 2000, "png")
-	out, _, resized, err := Clamp(orig, "image/png", 2000)
+	orig := makeImage(t, 200, 200, "png")
+	out, _, resized, err := Clamp(orig, "image/png", 200)
 	if err != nil {
 		t.Fatalf("Clamp: %v", err)
 	}
@@ -228,6 +239,10 @@ func TestScaledDims(t *testing.T) {
 		{3000, 3000, 2000, 2000, 2000}, // square
 		{10000, 100, 2000, 2000, 20},   // extreme landscape
 		{100, 10000, 2000, 20, 2000},   // extreme portrait
+		{2001, 8, 2000, 2000, 7},       // truncation: 8*2000/2001 = 7.996 -> 7
+		{8, 2001, 2000, 7, 2000},       // truncation, portrait
+		{10000, 4, 2000, 2000, 1},      // would round to 0; floored at 1px
+		{4, 10000, 2000, 1, 2000},      // ditto, portrait
 		{0, 0, 2000, 1, 1},             // degenerate
 	}
 	for _, c := range cases {

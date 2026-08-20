@@ -36,6 +36,7 @@
 		ArrowClockwiseIcon,
 		ArrowSquareOutIcon,
 		TagIcon,
+		PathIcon,
 		CopyIcon,
 		TrashIcon
 	} from 'phosphor-svelte';
@@ -413,8 +414,15 @@
 
 	<StatusBadge status={run.root_status} />
 
-	<span class="meta dim" title={new Date(lastChange).toLocaleString()}>
-		step {run.root_step} · {timeAgo(lastChange)}
+	<!-- The step count is labelled by a Path icon rather than the word "step":
+	     the card is a glance target and the row is width-constrained. The title
+	     spells it out, since an icon alone is not self-describing. -->
+	<span
+		class="meta dim"
+		title="step {run.root_step} · {new Date(lastChange).toLocaleString()}"
+	>
+		<PathIcon size={12} weight="bold" />
+		{run.root_step} · {timeAgo(lastChange)}
 	</span>
 
 	<!--
@@ -730,6 +738,11 @@
 		font-size: var(--fs-sm);
 		font-family: var(--mono);
 		white-space: nowrap;
+	}
+	/* Nudge the step icon onto the text baseline (.meta is inline text, not a
+	   flex row). :global() because the <svg> comes from phosphor-svelte. */
+	.meta > :global(svg) {
+		vertical-align: -0.15em;
 	}
 	.iconbtn {
 		flex-shrink: 0;

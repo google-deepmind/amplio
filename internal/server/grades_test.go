@@ -45,6 +45,7 @@ func writeReport(t *testing.T, store db.Store, runID string, iteration, grade in
 // The grade series and the artifact dir must reach both DTOs: they are what lets
 // a manager on another instance find a run's output and judge its iterations.
 func TestRunDTOs_GradesAndArtifactDir(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	h := srv.Handler()
 	ctx := context.Background()

@@ -125,6 +125,20 @@ func testSetup(t *testing.T, runCfg ...config.RunConfig) (db.Store, string, *ses
 	return store, runID, registry
 }
 
+// waitFor polls until cond holds, or fails the test after 2s. Preferred over a
+// fixed sleep: it returns as soon as the agent has done its work.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
 // waitForIdle polls until the session reaches idle status or fails.
 func waitForIdle(t *testing.T, store db.Store, runID, sessionID string) {
 	t.Helper()
@@ -672,7 +686,13 @@ func TestEventLoop_ParkThenWake(t *testing.T) {
 	_, _ = store.AppendEvent(ctx, runID, "main-agent",
 		&event.UserEvent{Content: "Do something else"})
 
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the wake-run-park cycle rather than sleeping a fixed 500ms. Back
+	// at idle the loop is parked, so a further LLM call would need a new input
+	// event — the exact-count assertion below still catches a spurious one.
+	waitFor(t, "follow-up turn to finish and re-park", func() bool {
+		s, _ := store.GetSession(ctx, runID, "main-agent")
+		return mock.CallCount() >= 2 && s != nil && s.Status == db.SessionIdle
+	})
 	sess, _ := store.GetSession(ctx, runID, "main-agent")
 	if sess.Status != db.SessionIdle {
 		t.Errorf("after follow-up: status %q, want idle", sess.Status)
@@ -771,10 +791,16 @@ func TestEventLoop_ChatbotNoTask(t *testing.T) {
 	go func() { done <- ag.Run(ctx) }()
 
 	waitForIdle(t, store, runID, "chatty-bot")
+	callsBefore := mock.CallCount()
 	_, _ = store.AppendEvent(ctx, runID, "chatty-bot",
 		&event.UserEvent{Content: "What's for lunch?"})
 
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the reply turn instead of sleeping a fixed 500ms: the session is
+	// idle both before and after, so the call count is what marks progress.
+	waitFor(t, "reply to the first user message", func() bool {
+		s, _ := store.GetSession(ctx, runID, "chatty-bot")
+		return mock.CallCount() > callsBefore && s != nil && s.Status == db.SessionIdle
+	})
 	sess, _ := store.GetSession(ctx, runID, "chatty-bot")
 	if sess.Status != db.SessionIdle {
 		t.Errorf("status: %q, want idle", sess.Status)

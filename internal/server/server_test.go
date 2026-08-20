@@ -48,6 +48,11 @@ import (
 
 const testRun = "r1"
 
+// Tests in this package run in parallel: newTestServer gives each one its own
+// store, bus and Server, so the only thing they share is process state. The few
+// that mutate it (t.Setenv, config.SetDataDir, slog.SetDefault) stay serial —
+// testing runs every non-parallel test to completion before resuming the
+// parallel ones, which is what keeps those two groups from overlapping.
 func newTestServer(t *testing.T) (*Server, *eventstream.Bus, db.Store) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -105,6 +110,7 @@ func doReq(t *testing.T, method, url, body string) (int, []byte) {
 }
 
 func TestServer_Auth(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 0)
 	ts := httptest.NewServer(srv.Handler())
@@ -148,6 +154,7 @@ func TestServer_Auth(t *testing.T) {
 // cookie that then authorizes writes on its own (no token in the URL) — the
 // basis for stripping the token and sharing token-less readonly links.
 func TestServer_AuthCookieLogin(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 0)
 	ts := httptest.NewServer(srv.Handler())
@@ -202,6 +209,7 @@ func TestServer_AuthCookieLogin(t *testing.T) {
 }
 
 func TestServer_ListAndGetRun(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 3)
 	ts := httptest.NewServer(srv.Handler())
@@ -231,6 +239,7 @@ func TestServer_ListAndGetRun(t *testing.T) {
 }
 
 func TestServer_ListRuns_Pagination(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	// Three runs with strictly increasing created_at, so the newest-first keyset
@@ -280,6 +289,7 @@ func TestServer_ListRuns_Pagination(t *testing.T) {
 // The server threads the ?q= / ?starred= / ?grade= query params into the store
 // filter, so they compose (AND) and paginate server-side.
 func TestServer_ListRuns_SearchAndFilters(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -332,6 +342,7 @@ func TestServer_ListRuns_SearchAndFilters(t *testing.T) {
 }
 
 func TestServer_RunCountsAndFilterAndSeen(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -392,6 +403,7 @@ func TestServer_RunCountsAndFilterAndSeen(t *testing.T) {
 	}
 }
 func TestServer_UpdateRun(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 0)
 	ts := httptest.NewServer(srv.Handler())
@@ -472,6 +484,7 @@ func TestServer_UpdateRun(t *testing.T) {
 }
 
 func TestServer_Models(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -549,6 +562,7 @@ func TestServer_Models(t *testing.T) {
 }
 
 func TestServer_StartInteractiveRun(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -584,6 +598,7 @@ func TestServer_StartInteractiveRun(t *testing.T) {
 }
 
 func TestServer_StartChatbotSidecar(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 1) // autonomous run with an active main-agent
 	ts := httptest.NewServer(srv.Handler())
@@ -625,6 +640,7 @@ func TestServer_StartChatbotSidecar(t *testing.T) {
 }
 
 func TestServer_Trajectory(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
@@ -742,6 +758,7 @@ func waitForSession(t *testing.T, store db.Store, sid string) {
 }
 
 func TestServer_ChatProjection(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
@@ -828,6 +845,7 @@ func TestServer_ChatProjection(t *testing.T) {
 // boundary rollup), with no cards and no usage. It also works on a non-chatbot
 // session — an autonomous agent's turns project identically.
 func TestServer_ChatProjection_Ranged(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
@@ -911,6 +929,7 @@ func TestServer_ChatProjection_Ranged(t *testing.T) {
 }
 
 func TestServer_ChatProjection_InboundMessages(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
@@ -956,6 +975,7 @@ func TestServer_ChatProjection_InboundMessages(t *testing.T) {
 // A sub-agent's terminal result (ChildResultEvent, posted back to the parent
 // chatbot's stream) surfaces as a child_result bubble carrying the verdict.
 func TestServer_ChatProjection_ChildResult(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
@@ -997,6 +1017,7 @@ func TestServer_ChatProjection_ChildResult(t *testing.T) {
 }
 
 func TestServer_ChatProjection_Compaction(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
@@ -1053,6 +1074,7 @@ func TestServer_ChatProjection_Compaction(t *testing.T) {
 	}
 }
 func TestServer_EventsAndObservations(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	seedRun(t, store, db.SessionConcluded, 1)
@@ -1091,6 +1113,7 @@ func TestServer_EventsAndObservations(t *testing.T) {
 // from_step/to_step fetch an inclusive step RANGE in one request (the log
 // viewer's "expand all" over a phase). An explicit step=N still wins.
 func TestServer_EventsStepRange(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
@@ -1147,6 +1170,7 @@ func TestServer_EventsStepRange(t *testing.T) {
 }
 
 func TestServer_StartRunValidation(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -1156,6 +1180,7 @@ func TestServer_StartRunValidation(t *testing.T) {
 }
 
 func TestServer_SendMessageAndCancel(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionIdle, 1)
 	ts := httptest.NewServer(srv.Handler())
@@ -1201,6 +1226,7 @@ func TestServer_SendMessageAndCancel(t *testing.T) {
 }
 
 func TestServer_DeleteRun(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	seedRun(t, store, db.SessionConcluded, 2)
 	ctx := context.Background()
@@ -1260,6 +1286,7 @@ func TestServer_DeleteRun(t *testing.T) {
 }
 
 func TestServer_About(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -1287,6 +1314,7 @@ func TestServer_About(t *testing.T) {
 }
 
 func TestServer_TestLLM(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -1331,6 +1359,7 @@ func TestServer_TestLLM(t *testing.T) {
 }
 
 func TestServer_SuggestFollowup(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -1375,6 +1404,7 @@ func TestServer_SuggestFollowup(t *testing.T) {
 }
 
 func TestServer_SSE(t *testing.T) {
+	t.Parallel()
 	srv, bus, store := newTestServer(t)
 	seedRun(t, store, db.SessionOngoing, 0)
 	ts := httptest.NewServer(srv.Handler())
@@ -1400,6 +1430,7 @@ func TestServer_SSE(t *testing.T) {
 }
 
 func TestServer_StaticSPA(t *testing.T) {
+	t.Parallel()
 	if _, built := clientFS(); !built {
 		t.Skip("frontend not built (run: make frontend-build)")
 	}
@@ -1424,6 +1455,7 @@ func TestServer_StaticSPA(t *testing.T) {
 }
 
 func TestRecallEndpoints(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	emb := embed.Mock{Dim: 4096}
@@ -1497,6 +1529,7 @@ func TestRecallEndpoints(t *testing.T) {
 }
 
 func TestGetReportEndpoint(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	if err := store.CreateRun(ctx, db.RunRecord{RunID: "r1"}); err != nil {
@@ -1525,6 +1558,7 @@ func TestGetReportEndpoint(t *testing.T) {
 }
 
 func TestGenerateReportEndpoint(t *testing.T) {
+	t.Parallel()
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -1575,6 +1609,7 @@ func TestGenerateReportEndpoint(t *testing.T) {
 // (trivial_gap) — without the second, a silent finalizer skip would leave the
 // frontend showing an eternal "Generating…" spinner.
 func TestGetRun_ReportCoverage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// Helper: seed the given autonomous run at `currentStep` and, when >0, a
@@ -1632,6 +1667,7 @@ func TestGetRun_ReportCoverage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			srv, _, store := newTestServer(t)
 			seed(t, store, tc.currentStep, tc.reportStep)
 			ts := httptest.NewServer(srv.Handler())
@@ -1654,6 +1690,7 @@ func TestGetRun_ReportCoverage(t *testing.T) {
 	// Chat run (no main-agent session): coverage is empty — UI treats it as
 	// not-applicable, and Generate stays always-available.
 	t.Run("chat_run_no_main_agent", func(t *testing.T) {
+		t.Parallel()
 		srv, _, store := newTestServer(t)
 		if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
 			t.Fatal(err)
@@ -1695,6 +1732,7 @@ func nextSSE(t *testing.T, sc *bufio.Scanner) eventstream.RunEvent {
 // so "mark as unread" is a PATCH like any other — and it has to actually restore
 // the badge, which is the half a "don't clear it" implementation would miss.
 func TestPatchRun_SeenBothDirections(t *testing.T) {
+	t.Parallel()
 	srv, _, store := newTestServer(t)
 	ctx := context.Background()
 	seedRun(t, store, db.SessionOngoing, 3)

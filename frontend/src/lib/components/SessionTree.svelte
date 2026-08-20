@@ -18,7 +18,7 @@
 	import type { SessionDTO } from '$lib/types';
 	import { timeAgo } from '$lib/time';
 	import StatusBadge from './StatusBadge.svelte';
-	import { AndroidLogoIcon, ChatTeardropIcon, LinkIcon } from 'phosphor-svelte';
+	import { AndroidLogoIcon, ChatTeardropIcon, LinkIcon, PathIcon } from 'phosphor-svelte';
 	import { iconForName } from '$lib/sessionIcon';
 
 	// One row per session, echoing the run card's visual language (identity icon
@@ -113,11 +113,23 @@
 				</span>
 			{/if}
 			<StatusBadge status={s.status} />
-			{#if !compact}
-				<span class="meta dim" title={new Date(s.status_changed_at).toLocaleString()}>
-					step {s.current_step} · {timeAgo(s.status_changed_at)}
-				</span>
-			{/if}
+			<!-- Icon instead of the word "step", matching RunCard: the same value in the
+			     same visual language. Both densities show it — the selector is a
+			     full-width strip, so the three characters fit there too — but only the
+			     card variant has room for the relative time beside it. In the selector
+			     the row's own title already spells out "step N", so the span doesn't
+			     repeat it. -->
+			<span
+				class="meta dim"
+				title={compact
+					? undefined
+					: `step ${s.current_step} · ${new Date(s.status_changed_at).toLocaleString()}`}
+			>
+				<PathIcon size={12} weight="bold" />
+				{s.current_step}{#if !compact}
+					· {timeAgo(s.status_changed_at)}
+				{/if}
+			</span>
 		</a>
 		{#each childrenOf(s.session_id) as c (c.session_id)}
 			<div class="child">{@render node(c)}</div>
@@ -235,6 +247,11 @@
 		font-size: var(--fs-sm);
 		font-family: var(--mono);
 		white-space: nowrap;
+	}
+	/* Nudge the step icon onto the text baseline (.meta is inline text, not a
+	   flex row). :global() because the <svg> comes from phosphor-svelte. */
+	.meta > :global(svg) {
+		vertical-align: -0.15em;
 	}
 	/* Sub-agent nesting: indent + a connector rail, as before. */
 	.child {

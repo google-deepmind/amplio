@@ -22,6 +22,7 @@ import (
 )
 
 func TestListRecentWorkspaces(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	// Create dirs with explicit, increasing mtimes; expect MRU-first order.
 	base := time.Now()
@@ -53,12 +54,14 @@ func TestListRecentWorkspaces(t *testing.T) {
 }
 
 func TestListRecentWorkspacesMissingDir(t *testing.T) {
+	t.Parallel()
 	if got := listRecentWorkspaces(filepath.Join(t.TempDir(), "nope")); got != nil {
 		t.Errorf("expected nil for missing dir, got %v", got)
 	}
 }
 
 func TestListRecentWorkspacesCap(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	for i := 0; i < recentWorkspacesLimit+10; i++ {
 		if err := os.Mkdir(filepath.Join(root, string(rune('a'+i%26))+"-"+itoa(i)), 0o755); err != nil {
