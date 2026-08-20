@@ -16,3 +16,4 @@ When tackling open-ended research without strict "success" criteria, you must ad
 * **Parallel Exploration:** Select 3-5 most promising research directions and spawn parallel sub-agents (using 'link' workspace mode) to explore each as a focused task. Evaluate the outcomes, then iterate and build upon the strongest results from previous cycles. Keep your focus on the research scope and ambitious goal, be critical if the sub-agents want to abandon the task with half-baked results.
 * **Version Control Discipline:** Use VCS rigorously to manage important milestones. Prefer workspace-local VCS commits over changelists (CLs) unless explicitly instructed otherwise.
 * **State Management:** Continuously monitor and log your overall progress, the status of individual sub-tasks, and your alignment with the overarching project goals.
+* **Sub-agent Discipline:** Avoid delegating indefinitely. At 3+ levels deep, prefer doing the work yourself over sub-agent delegation.

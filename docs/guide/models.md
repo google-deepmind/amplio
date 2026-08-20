@@ -27,7 +27,7 @@ looks at it.
 ```
 vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive
 openai{base_url=http://localhost:4000/v1&profile=litellm}:claude?reasoning.effort=high
-vertex-gemini:gemini-3.5-flash?thinking_budget=2048          # no client args, no block
+vertex-gemini:gemini-3.7-flash?thinking_level=high
 ```
 
 A provider with nothing to configure needs no block, which is why most specs
@@ -99,12 +99,12 @@ an unknown key fails fast at construction:
 
 | arg                | maps to                          |
 | ------------------ | -------------------------------- |
-| `thinking_budget`  | `ThinkingConfig.ThinkingBudget` (int; `0` disables where supported, `-1` dynamic) |
+| `thinking_level`   | `ThinkingConfig.ThinkingLevel` (`minimal`, `low`, `medium`, `high`; unset = the model's own default) |
 | `include_thoughts` | `ThinkingConfig.IncludeThoughts` (bool; default `true`) |
 | `temperature`      | `GenerateContentConfig.Temperature` (float) |
 
 ```
-vertex-gemini:gemini-3.5-flash?thinking_budget=2048&include_thoughts=true
+vertex-gemini:gemini-3.7-flash?thinking_level=low&include_thoughts=true
 ```
 
 ## Verified configurations
@@ -117,8 +117,10 @@ Tested live (Vertex), single-turn **and** multi-turn with tool calls:
 | `vertex-claude:claude-opus-4-7?thinking.type=adaptive&output_config.effort=high` | adaptive + effort |
 | `vertex-claude:claude-opus-4-6?thinking.type=enabled&thinking.budget_tokens=2048` | enabled + budget |
 | `vertex-claude:claude-sonnet-4-6?thinking.type=enabled&thinking.budget_tokens=2048` | enabled + budget |
-| `vertex-gemini:gemini-3.5-flash?thinking_budget=2048&include_thoughts=true`    | budget |
-| `vertex-gemini:gemini-3.1-pro-preview?thinking_budget=2048&include_thoughts=true` | budget |
+| `vertex-gemini:gemini-3.7-flash?thinking_level=low`                            | level |
+| `vertex-gemini:gemini-3.7-flash?thinking_level=high`                           | level |
+| `vertex-gemini:gemini-3.6-flash?thinking_level=medium`                         | level |
+| `vertex-gemini:gemini-3.1-pro-preview?thinking_level=high`                     | level |
 
 ## OpenAI-compatible endpoints (`openai:`)
 
@@ -272,13 +274,13 @@ protocol is the same for `bridge` and `subprocess` modes.
 
 ```toml
 system_llm_hq   = "vertex-claude:claude-opus-4-8?thinking.type=adaptive&output_config.effort=high"
-system_llm_fast = "vertex-gemini:gemini-3.5-flash?thinking_budget=0"   # 0 = no thinking (fast)
+system_llm_fast = "vertex-gemini:gemini-3.5-flash?thinking_level=minimal"  # least thinking = fastest
 
 [run]
 llms = [
   "vertex-claude{cache_ttl=1h}:claude-opus-4-8?thinking.type=adaptive&output_config.effort=high",
   "vertex-claude:claude-opus-4-6?thinking.type=enabled&thinking.budget_tokens=4096",
-  "vertex-gemini:gemini-3.1-pro-preview?thinking_budget=4096",
+  "vertex-gemini:gemini-3.1-pro-preview?thinking_level=high",
 ]
 ```
 

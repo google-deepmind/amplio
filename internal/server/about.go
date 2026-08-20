@@ -18,6 +18,7 @@ import (
 	"amplio/internal/llm"
 	"encoding/json"
 	"net/http"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -52,6 +53,9 @@ type aboutInfo struct {
 	Modified  bool   `json:"modified"`             // built from a dirty worktree
 	BuildTime string `json:"build_time,omitempty"` // commit time, RFC3339, "" when unavailable
 	GoVersion string `json:"go_version"`
+	// Platform is the SERVER's GOOS. The browser's OS is irrelevant: features
+	// that read /proc depend on where the agents run, not where they're watched.
+	Platform string `json:"platform"`
 
 	// On-disk layout (the data dir powering THIS server, + its children).
 	DataDir    string `json:"data_dir"`
@@ -88,6 +92,7 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 		Modified:      b.Modified,
 		BuildTime:     buildTime,
 		GoVersion:     b.GoVersion,
+		Platform:      goruntime.GOOS,
 		DataDir:       config.DataDir(),
 		ConfigPath:    config.ConfigPath(config.DataDir()),
 		LogsDir:       config.LogsDir(),

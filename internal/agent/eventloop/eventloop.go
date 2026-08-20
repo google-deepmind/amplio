@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -429,6 +430,30 @@ func hasAssistantAtStep(events []db.EventRecord, step int) bool {
 // bootstrap creates the session, seeds step-0 events, and advances to step 1.
 // After bootstrap, current_step=1 so that messages arriving during park
 // land at step 1 (compactible), not step 0 (permanent bootstrap).
+
+// ancestry lists this session's forebears, root first, excluding itself. Empty
+// for a run's own root agent.
+//
+// Walked once at bootstrap rather than stored: the chain is at most a handful
+// of reads, and a denormalised depth column would be one more thing that can
+// disagree with ParentID. The seen-set guards against a malformed cycle, which
+// would otherwise hang a session before it ever ran.
+func (a *EventLoopAgent) ancestry(ctx context.Context) []string {
+	var chain []string
+	seen := map[string]bool{a.cfg.SessionID: true}
+	for pid := a.cfg.ParentID; pid != "" && !seen[pid]; {
+		seen[pid] = true
+		chain = append(chain, pid)
+		s, err := a.env.Store.GetSession(ctx, a.env.RunID, pid)
+		if err != nil {
+			break // a missing forebear truncates the chain; it must not stop bootstrap
+		}
+		pid = s.ParentID
+	}
+	slices.Reverse(chain)
+	return chain
+}
+
 func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 	now := time.Now().UTC()
 
@@ -470,9 +495,15 @@ func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 	// initial_recall, which is seeded AFTER the task — it's task-derived search
 	// results, so it reads correctly as a follow-on to the task.
 
-	// New-session marker first: pure framing ("a fresh agent session begins").
+	// New-session marker first: pure framing ("a fresh agent session begins"),
+	// plus where this session sits in the run, so a sub-agent knows its depth.
 	newSessionContent := fmt.Sprintf("New agent session %q started at %s.",
 		a.cfg.SessionID, util.FormatLocalISO(now))
+	if chain := a.ancestry(ctx); len(chain) > 0 {
+		newSessionContent += fmt.Sprintf(
+			" You are a sub-agent %d level(s) below the run's root: %s → %s.",
+			len(chain), strings.Join(chain, " → "), a.cfg.SessionID)
+	}
 	if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
 		&event.SystemEvent{Content: newSessionContent, Marker: event.MarkerNewSession}); err != nil {
 		return err

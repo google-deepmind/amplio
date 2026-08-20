@@ -36,6 +36,8 @@ import type {
   AboutInfo,
   TestLLMResult,
   BriefingInfo,
+  ProcessSnapshot,
+  SessionTools,
 } from "./types";
 
 // blobUrl builds a same-origin URL for a run's tool-result blob (e.g. an image),
@@ -368,7 +370,12 @@ export const api = {
   listLessons: () => req<LessonSummary[]>("/lessons"),
   // Server introspection for the About page (build identity + on-disk layout +
   // configured tiers). Open read.
+  // Tools an agent of this session's type would get now (see SessionTools).
+  getSessionTools: (id: string, sid: string) =>
+    req<SessionTools>(`/runs/${id}/sessions/${sid}/tools`),
   getAbout: () => req<AboutInfo>("/about"),
+  // Token-gated, unlike other reads: command lines carry secrets.
+  getProcesses: (id: string) => req<ProcessSnapshot>(`/runs/${id}/processes`),
   // Pre-flight test of an agent-LLM spec (build provider + one trivial Call)
   // WITHOUT starting a run. Returns ok=false with a diagnostic on failure.
   testLLM: (spec: string) =>

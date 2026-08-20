@@ -19,22 +19,14 @@ import (
 	_ "embed"
 
 	"amplio/internal/agent"
-	"amplio/internal/agent/critic"
 	"amplio/internal/agent/eventloop"
+	"amplio/internal/agent/toolset"
 	"amplio/internal/blob"
 	"amplio/internal/briefing"
 	"amplio/internal/cli"
 	"amplio/internal/config"
 	"amplio/internal/session"
-	"amplio/internal/tool"
 	"amplio/internal/tool/bash"
-	"amplio/internal/tool/coordination"
-	"amplio/internal/tool/editfile"
-	"amplio/internal/tool/inspect"
-	"amplio/internal/tool/recall"
-	"amplio/internal/tool/sessionsearch"
-	"amplio/internal/tool/spawn"
-	"amplio/internal/tool/viewfile"
 )
 
 //go:embed chatbot_core.md
@@ -73,43 +65,29 @@ const AgentType = config.ChatbotAgentType
 
 func init() {
 	agent.Register(AgentType, factory, agent.Traits{Interactive: true})
+	agent.RegisterTools(AgentType, toolset.Defs)
 }
 
 func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 	cwd := env.Workspace.Root()
 
-	coordDeps := &coordination.Deps{Store: env.Store, RunID: env.RunID, Registry: env.Registry}
-	inspectDeps := &inspect.Deps{Store: env.Store, RunID: env.RunID}
-
 	var ag *eventloop.EventLoopAgent
 
-	// Same toolset as the standard agent: a chatbot can work directly or delegate
-	// to spawned sub-agents.
-	tools := []*tool.Tool{
-		bash.New(cwd, env.RunID, cfg.SessionID),
-		viewfile.New(cwd, config.ArtifactDir(env.RunID)),
-		editfile.New(cwd, config.ArtifactDir(env.RunID)),
-		coordination.SendMessage(coordDeps, cfg.SessionID),
-		coordination.SessionCancel(coordDeps),
-		coordination.AwaitEvent(coordDeps, cfg.SessionID, func() *session.Handle {
-			return ag.Handle()
-		}),
-		inspect.SessionList(inspectDeps),
-		inspect.SessionSteps(inspectDeps),
-		inspect.SessionPeek(inspectDeps),
-		inspect.SessionSummary(inspectDeps),
-		critic.ViewRunReport(env.Store, env.RunID),
-		sessionsearch.New(env.Store, env.RunID),
-		spawn.New(env, cfg.SessionID),
-	}
-	// Add the recall tools whenever the index OBJECTS exist — not just when
-	// they're currently built. The skill index is built in a background
-	// goroutine that may finish AFTER this agent is constructed; the tools
-	// gate per-corpus with IsBuilt at call time, so an unbuilt index just
-	// skips that corpus until it's ready (no respawn needed). Mirrors standard.go.
-	if env.SkillIndex != nil || env.LessonIndex != nil {
-		tools = append(tools, recall.Search(env.SkillIndex, env.LessonIndex), recall.Load(env.SkillIndex, env.LessonIndex))
-	}
+	// Same toolset as the standard agent — literally, now: a chatbot can work
+	// directly or delegate to spawned sub-agents, and two hand-maintained copies
+	// of one list drift.
+	tools := toolset.Build(toolset.Deps{
+		RunID:       env.RunID,
+		SessionID:   cfg.SessionID,
+		Cwd:         cwd,
+		ArtifactDir: config.ArtifactDir(env.RunID),
+		Store:       env.Store,
+		Registry:    env.Registry,
+		Env:         env,
+		Handle:      func() *session.Handle { return ag.Handle() },
+		SkillIndex:  env.SkillIndex,
+		LessonIndex: env.LessonIndex,
+	})
 
 	// Operator-selected briefings, appended last so they read as additions to the
 	// harness's own guidance rather than interleaved with it. A run's root agent

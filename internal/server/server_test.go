@@ -15,6 +15,9 @@
 package server
 
 import (
+	goruntime "runtime"
+
+	"amplio/internal/proctree"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -1779,5 +1782,84 @@ func TestPatchRun_SeenBothDirections(t *testing.T) {
 	patch(`{"seen":false}`)
 	if !hasUpdates() {
 		t.Error("seen:false should put the badge back")
+	}
+}
+
+// The process list is the ONE read behind the token: a command line routinely
+// carries secrets that the rest of the read-only API never exposes.
+func TestServer_Processes(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	seedRun(t, store, db.SessionOngoing, 0)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	url := ts.URL + "/api/runs/" + testRun + "/processes"
+	if code, _ := doReq(t, http.MethodGet, url, ""); code != http.StatusUnauthorized {
+		t.Errorf("processes without token: %d, want 401 (cmdlines can carry secrets)", code)
+	}
+	code, body := doReq(t, http.MethodGet, url+"?token=secret", "")
+	if code != http.StatusOK {
+		t.Fatalf("processes with token: %d, want 200", code)
+	}
+	var snap proctree.Snapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if want := goruntime.GOOS == "linux"; snap.Supported != want {
+		t.Errorf("supported = %v on %s, want %v", snap.Supported, goruntime.GOOS, want)
+	}
+	if snap.Platform != goruntime.GOOS {
+		t.Errorf("platform = %q, want %q", snap.Platform, goruntime.GOOS)
+	}
+	// A run with no bash calls has no processes — and the endpoint says so with
+	// an empty list rather than a null the UI would have to special-case.
+	if snap.Roots == nil {
+		t.Error("roots = null, want []")
+	}
+	// An unknown run is a 404, not an empty snapshot: otherwise a typo in the id
+	// looks like "nothing is running".
+	if code, _ := doReq(t, http.MethodGet, ts.URL+"/api/runs/nosuchrun/processes?token=secret", ""); code != http.StatusNotFound {
+		t.Errorf("unknown run: %d, want 404", code)
+	}
+}
+
+// The trajectory viewer's tool section: reconstructed per request, so the test
+// pins the shape the page depends on rather than any particular tool list.
+func TestServer_SessionTools(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	seedRun(t, store, db.SessionOngoing, 0)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	code, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/main-agent/tools", "")
+	if code != http.StatusOK {
+		t.Fatalf("tools: %d, want 200", code)
+	}
+	var got sessionToolsDTO
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentType != "standard_agent" {
+		t.Errorf("agent_type = %q", got.AgentType)
+	}
+	// The seeded agent type is linked into this test binary, so it must describe
+	// itself; a false here means the lister registration was lost.
+	if !got.Known || len(got.Tools) == 0 {
+		t.Fatalf("known=%v with %d tools, want a described toolset", got.Known, len(got.Tools))
+	}
+	for _, tl := range got.Tools {
+		if tl.Name == "" || tl.Description == "" || len(tl.Schema) == 0 {
+			t.Errorf("incomplete tool def: %+v", tl)
+		}
+	}
+	// Schemas must arrive as JSON the page can render, not a quoted string.
+	var schema map[string]any
+	if err := json.Unmarshal(got.Tools[0].Schema, &schema); err != nil {
+		t.Errorf("schema is not a JSON object: %v", err)
+	}
+	if code, _ := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/nosuch/tools", ""); code != http.StatusNotFound {
+		t.Errorf("unknown session: %d, want 404", code)
 	}
 }

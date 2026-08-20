@@ -16,8 +16,16 @@
 
 <script lang="ts">
 	import { page } from '$app/state';
-	import { TreeStructureIcon, ChatCircleIcon, FolderIcon, PathIcon, ScrollIcon } from 'phosphor-svelte';
+	import {
+		TreeStructureIcon,
+		ChatCircleIcon,
+		FolderIcon,
+		PathIcon,
+		ScrollIcon,
+		TerminalWindowIcon
+	} from 'phosphor-svelte';
 	import { logHref, recallSession } from '$lib/logView.svelte';
+	import { serverInfo } from '$lib/serverInfo.svelte';
 	import type { SessionDTO } from '$lib/types';
 
 	let { runId, sessions = [] }: { runId: string; sessions?: SessionDTO[] } = $props();
@@ -49,6 +57,11 @@
 	const inLog = $derived(path.startsWith(`${base}/sessions`));
 	const inLogChat = $derived(inLog && path.endsWith('/chat'));
 
+	// The process view reads /proc, so it exists only when the SERVER runs Linux
+	// (not the browser). Ask once; the entry stays hidden until the answer is
+	// known, so it never appears and then vanishes under the cursor.
+	serverInfo.load();
+
 	const items = $derived([
 		{
 			label: 'Overview',
@@ -74,7 +87,17 @@
 			href: `${base}/artifacts`,
 			icon: FolderIcon,
 			active: path.startsWith(`${base}/artifacts`)
-		}
+		},
+		...(serverInfo.isLinux
+			? [
+					{
+						label: 'Processes',
+						href: `${base}/processes`,
+						icon: TerminalWindowIcon,
+						active: path.startsWith(`${base}/processes`)
+					}
+				]
+			: [])
 	]);
 </script>
 

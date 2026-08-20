@@ -19,22 +19,15 @@ import (
 	_ "embed"
 
 	"amplio/internal/agent"
-	"amplio/internal/agent/critic"
 	"amplio/internal/agent/eventloop"
+	"amplio/internal/agent/toolset"
 	"amplio/internal/blob"
 	"amplio/internal/briefing"
 	"amplio/internal/cli"
 	"amplio/internal/config"
 	"amplio/internal/session"
-	"amplio/internal/tool"
 	"amplio/internal/tool/bash"
-	"amplio/internal/tool/coordination"
-	"amplio/internal/tool/editfile"
-	"amplio/internal/tool/inspect"
 	"amplio/internal/tool/recall"
-	"amplio/internal/tool/sessionsearch"
-	"amplio/internal/tool/spawn"
-	"amplio/internal/tool/viewfile"
 )
 
 //go:embed standard_agent.md
@@ -50,20 +43,11 @@ const AgentType = "standard_agent"
 
 func init() {
 	agent.Register(AgentType, factory, agent.Traits{})
+	agent.RegisterTools(AgentType, toolset.Defs)
 }
 
 func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 	cwd := env.Workspace.Root()
-
-	coordDeps := &coordination.Deps{
-		Store:    env.Store,
-		RunID:    env.RunID,
-		Registry: env.Registry,
-	}
-	inspectDeps := &inspect.Deps{
-		Store: env.Store,
-		RunID: env.RunID,
-	}
 
 	// Use a pointer so the closure can reference it after assignment.
 	var ag *eventloop.EventLoopAgent
@@ -74,34 +58,23 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 	// also receives scope:root briefings; sub-agents do not.
 	briefings := briefing.ForRun(context.Background(), env.Store, env.RunID, cfg.ParentID == "")
 
-	tools := []*tool.Tool{
-		bash.New(cwd, env.RunID, cfg.SessionID),
-		viewfile.New(cwd, artifactDir),
-		editfile.New(cwd, artifactDir),
-		coordination.SendMessage(coordDeps, cfg.SessionID),
-		coordination.SessionCancel(coordDeps),
-		coordination.AwaitEvent(coordDeps, cfg.SessionID, func() *session.Handle {
-			return ag.Handle()
-		}),
-		inspect.SessionList(inspectDeps),
-		inspect.SessionSteps(inspectDeps),
-		inspect.SessionPeek(inspectDeps),
-		inspect.SessionSummary(inspectDeps),
-		critic.ViewRunReport(env.Store, env.RunID),
-		sessionsearch.New(env.Store, env.RunID),
-		spawn.New(env, cfg.SessionID),
-	}
-	// Recall tools + task-relevant seeding over whichever corpora are built (skills
-	// and/or mined lessons). Add the tools whenever the index OBJECTS exist —
-	// not just when they're currently built — because the skill index is built
-	// in a background goroutine and may finish AFTER this agent is constructed.
-	// The tools (recall.Search, recall.Load, recall.InitialContent) all gate
-	// per-corpus with IsBuilt at call time, so an unbuilt index just skips that
-	// corpus until it's ready, and a freshly-built index starts contributing on
-	// the very next call without needing the agent to be respawned.
+	tools := toolset.Build(toolset.Deps{
+		RunID:       env.RunID,
+		SessionID:   cfg.SessionID,
+		Cwd:         cwd,
+		ArtifactDir: artifactDir,
+		Store:       env.Store,
+		Registry:    env.Registry,
+		Env:         env,
+		Handle:      func() *session.Handle { return ag.Handle() },
+		SkillIndex:  env.SkillIndex,
+		LessonIndex: env.LessonIndex,
+	})
+	// Task-relevant seeding over whichever corpora are built. Gated on the same
+	// condition as the recall TOOLS (see toolset.Build): the index objects
+	// existing, not their being built yet.
 	var initialRecall func(ctx context.Context, task string) string
 	if env.SkillIndex != nil || env.LessonIndex != nil {
-		tools = append(tools, recall.Search(env.SkillIndex, env.LessonIndex), recall.Load(env.SkillIndex, env.LessonIndex))
 		sIx, lIx := env.SkillIndex, env.LessonIndex
 		initialRecall = func(ctx context.Context, task string) string {
 			return recall.InitialContent(ctx, sIx, lIx, task)

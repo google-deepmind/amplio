@@ -168,3 +168,55 @@ func Names() []string {
 	}
 	return names
 }
+
+// ToolContext is everything an agent type needs in order to DESCRIBE its tools
+// without being constructed: no store, no session registry, no LLM, no
+// workspace. Enough to reproduce the descriptions that embed a path, and the
+// index pointers that decide whether the recall tools are offered at all.
+type ToolContext struct {
+	RunID       string
+	SessionID   string
+	Cwd         string // the agent's workspace root — appears in the bash description
+	ArtifactDir string
+	SkillIndex  *skills.Index
+	LessonIndex *lessons.Index
+}
+
+// ToolLister returns the tools an agent of this type would be given RIGHT NOW.
+//
+// It is a live view, not a record: recall's tools appear only while the server
+// has the corpora, so a session whose run predates an embed model shows the
+// tools it would get if revived today, not the ones it had. That is the honest
+// reading of "what can this agent do", and the alternative — replaying a
+// historical toolset — would need the defs persisted per session, which they
+// are not.
+type ToolLister func(ToolContext) []llm.ToolDef
+
+var toolListers = make(map[string]ToolLister)
+
+// RegisterTools attaches a tool lister to an already-registered agent type.
+// Separate from Register so an agent type can exist without one (a lister is
+// for display; a factory is for running).
+func RegisterTools(name string, list ToolLister) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if _, exists := registry[name]; !exists {
+		panic(fmt.Sprintf("RegisterTools: agent type %q is not registered", name))
+	}
+	if _, dup := toolListers[name]; dup {
+		panic(fmt.Sprintf("RegisterTools: agent type %q already has a tool lister", name))
+	}
+	toolListers[name] = list
+}
+
+// ToolsFor lists the tools of an agent type, or reports false when the type is
+// unknown or has no lister (an agent type is not obliged to describe itself).
+func ToolsFor(name string, tc ToolContext) ([]llm.ToolDef, bool) {
+	registryMu.RLock()
+	list, ok := toolListers[name]
+	registryMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return list(tc), true
+}

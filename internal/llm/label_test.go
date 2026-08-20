@@ -45,6 +45,30 @@ func TestShortLabel(t *testing.T) {
 		},
 		{"vertex-gemini:gemini-3.5-pro?thinking_budget=32768", "gemini-3.5-pro", "gemini keeps its family prefix, or nothing identifies it"},
 		{
+			"vertex-gemini:gemini-3.7-flash?thinking_level=low",
+			"gemini-3.7-flash · low",
+			"gemini spells effort thinking_level; it distinguishes two otherwise identical rows",
+		},
+		{
+			"vertex-gemini:gemini-3.7-flash?thinking_level=high&include_thoughts=true",
+			"gemini-3.7-flash · high",
+			"only the level is a facet — include_thoughts is not what tells two rows apart",
+		},
+		{
+			"bridge{url=https://box:8080/api/llm}:vertex-gemini:gemini-3.6-flash?thinking_level=medium",
+			"⇄ gemini-3.6-flash · medium @box:8080",
+			"a bridged gemini keeps its level, since the recursion labels what it IS",
+		},
+		{
+			// The facet competes with the endpoint for the 40-char budget, and the
+			// tail loses. Recorded rather than fixed: the cap is deliberate, the
+			// full spec is always one hover away, and widening it to fit the worst
+			// case would make every ordinary chip roomier than it needs to be.
+			"bridge{url=https://workstation.corp.example:26759/api/llm}:vertex-gemini:gemini-3.6-flash?thinking_level=medium",
+			"⇄ gemini-3.6-flash · medium @workstatio…",
+			"a long endpoint plus a level exceeds the cap; truncation eats the tail",
+		},
+		{
 			"subprocess:mybridge?model=exp-endpoint-7#candidate-rc2",
 			"candidate-rc2",
 			"an explicit nickname wins outright \u2014 the case a heuristic cannot serve, e.g. a reused test endpoint",

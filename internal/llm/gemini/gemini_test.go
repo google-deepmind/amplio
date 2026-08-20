@@ -32,15 +32,15 @@ import (
 
 func TestParseGeminiArgs(t *testing.T) {
 	g, err := parseGeminiArgs(url.Values{
-		"thinking_budget":  {"4096"},
+		"thinking_level":   {"low"},
 		"include_thoughts": {"false"},
 		"temperature":      {"0.5"},
 	})
 	if err != nil {
 		t.Fatalf("parseGeminiArgs: %v", err)
 	}
-	if g.thinkingBudget == nil || *g.thinkingBudget != 4096 {
-		t.Errorf("thinkingBudget = %v, want 4096", g.thinkingBudget)
+	if g.thinkingLevel == nil || *g.thinkingLevel != genai.ThinkingLevelLow {
+		t.Errorf("thinkingLevel = %v, want LOW", g.thinkingLevel)
 	}
 	if g.includeThoughts == nil || *g.includeThoughts != false {
 		t.Errorf("includeThoughts = %v, want false", g.includeThoughts)
@@ -49,13 +49,37 @@ func TestParseGeminiArgs(t *testing.T) {
 		t.Errorf("temperature = %v, want 0.5", g.temperature)
 	}
 
+	// The whole vocabulary, spelled as a human would: the level is a word in a
+	// config file, so MEDIUM and medium must both work.
+	for in, want := range map[string]genai.ThinkingLevel{
+		"minimal": genai.ThinkingLevelMinimal,
+		"LOW":     genai.ThinkingLevelLow,
+		"Medium":  genai.ThinkingLevelMedium,
+		"high":    genai.ThinkingLevelHigh,
+	} {
+		got, err := parseGeminiArgs(url.Values{"thinking_level": {in}})
+		if err != nil || got.thinkingLevel == nil || *got.thinkingLevel != want {
+			t.Errorf("thinking_level=%q -> %v (err %v), want %v", in, got.thinkingLevel, err, want)
+		}
+	}
+
 	if _, err := parseGeminiArgs(url.Values{"foo": {"bar"}}); err == nil {
 		t.Error("expected error for unknown gemini arg")
 	}
-	if _, err := parseGeminiArgs(url.Values{"thinking_budget": {"notanint"}}); err == nil {
-		t.Error("expected error for bad thinking_budget")
+	if _, err := parseGeminiArgs(url.Values{"thinking_level": {"maximum"}}); err == nil {
+		t.Error("expected error for a level outside the vocabulary")
 	}
-	if g, err := parseGeminiArgs(nil); err != nil || g.thinkingBudget != nil {
+	// A retired arg must say what to use instead, not just "unknown key": someone
+	// hits this with a config written months ago and needs the migration, not a
+	// diagnosis.
+	_, err = parseGeminiArgs(url.Values{"thinking_budget": {"4096"}})
+	if err == nil {
+		t.Fatal("expected error for the removed thinking_budget")
+	}
+	if !strings.Contains(err.Error(), "thinking_level") {
+		t.Errorf("thinking_budget error = %q, want it to name thinking_level", err)
+	}
+	if g, err := parseGeminiArgs(nil); err != nil || g.thinkingLevel != nil {
 		t.Errorf("empty args: %+v err=%v", g, err)
 	}
 }
@@ -554,5 +578,40 @@ func TestConvertMessages_NoSignatureNoField(t *testing.T) {
 	}
 	if len(contents[0].Parts[0].ThoughtSignature) != 0 {
 		t.Errorf("unexpected signature %q", contents[0].Parts[0].ThoughtSignature)
+	}
+}
+
+// Parsing the level is only half of it: the value has to reach the request.
+// This is the half a typo in build() would silently drop, leaving every call
+// on the model's default while the spec claims otherwise.
+func TestBuild_ThinkingLevelReachesRequest(t *testing.T) {
+	req := llm.Request{Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}}}
+
+	args, err := parseGeminiArgs(url.Values{"thinking_level": {"minimal"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &provider{model: "gemini-3.7-flash", maxTokens: 100, cfg: args}
+	_, cfg, err := p.build(req)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if cfg.ThinkingConfig == nil || cfg.ThinkingConfig.ThinkingLevel != genai.ThinkingLevelMinimal {
+		t.Errorf("ThinkingLevel = %v, want MINIMAL", cfg.ThinkingConfig)
+	}
+
+	// Unset must stay unset rather than defaulting to something of our choosing:
+	// each model has its own default (MEDIUM on 3.7 Flash, HIGH on the Pros) and
+	// picking one here would override it everywhere.
+	bare := &provider{model: "gemini-3.7-flash", maxTokens: 100}
+	_, cfg, err = bare.build(req)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if cfg.ThinkingConfig.ThinkingLevel != "" {
+		t.Errorf("ThinkingLevel = %q with no spec arg, want empty (model default)", cfg.ThinkingConfig.ThinkingLevel)
+	}
+	if !cfg.ThinkingConfig.IncludeThoughts {
+		t.Error("IncludeThoughts = false by default, want true (thoughts must surface)")
 	}
 }

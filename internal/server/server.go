@@ -87,6 +87,10 @@ type Server struct {
 	// GET /api/sysstat seed and (via the broadcaster) the kind=sysstat SSE
 	// updates. Wired by cmd/amplio/serve.go.
 	sysstat *sysstat.Watcher
+
+	// procCache coalesces concurrent viewers of the process list onto one /proc
+	// scan (see processes.go).
+	procCache procCache
 }
 
 // SetSysStat installs the server-host status watcher behind GET /api/sysstat.
@@ -161,10 +165,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sysstat", s.handleSysStat)
 	mux.HandleFunc("GET /api/models", s.handleListModels)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/chat", s.handleChat)
+	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/tools", s.handleSessionTools)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/trajectory", s.handleTrajectory)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/observations", s.handleObservations)
 	mux.HandleFunc("GET /api/runs/{id}/blobs/{key}", s.handleBlob)
+	mux.HandleFunc("GET /api/runs/{id}/processes", s.requireAuth(s.handleProcesses))
 	mux.HandleFunc("GET /api/runs/{id}/artifacts", s.handleArtifacts)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/all", s.handleArtifactsAll)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/raw", s.handleArtifactRaw)

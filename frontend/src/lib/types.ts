@@ -487,6 +487,7 @@ export interface AboutInfo {
   modified: boolean;
   build_time?: string;
   go_version: string;
+  platform: string; // the SERVER's GOOS — gates /proc-backed features
   data_dir: string;
   config_path: string;
   logs_dir: string;
@@ -516,4 +517,51 @@ export interface BriefingInfo {
   scope: "all" | "root";
   default: boolean;
   source: "built-in" | "user";
+}
+
+// A live OS process started by one of a run's bash calls, and its descendants.
+// Sampled from /proc on request; see internal/proctree.
+export interface ProcessNode {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  sid: number;
+  start_time: number; // clock ticks since boot; (pid, start_time) is a stable identity
+  state: string; // R running, S sleeping, D uninterruptible, Z zombie, T stopped
+  rss_bytes: number;
+  cpu_millis: number;
+  elapsed_seconds: number;
+  cmdline: string;
+  run_id: string;
+  session_id: string;
+  orphan: boolean; // reparented — the bash call that started it has exited
+  children?: ProcessNode[];
+}
+
+// One sample. Process state has no change events to subscribe to, so the view
+// polls and shows how old the sample is rather than pretending to be live.
+export interface ProcessSnapshot {
+  supported: boolean;
+  platform: string;
+  taken_at: string;
+  scan_millis: number;
+  total: number;
+  roots: ProcessNode[];
+}
+
+// One tool as the agent's LLM sees it: name, description, and the JSON Schema
+// of its parameters. Reconstructed per request from the agent type and the
+// session's workspace — see internal/server/tools.go for why it is a live view
+// rather than a record of what that session had.
+export interface ToolDef {
+  name: string;
+  description: string;
+  schema: unknown; // JSON Schema object
+}
+
+export interface SessionTools {
+  agent_type: string;
+  cwd: string;
+  known: boolean; // false: this agent type does not describe its tools
+  tools: ToolDef[];
 }

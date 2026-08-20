@@ -1576,3 +1576,61 @@ func TestEventLoop_CancelBeforeRun_ExistingTerminalSession(t *testing.T) {
 		t.Errorf("a cancelled session must not be resurrected to ongoing")
 	}
 }
+
+// A sub-agent cannot judge whether to delegate without knowing how deep it
+// already is, and the guidance in sub_agent_strategy.md is keyed to that depth.
+// The chain rides in the step-0 marker because bootstrap events survive
+// compaction — a fact this test also pins by reading the persisted event.
+func TestBootstrap_NewSessionMarkerCarriesAncestry(t *testing.T) {
+	store, runID, _ := testSetup(t)
+	ctx := context.Background()
+
+	// root → mid → leaf, as spawn_agent would record them.
+	for _, s := range []struct{ id, parent string }{
+		{"main-agent", ""}, {"silver-seal", "main-agent"},
+	} {
+		if err := store.CreateSession(ctx, db.SessionRecord{
+			RunID: runID, SessionID: s.id, ParentID: s.parent,
+			AgentType: "standard_agent", Status: db.SessionIdle,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	marker := func(sessionID, parentID string) string {
+		t.Helper()
+		a := newT(testCfg{
+			Store: store, RunID: runID, SessionID: sessionID,
+			ParentID: parentID, AgentType: "standard_agent",
+		})
+		if err := a.bootstrap(ctx); err != nil {
+			t.Fatalf("bootstrap %s: %v", sessionID, err)
+		}
+		evs, err := store.GetEvents(ctx, runID, sessionID, db.EventFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range evs {
+			if se, ok := e.Event.(*event.SystemEvent); ok && se.Marker == event.MarkerNewSession {
+				return se.Content
+			}
+		}
+		t.Fatalf("no new-session marker for %s", sessionID)
+		return ""
+	}
+
+	// A root says nothing about depth: there is nothing above it.
+	if got := marker("main-agent-2", ""); strings.Contains(got, "sub-agent") {
+		t.Errorf("root marker mentions depth: %q", got)
+	}
+	// A child two levels down names every forebear, root first, and its depth.
+	got := marker("ace-ferret", "silver-seal")
+	for _, want := range []string{"2 level(s)", "main-agent", "silver-seal", "ace-ferret"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marker %q missing %q", got, want)
+		}
+	}
+	if strings.Index(got, "main-agent") > strings.Index(got, "silver-seal") {
+		t.Errorf("chain is not root-first: %q", got)
+	}
+}

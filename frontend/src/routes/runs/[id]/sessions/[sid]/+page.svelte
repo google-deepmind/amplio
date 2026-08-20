@@ -23,6 +23,7 @@
 	import { page } from '$app/state';
 	import { api, errorText } from '$lib/api';
 	import { getLogView } from '$lib/logView.svelte';
+	import ToolDefs from '$lib/components/ToolDefs.svelte';
 	import type { TrajStep, EventDTO, AgentEvent } from '$lib/types';
 	import EventCard from '$lib/components/EventCard.svelte';
 	import { renderMarkdown } from '$lib/markdown';
@@ -254,6 +255,12 @@
 					</div>
 				{/each}
 			</div>
+		{/if}
+		<!-- Bootstrap only: the toolset belongs with the system prompt, which is
+		     what step 0 is. Elsewhere in a trajectory it would be a fixed banner
+		     repeated above every phase. -->
+		{#if group.kind === 'bootstrap'}
+			{#key sid}<ToolDefs {runId} sessionId={sid} />{/key}
 		{/if}
 		<div class="psteps">
 			{#each group.steps as st (st.step)}

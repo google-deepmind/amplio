@@ -160,9 +160,18 @@ type provider struct {
 // geminiArgs holds the genai-typed knobs parsed from spec `?k=v` args. genai is
 // a typed struct (no raw passthrough like Anthropic), so we map a known key set.
 type geminiArgs struct {
-	thinkingBudget  *int32
+	thinkingLevel   *genai.ThinkingLevel
 	includeThoughts *bool
 	temperature     *float32
+}
+
+// thinkingLevels is the vocabulary, not a per-model table. Validate the spelling;
+// let the API reject a combination it does not support.
+var thinkingLevels = map[string]genai.ThinkingLevel{
+	"minimal": genai.ThinkingLevelMinimal,
+	"low":     genai.ThinkingLevelLow,
+	"medium":  genai.ThinkingLevelMedium,
+	"high":    genai.ThinkingLevelHigh,
 }
 
 // parseGeminiArgs maps spec args to typed knobs, erroring on unknown keys (so a
@@ -172,13 +181,20 @@ func parseGeminiArgs(args url.Values) (geminiArgs, error) {
 	for k := range args {
 		v := args.Get(k)
 		switch k {
-		case "thinking_budget":
-			n, err := strconv.ParseInt(v, 10, 32)
-			if err != nil {
-				return g, fmt.Errorf("gemini arg thinking_budget=%q: %w", v, err)
+		case "thinking_level":
+			lvl, ok := thinkingLevels[strings.ToLower(v)]
+			if !ok {
+				return g, fmt.Errorf("gemini arg thinking_level=%q: want minimal, low, medium or high", v)
 			}
-			b := int32(n)
-			g.thinkingBudget = &b
+			g.thinkingLevel = &lvl
+		case "thinking_budget":
+			// Kept as an explicit case purely to say what to do instead: falling
+			// through to the default would report it as an unknown key, which is
+			// true and useless. Gemini 3 replaced the budget with discrete levels
+			// and rejects the two together; Gemini 2.5, the only generation that
+			// took a budget, is on its way out.
+			return g, fmt.Errorf("gemini arg thinking_budget was removed: Gemini 3+ uses " +
+				"thinking_level=minimal|low|medium|high")
 		case "include_thoughts":
 			b, err := strconv.ParseBool(v)
 			if err != nil {
@@ -193,7 +209,7 @@ func parseGeminiArgs(args url.Values) (geminiArgs, error) {
 			t := float32(f)
 			g.temperature = &t
 		default:
-			return g, fmt.Errorf("unknown gemini spec arg %q (supported: thinking_budget, include_thoughts, temperature)", k)
+			return g, fmt.Errorf("unknown gemini spec arg %q (supported: thinking_level, include_thoughts, temperature)", k)
 		}
 	}
 	return g, nil
@@ -312,13 +328,14 @@ func (p *provider) build(req llm.Request) ([]*genai.Content, *genai.GenerateCont
 		maxTokens = p.maxTokens
 	}
 	// Thinking defaults to on (IncludeThoughts) so thoughts surface; spec args
-	// override the budget / inclusion per model.
+	// override the level / inclusion. No level set = the model's own default
+	// (MEDIUM on 3.7 Flash, HIGH on the Pro models).
 	thinking := &genai.ThinkingConfig{IncludeThoughts: true}
 	if p.cfg.includeThoughts != nil {
 		thinking.IncludeThoughts = *p.cfg.includeThoughts
 	}
-	if p.cfg.thinkingBudget != nil {
-		thinking.ThinkingBudget = p.cfg.thinkingBudget
+	if p.cfg.thinkingLevel != nil {
+		thinking.ThinkingLevel = *p.cfg.thinkingLevel
 	}
 	config := &genai.GenerateContentConfig{
 		//nolint:gosec // maxTokens is a small provider-controlled output cap.

@@ -158,7 +158,11 @@ func ShortLabel(spec string) string {
 // effortLevelKeys are the spelling variants for "how hard should it think",
 // across families. Effort is worth surfacing because it is the one argument
 // that routinely distinguishes two otherwise identical menu entries.
-var effortLevelKeys = []string{"output_config.effort", "reasoning_effort", "effort"}
+//
+// thinking_level is Gemini's spelling of the same idea (minimal/low/medium/
+// high). It earns a place here for the same reason as the others: two menu rows
+// differing only in how hard the model thinks are otherwise identical chips.
+var effortLevelKeys = []string{"output_config.effort", "reasoning_effort", "effort", "thinking_level"}
 
 func effortOf(args url.Values) string {
 	for _, k := range effortLevelKeys {
