@@ -546,13 +546,24 @@ func atomicWrite(path string, data []byte) error {
 	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	tmp := path + ".amplio.tmp"
-	if err := os.WriteFile(tmp, data, mode); err != nil {
+	// Each write owns its temporary file, even when edits run concurrently.
+	f, err := os.CreateTemp(filepath.Dir(path), ".amplio-*.tmp")
+	if err != nil {
 		return err
 	}
-	// WriteFile is subject to umask; chmod to guarantee the intended mode.
-	if err := os.Chmod(tmp, mode); err != nil {
+	tmp := f.Name()
+	defer func() {
+		_ = f.Close()
 		_ = os.Remove(tmp)
+	}()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		return err
+	}
+	// Close before renaming, including on platforms that disallow open files.
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

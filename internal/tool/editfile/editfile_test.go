@@ -16,9 +16,11 @@ package editfile
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -313,5 +315,75 @@ func TestUnifiedDiff_LongLineTruncated(t *testing.T) {
 	got := unifiedDiff("", long, 60)
 	if !strings.Contains(got, "…") {
 		t.Errorf("a >300-rune line should be truncated with an ellipsis; got len=%d", len(got))
+	}
+}
+
+func TestAtomicWritePreservesExistingTempName(t *testing.T) {
+	path := tmpFile(t, "file.txt", "before")
+	neighbor := path + ".amplio.tmp"
+	if err := os.WriteFile(neighbor, []byte("unrelated contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(path, []byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != "after" {
+		t.Errorf("target = %q, want after", got)
+	}
+	if got := readFile(t, neighbor); got != "unrelated contents" {
+		t.Errorf("neighbor overwritten: %q", got)
+	}
+}
+
+func TestAtomicWriteRemovesTempOnRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "destination")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(path, []byte("contents")); err == nil {
+		t.Fatal("expected error replacing a directory with a file")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "destination" {
+		t.Errorf("temporary files remain after failed rename: %v", entries)
+	}
+}
+
+func TestAtomicWriteConcurrent(t *testing.T) {
+	path := tmpFile(t, "file.txt", "before")
+	const writers = 16
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	contents := make(map[string]bool, writers)
+	for i := range writers {
+		content := strings.Repeat(fmt.Sprintf("writer-%d\n", i), 100)
+		contents[content] = true
+		wg.Go(func() {
+			<-start
+			errs <- atomicWrite(path, []byte(content))
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent write: %v", err)
+		}
+	}
+	if got := readFile(t, path); !contents[got] {
+		t.Errorf("final contents do not match any complete write: %q", got)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("temporary files remain after writes: %v", entries)
 	}
 }
