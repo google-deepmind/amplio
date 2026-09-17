@@ -56,11 +56,9 @@ type chatChunk struct {
 type accumulator struct {
 	text     strings.Builder
 	thoughts strings.Builder
-	// byIndex maps each unambiguous stream index to a stable slot in `calls`.
+	// byIndex maps a tool call's stream index to its current slot in `calls`.
 	// byID disambiguates compatibility servers that reuse an index for distinct
-	// parallel calls. A duplicate index never retargets an existing byIndex entry;
-	// a known ID may populate an index only when that index is still unmapped.
-	// `index` is optional in the wire format; absent means 0.
+	// parallel calls. `index` is optional in the wire format; absent means 0.
 	byIndex      map[int]int
 	byID         map[string]int
 	calls        []llm.ToolCall
@@ -131,19 +129,16 @@ func (a *accumulator) addToolCall(tc respToolCall) []llm.StreamEvent {
 	if tc.Index != nil {
 		idx = *tc.Index
 	}
-	indexSlot, indexSeen := a.byIndex[idx]
-	slot, seen := indexSlot, indexSeen
+	slot, seen := a.byIndex[idx]
 	if tc.ID != "" {
 		if idSlot, ok := a.byID[tc.ID]; ok {
-			// A stable ID wins over a bad/reused index. An unseen index can
-			// safely learn this slot; an existing mapping must never be retargeted.
+			// A stable server ID wins over a bad/reused index.
 			slot, seen = idSlot, true
-			if !indexSeen {
-				a.byIndex[idx] = slot
-			}
+			a.byIndex[idx] = slot
 		} else if seen {
-			// A different stable ID at an already-mapped index is a distinct
-			// parallel call. Keep the canonical index route on the original slot.
+			// A different stable ID at the same raw index is a distinct call.
+			// Only IDs registered in byID are known to be server-provided;
+			// synthesized fallback IDs must not split a late-ID continuation.
 			if existing := a.calls[slot].ID; existing != "" {
 				if existingSlot, ok := a.byID[existing]; ok && existingSlot == slot {
 					seen = false
@@ -153,12 +148,14 @@ func (a *accumulator) addToolCall(tc respToolCall) []llm.StreamEvent {
 	}
 	if !seen {
 		slot = len(a.calls)
-		if !indexSeen {
-			a.byIndex[idx] = slot
-		}
+		a.byIndex[idx] = slot
 		a.calls = append(a.calls, llm.ToolCall{ID: toolCallID(tc.ID, idx), Name: tc.Function.Name})
 		a.args = append(a.args, &strings.Builder{})
 		a.callExtras = append(a.callExtras, toolCallExtraFields{})
+	}
+	if tc.ID != "" {
+		a.calls[slot].ID = tc.ID
+		a.byID[tc.ID] = slot
 	}
 	// A later frame may still be the one carrying id/name (servers vary on
 	// whether the first frame for an index has them), so fill any gap.

@@ -1,0 +1,16 @@
+data: {"id":"chatcmpl-414823bd-89e3-4843-a1d9-0787d84fb7f2","created":1788532547,"model":"responses-probe","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_GfRGryhRhzGG8I3di4cjFJVc","function":{"arguments":"","name":"record_city"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-238cd180-4691-46e8-8c03-37d2bdfe9693","created":1788532547,"model":"responses-probe","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{\"city\":\"New York\",\"note\":\"New York is recorded.\"}"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-83dd68aa-96ee-4417-ad47-7dcd34ec459a","created":1788532547,"model":"responses-probe","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_GfRGryhRhzGG8I3di4cjFJVc","function":{"arguments":"","name":"record_city"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-186852d9-092f-49a9-84bf-70057e549ab8","created":1788532547,"model":"responses-probe","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_EUC80q683nSYojK0s65kcN4b","function":{"arguments":"","name":"record_city"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-d3fdbfa3-7154-40ed-b07f-5e7b43c2cb39","created":1788532547,"model":"responses-probe","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{\"city\":\"London\",\"note\":\"London is recorded.\"}"},"type":"function","index":0}]}}]}
+
+data: {"id":"chatcmpl-6ae76294-4ca6-4e84-b176-d5bf9e4dea3e","created":1788532547,"model":"responses-probe","object":"chat.completion.chunk","choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}]}
+
+data: {"id":"chatcmpl-c7b9fa34-1a3e-4d7e-9172-e926c3675b67","created":1788532547,"model":"responses-probe","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_EUC80q683nSYojK0s65kcN4b","function":{"arguments":"","name":"record_city"},"type":"function","index":0}]}}]}
+
+data: [DONE]
+

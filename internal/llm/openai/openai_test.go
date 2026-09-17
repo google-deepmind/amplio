@@ -527,22 +527,25 @@ func TestStream_Tolerances(t *testing.T) {
 			}
 		},
 	}, {
-		// Once an index has been reused by a distinct stable ID, an ordinary
-		// ID-less continuation must still follow the index's original slot.
-		name: "duplicate index keeps idless continuation on original slot",
-		sse: `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_A","function":{"name":"read_file","arguments":"{\"path\":\"a"}}]}}]}` + "\n" +
-			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_B","function":{"name":"read_file","arguments":"{\"path\":\"b.rs\"}"}}]}}]}` + "\n" +
-			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".rs\"}"}}]}}]}` + "\n" +
-			"data: [DONE]\n",
+		// Captured from LiteLLM 1.81.9's Responses->Chat bridge:
+		// reused index 0 with ID-less arguments contiguous to each call ID.
+		name: "duplicate index idless continuation follows current call",
+		sse:  fixture(t, "litellm-1.81.9-responses-duplicate-index-idless.sse"),
 		check: func(t *testing.T, r *llm.Response) {
 			if len(r.ToolCalls) != 2 {
 				t.Fatalf("tool calls = %d, want 2: %+v", len(r.ToolCalls), r.ToolCalls)
 			}
-			if got := r.ToolCalls[0]; got.ID != "call_A" || got.Name != "read_file" || got.Arguments != `{"path":"a.rs"}` {
-				t.Errorf("call 0 = %+v, want call_A/read_file/{\"path\":\"a.rs\"}", got)
+			want := []struct {
+				id   string
+				args string
+			}{
+				{"call_GfRGryhRhzGG8I3di4cjFJVc", `{"city":"New York","note":"New York is recorded."}`},
+				{"call_EUC80q683nSYojK0s65kcN4b", `{"city":"London","note":"London is recorded."}`},
 			}
-			if got := r.ToolCalls[1]; got.ID != "call_B" || got.Name != "read_file" || got.Arguments != `{"path":"b.rs"}` {
-				t.Errorf("call 1 = %+v, want call_B/read_file/{\"path\":\"b.rs\"}", got)
+			for i, w := range want {
+				if got := r.ToolCalls[i]; got.ID != w.id || got.Name != "record_city" || got.Arguments != w.args {
+					t.Errorf("call %d = %+v, want id=%q/name=record_city/args=%q", i, got, w.id, w.args)
+				}
 			}
 		},
 	}, {
