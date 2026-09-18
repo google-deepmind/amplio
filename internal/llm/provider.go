@@ -17,6 +17,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 // Provider abstracts an LLM chat-completion endpoint.
@@ -131,6 +132,19 @@ type Response struct {
 	// flat projection above (e.g. Gemini per-tool-call thought signatures). It is
 	// persisted on the AssistantEvent and replayed via Message.ProviderExtra.
 	ProviderExtra map[string]any
+}
+
+// IsOutputLimitStopReason reports whether a provider explicitly says the
+// generation ended because it exhausted its output-token budget. Providers use
+// different labels for the same condition: OpenAI-compatible APIs use
+// "length", while Anthropic and Gemini use max_tokens / MAX_TOKENS.
+func IsOutputLimitStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 type Usage struct {

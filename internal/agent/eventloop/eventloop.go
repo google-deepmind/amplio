@@ -47,6 +47,11 @@ const DefaultIdleTimeout = 30 * time.Minute
 // wastes at most this many extra calls; see concludeNudgeText.
 const maxConcludeNudges = 2
 
+// maxOutputLimitNudges bounds retries after the provider explicitly reports
+// that generation was cut off by the output-token limit. Unlike an empty turn,
+// an output-limited turn is never accepted as successful completion.
+const maxOutputLimitNudges = 2
+
 // emptyAssistantPlaceholder is projected into the LLM request in place of the
 // (empty) content of a degenerate assistant turn — no text, no tool calls — so
 // the message is non-empty. Some providers reject an empty assistant message.
@@ -58,6 +63,11 @@ const concludeNudgeText = "[system] Your previous turn produced no tool calls an
 	"so it does not look like a deliberate completion. If the task is genuinely finished, " +
 	"reply with a concise final summary (no tool calls) — that summary IS your result. " +
 	"Otherwise, continue working with the appropriate tool calls."
+
+const outputLimitNudgeText = "[system] Your previous turn reached the model's output-token limit " +
+	"before completing the task. Continue any unfinished work as needed. When finished, reply with a " +
+	"concise, self-contained final result (no tool calls). That complete turn IS your result; do not " +
+	"merely continue the cut-off prose."
 
 // compactionFraming prefixes a CompactionEvent when it is projected into the
 // LLM context, telling the model to treat the summary as its own memory of
@@ -148,6 +158,10 @@ type EventLoopAgent struct {
 	// any substantive turn. Not persisted — it only bounds attempts within one
 	// live loop (a cold respawn is a fresh, legitimate retry).
 	concludeNudges int
+	// outputLimitNudges separately bounds retries after explicit provider
+	// output-limit stops. Recovery reconstructs it from persisted nudge events so
+	// cold restarts cannot reset the budget.
+	outputLimitNudges int
 }
 
 // New builds an agent from the shared run env and this agent's instance config.
@@ -272,6 +286,10 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 		return false, false, fmt.Errorf("load events: %w", err)
 	}
 
+	// Each retry nudge is already durable in the event stream. Reconstruct the
+	// counter so a cold restart cannot reset the output-limit retry budget.
+	a.outputLimitNudges = outputLimitNudgesFromHistory(events)
+
 	// Repair orphan tool calls (idempotent): synthesize a ToolResultEvent for
 	// every tool_call with no matching result, or the next LLM call is rejected
 	// for unmatched tool_use. Written at the declaring AssistantEvent's step so
@@ -312,6 +330,23 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 			a.logger.Debug("resume: stream at rest, parking idle")
 			if err := a.env.Store.UpdateSessionStatus(ctx, a.env.RunID, a.cfg.SessionID, db.SessionIdle); err != nil {
 				return false, false, fmt.Errorf("idle session: %w", err)
+			}
+			return false, true, nil
+		}
+		// Output-limit guard, on the RECOVERY path. A persisted no-tool response
+		// with an explicit output-limit stop is incomplete, so append the same nudge
+		// as the live loop and continue instead of converting a crash window into a
+		// false successful conclusion.
+		if llm.IsOutputLimitStopReason(tail.StopReason) {
+			if a.outputLimitNudges >= maxOutputLimitNudges {
+				return false, false, fmt.Errorf("model repeatedly reached output-token limit (stop_reason=%q)", tail.StopReason)
+			}
+			a.outputLimitNudges++
+			a.logger.Debug("resume: at-rest turn hit output limit; nudging instead of concluding",
+				"nudge", a.outputLimitNudges, "stop_reason", tail.StopReason)
+			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
+				&event.UserEvent{Content: outputLimitNudgeText}); aErr != nil {
+				return false, false, fmt.Errorf("append resume output-limit nudge: %w", aErr)
 			}
 			return false, true, nil
 		}
@@ -412,6 +447,26 @@ func tailAssistantAtRest(events []db.EventRecord) *event.AssistantEvent {
 		return last.(*event.AssistantEvent)
 	}
 	return nil
+}
+
+// outputLimitNudgesFromHistory reconstructs the retry budget from durable
+// events. A tool-call assistant is substantive progress and resets the budget,
+// matching the live-loop reset.
+func outputLimitNudgesFromHistory(events []db.EventRecord) int {
+	n := 0
+	for _, rec := range events {
+		switch e := rec.Event.(type) {
+		case *event.AssistantEvent:
+			if len(e.ToolCalls) > 0 {
+				n = 0
+			}
+		case *event.UserEvent:
+			if e.Content == outputLimitNudgeText {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // hasAssistantAtStep reports whether any AssistantEvent sits at the given step.
@@ -717,6 +772,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		// tool-call id and finalizes the step (see reconcileResume).
 		if len(resp.ToolCalls) > 0 {
 			a.concludeNudges = 0 // substantive turn — reset the accidental-conclusion guard
+			a.outputLimitNudges = 0
 			if err := a.env.Store.AppendEventAtStep(ctx, a.env.RunID, a.cfg.SessionID, callStep, assistantEvt); err != nil {
 				return a.recordFailure(ctx, fmt.Errorf("record assistant: %w", err))
 			}
@@ -763,6 +819,25 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		// A bare no-tool-call turn means "done for now". What it produces
 		// depends on the agent's nature (see docs/internals/session_lifecycle.md).
 		if !a.cfg.Interactive {
+			// An explicit output-limit stop means the provider cut generation off. The
+			// persisted assistant turn is useful context, but it is not a trustworthy
+			// autonomous result. Nudge the agent back into the normal loop and require
+			// a standalone final result; fail rather than falsely conclude if this keeps
+			// happening.
+			if llm.IsOutputLimitStopReason(resp.StopReason) {
+				if a.outputLimitNudges >= maxOutputLimitNudges {
+					return a.recordFailure(ctx, fmt.Errorf(
+						"model repeatedly reached output-token limit (stop_reason=%q)", resp.StopReason))
+				}
+				a.outputLimitNudges++
+				a.logger.Debug("output-limited no-tool turn; nudging instead of concluding",
+					"nudge", a.outputLimitNudges, "stop_reason", resp.StopReason)
+				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
+					&event.UserEvent{Content: outputLimitNudgeText}); err != nil {
+					return a.recordFailure(ctx, fmt.Errorf("append output-limit nudge: %w", err))
+				}
+				continue
+			}
 			// Accidental-conclusion guard: an autonomous agent's final turn text IS
 			// its result, so an EMPTY message with no tool calls is almost always a
 			// degenerate turn (the model reasoned but forgot to act), not a real
