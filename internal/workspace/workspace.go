@@ -50,10 +50,16 @@ type Workspace interface {
 	Kind() string
 
 	// CreateLinked creates an isolated workspace that shares commit history but
-	// has an independent working copy, named after childSessionID. Used for
-	// sub-agent parallelism (each sub-agent edits without conflicts). Returns an
-	// error for backends that don't support linking.
-	CreateLinked(ctx context.Context, childSessionID string) (Workspace, error)
+	// has an independent working copy. Used for sub-agent parallelism (each
+	// sub-agent edits without conflicts). Returns an error for backends that
+	// don't support linking.
+	//
+	// name identifies the link and must be unique across runs, not just within
+	// one: some backends name the link in a namespace shared by every run (a CitC
+	// alias is per-user, across all runs, amplio instances and hand-made
+	// workspaces). Callers build it with LinkName. Backends may decorate it (CitC
+	// prefixes "amplio-") and still disambiguate on a clash.
+	CreateLinked(ctx context.Context, name string) (Workspace, error)
 
 	// LinkedFrom returns the Root of the workspace this one was linked from, or
 	// "" if it wasn't created via CreateLinked (a run root or a directly-wrapped
@@ -82,6 +88,15 @@ type Workspace interface {
 	// in a UI should memoize per request (an out-of-band rename must surface on
 	// the next read, so never cache it process-wide).
 	ResolveAlias(ctx context.Context) (string, error)
+}
+
+// LinkName is the name a sub-agent's linked workspace is created under:
+// "<runID>-<sessionID>". Session ids are unique only within a run (the same
+// nickname recurs across runs), so the run id makes the name unique across runs
+// — and, as a PREFIX, groups every linked workspace of one run together when
+// listed (e.g. the user's CitC workspaces, or a repo's worktrees dir).
+func LinkName(runID, sessionID string) string {
+	return runID + "-" + sessionID
 }
 
 // ProvenanceLine renders a sub-agent's relationship to its spawning parent for

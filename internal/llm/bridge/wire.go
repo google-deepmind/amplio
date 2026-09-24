@@ -82,7 +82,17 @@ type wireResponse struct {
 	ToolCalls     []wireToolCall `json:"tool_calls,omitempty"`
 	Usage         wireUsage      `json:"usage"`
 	StopReason    string         `json:"stop_reason,omitempty"`
+	StopMessage   string         `json:"stop_message,omitempty"`
+	Refusal       *wireRefusal   `json:"refusal,omitempty"`
 	ProviderExtra map[string]any `json:"provider_extra,omitempty"`
+}
+
+// wireRefusal mirrors llm.Refusal: present only when the provider declined.
+// Both fields are always written ("" when the provider gave none); a bridge
+// that omits one is read as "".
+type wireRefusal struct {
+	Category    string `json:"category"`
+	Explanation string `json:"explanation"`
 }
 
 // wireLine is one NDJSON line of the /generate response.
@@ -149,9 +159,10 @@ func (p *provider) toWire(req llm.Request) wireRequest {
 
 func (r *wireResponse) toLLM() *llm.Response {
 	out := &llm.Response{
-		Content:    r.Content,
-		Thoughts:   r.Thoughts,
-		StopReason: r.StopReason,
+		Content:     r.Content,
+		Thoughts:    r.Thoughts,
+		StopReason:  r.StopReason,
+		StopMessage: r.StopMessage,
 		Usage: llm.Usage{
 			PromptTokens:     r.Usage.PromptTokens,
 			CompletionTokens: r.Usage.CompletionTokens,
@@ -160,6 +171,9 @@ func (r *wireResponse) toLLM() *llm.Response {
 			CacheWriteTokens: r.Usage.CacheWriteTokens,
 		},
 		ProviderExtra: r.ProviderExtra,
+	}
+	if r.Refusal != nil {
+		out.Refusal = &llm.Refusal{Category: r.Refusal.Category, Explanation: r.Refusal.Explanation}
 	}
 	if out.Usage.TotalTokens == 0 && (out.Usage.PromptTokens > 0 || out.Usage.CompletionTokens > 0) {
 		out.Usage.TotalTokens = out.Usage.PromptTokens + out.Usage.CompletionTokens
@@ -222,9 +236,10 @@ func responseToWire(r *llm.Response) *wireResponse {
 		return &wireResponse{}
 	}
 	out := &wireResponse{
-		Content:    r.Content,
-		Thoughts:   r.Thoughts,
-		StopReason: r.StopReason,
+		Content:     r.Content,
+		Thoughts:    r.Thoughts,
+		StopReason:  r.StopReason,
+		StopMessage: r.StopMessage,
 		Usage: wireUsage{
 			PromptTokens:     r.Usage.PromptTokens,
 			CompletionTokens: r.Usage.CompletionTokens,
@@ -233,6 +248,9 @@ func responseToWire(r *llm.Response) *wireResponse {
 			CacheWriteTokens: r.Usage.CacheWriteTokens,
 		},
 		ProviderExtra: r.ProviderExtra,
+	}
+	if r.Refusal != nil {
+		out.Refusal = &wireRefusal{Category: r.Refusal.Category, Explanation: r.Refusal.Explanation}
 	}
 	for _, tc := range r.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, wireToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})

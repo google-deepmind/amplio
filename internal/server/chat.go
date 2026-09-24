@@ -45,6 +45,19 @@ type chatBubble struct {
 	// internal/responserewrite). Sent alongside the original, never instead of
 	// it: the client offers both and the original stays the record.
 	Rewrite string `json:"rewrite,omitempty"`
+	// Refusal is set when the provider declined this turn (see llm.Refusal), so
+	// the client can say why instead of showing a blank or missing reply.
+	Refusal *chatRefusal `json:"refusal,omitempty"`
+	// StopNotice is set when the turn stopped abnormally (see stopNoticeFor).
+	StopNotice *stopNotice `json:"stop_notice,omitempty"`
+}
+
+// chatRefusal is the display part of event.Refusal: the provider's category
+// and explanation, verbatim (the native payload stays in the event log). Both
+// are always sent; "" means the provider gave none.
+type chatRefusal struct {
+	Category    string `json:"category"`
+	Explanation string `json:"explanation"`
 }
 
 type chatToolCall struct {
@@ -151,8 +164,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				ToolCalls: []chatToolCall{},
 			})
 		case *event.AssistantEvent:
-			if ev.Content == "" && len(ev.ToolCalls) == 0 {
-				continue // empty assistant turn; nothing to show
+			// An empty turn has nothing to show — unless it was refused or
+			// stopped abnormally, which the operator must see (both usually leave
+			// exactly this empty turn).
+			notice := stopNoticeFor(ev)
+			if ev.Content == "" && len(ev.ToolCalls) == 0 && ev.Refusal == nil && notice == nil {
+				continue
+			}
+			var refusal *chatRefusal
+			if ev.Refusal != nil {
+				refusal = &chatRefusal{Category: ev.Refusal.Category, Explanation: ev.Refusal.Explanation}
 			}
 			tcs := make([]chatToolCall, 0, len(ev.ToolCalls))
 			for _, tc := range ev.ToolCalls {
@@ -168,7 +189,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			msgs = append(msgs, chatBubble{
 				EventID: rec.EventID, Kind: "chatbot", Content: ev.Content,
 				Thoughts: ev.Thoughts, Step: rec.Step, CreatedAt: rec.CreatedAt,
-				ToolCalls: tcs, Rewrite: rewrite,
+				ToolCalls: tcs, Rewrite: rewrite, Refusal: refusal, StopNotice: notice,
 			})
 		case *event.MessageEvent:
 			// Inbound message: another agent (send_message) or the environment

@@ -319,6 +319,125 @@
 	// content or the artifacts browser. Never shown just because it COULD be.
 	const asideVisible = $derived(panelMode && (liveTree.live > 0 || artifactsOpen));
 
+	// --- Draggable split between the conversation column and the aside ---
+	// The conversation column is a fixed 54rem by default (see .chat) and the
+	// aside takes the remainder. That default is a good READING width, but it is a
+	// bad ARTIFACT width: a wide file, a diff or an image wants the room. So the
+	// divider between them is draggable, and the operator's choice overrides the
+	// default flex-basis for as long as the aside is showing.
+	//
+	// Stored in px (not a fraction): the conversation column is a reading measure,
+	// so it should stay put when the window resizes and let the panel absorb the
+	// change — the same contract the non-dragged layout already has. Persisted
+	// GLOBALLY, not per-run: unlike "is artifacts open", a comfortable split is a
+	// property of the operator's screen, not of one run.
+	const SPLIT_KEY = 'amplio-chat-split';
+	// Floors, in px. Below CHAT_MIN the conversation stops being readable (and its
+	// composer/status bar start wrapping); below PANEL_MIN the artifact browser's
+	// breadcrumb toolbar can no longer show a path. Dragging past either end just
+	// stops, rather than being refused, so a fast flick lands on the extreme.
+	const CHAT_MIN = 380;
+	const PANEL_MIN = 320;
+	// The two 1rem flex gaps plus the divider's own hit area — width the split
+	// spends on chrome, which neither side can claim.
+	const SPLIT_GUTTER = 42;
+
+	// null = untouched, i.e. use the CSS default (54rem). Kept as null rather than
+	// eagerly resolved to px so the default can change in CSS alone, and so a
+	// reset (double-click) is a real reset.
+	let chatWidth = $state<number | null>(null);
+	let layoutWidth = $state(0); // bind:clientWidth of .chat-layout
+	let chatEl = $state<HTMLElement>();
+	let dragging = $state(false);
+
+	// Clamp against the CURRENT pane width, not the width at drag time: this runs
+	// as part of the derived style below, so shrinking the window re-clamps a
+	// stored width instead of pushing the panel under its floor (or off-pane).
+	function clampChat(px: number): number {
+		const max = layoutWidth - PANEL_MIN - SPLIT_GUTTER;
+		// Pre-measure (SSR/first frame) or a pane too small to honour both floors:
+		// leave the request alone; CSS min-width:0 keeps it from overflowing and the
+		// next real measurement clamps it.
+		if (!layoutWidth || max < CHAT_MIN) return px;
+		return Math.round(Math.min(Math.max(px, CHAT_MIN), max));
+	}
+	// Only overrides the default while the aside is actually on screen — with no
+	// panel to trade width with, the conversation goes back to its centered 54rem
+	// reading column instead of sitting at whatever width the last drag left it.
+	const chatStyle = $derived(
+		asideVisible && chatWidth !== null ? `flex: 0 0 ${clampChat(chatWidth)}px` : ''
+	);
+
+	$effect(() => {
+		if (!browser) return;
+		const saved = Number(localStorage.getItem(SPLIT_KEY));
+		if (Number.isFinite(saved) && saved > 0) chatWidth = saved;
+	});
+	// Skipped mid-drag: the value changes every pointer frame and only the one it
+	// settles on is worth a synchronous localStorage write. Reading `dragging`
+	// makes this effect re-run when the drag ends, which is when it persists.
+	$effect(() => {
+		if (!browser || dragging) return;
+		if (chatWidth === null) localStorage.removeItem(SPLIT_KEY);
+		else localStorage.setItem(SPLIT_KEY, String(chatWidth));
+	});
+
+	// Measured live rather than read from `chatWidth`, so the first drag starts
+	// from wherever the CSS default put the column (chatWidth is still null then).
+	function currentChatWidth(): number {
+		return chatEl?.getBoundingClientRect().width ?? 0;
+	}
+
+	// Pointer events + pointer capture (not window-level mousemove): capture keeps
+	// the stream coming to the divider even when the cursor outruns it or crosses
+	// an iframe/textarea, and covers touch/pen with the same code path.
+	function startDrag(e: PointerEvent) {
+		if (e.button !== 0) return;
+		const handle = e.currentTarget as HTMLElement;
+		const startX = e.clientX;
+		const startW = currentChatWidth();
+		dragging = true;
+		handle.setPointerCapture(e.pointerId);
+		const move = (ev: PointerEvent) => {
+			chatWidth = clampChat(startW + (ev.clientX - startX));
+		};
+		const stop = (ev: PointerEvent) => {
+			dragging = false;
+			handle.releasePointerCapture?.(ev.pointerId);
+			handle.removeEventListener('pointermove', move);
+			handle.removeEventListener('pointerup', stop);
+			handle.removeEventListener('pointercancel', stop);
+		};
+		handle.addEventListener('pointermove', move);
+		handle.addEventListener('pointerup', stop);
+		handle.addEventListener('pointercancel', stop);
+		// Stops the drag from selecting the transcript text it passes over.
+		e.preventDefault();
+	}
+
+	// The divider is a focusable role="separator", so the split is reachable
+	// without a pointer. Shift = coarse step, Home/End slam to the floors.
+	function onDividerKey(e: KeyboardEvent) {
+		const step = e.shiftKey ? 64 : 16;
+		const w = currentChatWidth();
+		if (e.key === 'ArrowLeft') chatWidth = clampChat(w - step);
+		else if (e.key === 'ArrowRight') chatWidth = clampChat(w + step);
+		else if (e.key === 'Home') chatWidth = clampChat(0); // clamps to CHAT_MIN
+		else if (e.key === 'End') chatWidth = clampChat(Number.MAX_SAFE_INTEGER);
+		else if (e.key === 'Enter' || e.key === ' ') chatWidth = null; // reset
+		else return;
+		e.preventDefault();
+	}
+
+	// While dragging, the cursor must stay col-resize and nothing may select,
+	// even where the pointer currently is (over the transcript, the browser, an
+	// input). Cheapest correct way is a body class for the duration.
+	$effect(() => {
+		if (!browser || !dragging) return;
+		document.body.classList.add('col-resizing');
+		return () => document.body.classList.remove('col-resizing');
+	});
+
 	// Open an artifact file (from a $AMPLIO_ARTIFACT_DIR/ pill). Only makes sense
 	// with panel room; on a narrow viewport we send the operator to the full
 	// Artifacts page instead (deep-linked to the file).
@@ -496,7 +615,7 @@
 		{#if error}<p class="err">{error}</p>{/if}
 	</div>
 {:else}
-	<div class="chat-layout">
+	<div class="chat-layout" bind:clientWidth={layoutWidth}>
 		<!-- Artifacts toggle: rendered floating over chat when the aside isn't shown
 		     (nothing ambient, artifacts closed), or inside the aside's header once it
 		     is. Always means the same thing — open/close the artifacts browser. -->
@@ -584,7 +703,7 @@
 				</span>
 			{/if}
 		{/snippet}
-	<div class="chat">
+	<div class="chat" bind:this={chatEl} style={chatStyle}>
 		{#if error}<p class="err">{error}</p>{/if}
 		<!-- use:artifactPills delegates artifact-pill (data-artifact-path) clicks from
 		     the {@html} markdown to open the file in the side panel. -->
@@ -691,7 +810,31 @@
 	     sub-agents) or the artifacts browser is open. Ambient content is never
 	     replaced by opening artifacts — it demotes to a compact footer instead,
 	     so an open artifacts browser can't hide live status updates. -->
+	<!-- ...and the drag handle that sizes it against the conversation column.
+	     role="separator" + tabindex makes it a real, focusable window splitter:
+	     arrows nudge, Home/End slam to the floors, Enter/Space (or a double-click)
+	     restore the default reading width. Visually a 1px rule (::after) over a
+	     much wider invisible grab area. -->
 	{#if asideVisible}
+		<!-- A focusable separator IS a widget per ARIA (a window splitter), which is
+		     exactly what these two rules don't model — they only know "div". -->
+		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+		<div
+			class="splitter"
+			class:dragging
+			role="separator"
+			aria-orientation="vertical"
+			aria-label="Resize the artifacts panel"
+			aria-valuenow={chatWidth !== null ? clampChat(chatWidth) : undefined}
+			aria-valuemin={CHAT_MIN}
+			aria-valuemax={Math.max(CHAT_MIN, layoutWidth - PANEL_MIN - SPLIT_GUTTER)}
+			tabindex="0"
+			title="Drag to resize · double-click to reset"
+			onpointerdown={startDrag}
+			ondblclick={() => (chatWidth = null)}
+			onkeydown={onDividerKey}
+		></div>
 		<aside class="side-panel" transition:fly={{ x: 16, duration: 150 }}>
 			<!-- Shell header: fixed position always at the top of the aside, but its
 			     CONTENT swaps — "Status" + the toggle when showing ambient content, or
@@ -816,6 +959,48 @@
 		flex: 0 0 54rem;
 		max-width: 100%;
 		min-width: 0;
+	}
+	/* Drag handle between the conversation and the aside. Zero-ish visual weight
+	   (a 1px rule drawn by ::after, dim until hovered) over a ~6px + 1rem-of-gap
+	   grab area, so it reads as a boundary rather than a control until you reach
+	   for it. Not rendered at all without the aside. */
+	.splitter {
+		flex: 0 0 6px;
+		align-self: stretch;
+		position: relative;
+		cursor: col-resize;
+		border-radius: var(--radius-pill);
+		/* The gaps on either side belong to the handle for pointer purposes: a
+		   6px target is a miss at speed. Negative margins claim them back without
+		   changing the visual spacing. */
+		margin: 0 -0.35rem;
+		touch-action: none; /* pointer capture owns the gesture, not scrolling */
+	}
+	.splitter::after {
+		content: '';
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 50%;
+		width: 1px;
+		transform: translateX(-50%);
+		background: var(--border);
+		transition: background 120ms ease, width 120ms ease;
+	}
+	.splitter:hover::after,
+	.splitter:focus-visible::after,
+	.splitter.dragging::after {
+		width: 3px;
+		background: var(--accent);
+	}
+	.splitter:focus-visible {
+		outline: none; /* the thickened accent rule IS the focus indicator */
+	}
+	/* Set on <body> for the duration of a drag: keeps the resize cursor and kills
+	   text selection everywhere the pointer travels, not just over the handle. */
+	:global(body.col-resizing) {
+		cursor: col-resize;
+		user-select: none;
 	}
 	/* The aside takes ALL remaining width. It can't grow unbounded: the whole app
 	   is capped at 1600px (root <main>), so this only ever fills the bounded pane

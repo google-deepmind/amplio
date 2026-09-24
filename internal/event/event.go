@@ -155,9 +155,19 @@ type AssistantEvent struct {
 	// subprocess: bridge-defined). NOT normalized across providers — persisted
 	// verbatim for inspection/debugging (e.g. diagnosing an accidental empty
 	// no-tool conclusion). Omitted for events written before this field existed.
-	StopReason    string         `json:"stop_reason,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	// StopMessage is the provider's detail on why generation stopped (see
+	// llm.Response.StopMessage). Omitted when empty.
+	StopMessage string `json:"stop_message,omitempty"`
+	// Refusal is set when the provider declined to answer.
+	Refusal       *Refusal       `json:"refusal,omitempty"`
 	ProviderExtra map[string]any `json:"provider_extra,omitempty"`
 	Usage         *Usage         `json:"usage,omitempty"`
+}
+
+type Refusal struct {
+	Category    string `json:"category"`
+	Explanation string `json:"explanation"`
 }
 
 func (*AssistantEvent) eventTag()         {}
@@ -175,6 +185,20 @@ func (e *AssistantEvent) ToText() string {
 		// A lighter rule so a nested call reads as part of the assistant block,
 		// not a new top-level section.
 		fmt.Fprintf(&body, "---- tool_call · name=%s · id=%s ----\n%s", tc.Name, tc.ID, tc.Arguments)
+	}
+	// Surface a refusal so a refused turn doesn't read as a silent empty reply.
+	if r := e.Refusal; r != nil {
+		if body.Len() > 0 {
+			body.WriteByte('\n')
+		}
+		category := r.Category
+		if category == "" {
+			category = "unspecified"
+		}
+		fmt.Fprintf(&body, "---- refusal · category=%s ----", category)
+		if r.Explanation != "" {
+			body.WriteString("\n" + r.Explanation)
+		}
 	}
 	return banner("assistant", nil, body.String())
 }

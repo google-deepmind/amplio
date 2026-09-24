@@ -15,21 +15,30 @@
 -->
 
 <script lang="ts">
-	import type { AgentEvent } from '$lib/types';
+	import type { AgentEvent, StopNotice } from '$lib/types';
 	import { renderMarkdown } from '$lib/markdown';
 	import { blobUrl } from '$lib/api';
 	import { CaretRightIcon } from 'phosphor-svelte';
 	import ToolCall from './ToolCall.svelte';
+	import RefusalNotice from './Refusal.svelte';
+	import StopNoticeView from './StopNotice.svelte';
 	// results maps a tool_call_id to its ToolResultEvent. When provided (the
 	// trajectory view), this event's tool_calls render as paired call+result
 	// blocks via <ToolCall>; absent, tool_calls render call-only (legacy).
+	// stopNotice (from the event's DTO) flags an abnormal stop.
 	let {
 		ev,
 		step,
 		runId = '',
-		results = {}
-	}: { ev: AgentEvent; step: number; runId?: string; results?: Record<string, AgentEvent> } =
-		$props();
+		results = {},
+		stopNotice = undefined
+	}: {
+		ev: AgentEvent;
+		step: number;
+		runId?: string;
+		results?: Record<string, AgentEvent>;
+		stopNotice?: StopNotice;
+	} = $props();
 </script>
 
 <div class="evt {ev.type}">
@@ -53,6 +62,12 @@
 		{:else}
 			<pre class="pre">{ev.content}</pre>
 		{/if}
+	{/if}
+	{#if ev.refusal}
+		<RefusalNotice refusal={ev.refusal} />
+	{/if}
+	{#if stopNotice}
+		<StopNoticeView notice={stopNotice} />
 	{/if}
 	{#if ev.tool_calls?.length}
 		{#each ev.tool_calls as tc (tc.id)}

@@ -90,6 +90,8 @@ per line:
    "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,
             "cache_read_tokens":0,"cache_write_tokens":0},
    "stop_reason":"end_turn",
+   "stop_message":"",            // optional: the backend's detail on why it stopped
+   "refusal":{"category":"...","explanation":"..."},  // ONLY when the model declined
    "provider_extra":{}
 }}
 // or, on failure:
@@ -105,6 +107,12 @@ Notes:
   amplio persists it on the assistant turn and replays it on the next request's
   matching assistant message, so a bridge can round-trip opaque per-turn state
   (like thought signatures).
+- Set `refusal` only when the backend declined to answer (safety classifier,
+  content filter, blocked prompt); its presence is what marks the turn as refused.
+  Both fields are strings carried verbatim, `""` when the backend gave none (an
+  omitted field reads as `""`): `category` is the backend's policy label,
+  `explanation` human-readable text. amplio persists it on the assistant turn
+  for diagnosis and never replays it.
 - Stream NDJSON incrementally (flush each line). With HTTP/1.0 the stream ends on
   connection close after the `final` line.
 

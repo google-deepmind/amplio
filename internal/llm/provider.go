@@ -128,10 +128,22 @@ type Response struct {
 	Thoughts   string
 	Usage      Usage
 	StopReason string
+	// StopMessage is the provider's human-readable detail on why generation
+	// stopped, verbatim (Gemini finishMessage, e.g. "Malformed function call:
+	// …"). Empty when the provider gave none, and on refusals, which carry
+	// theirs in Refusal.Explanation.
+	StopMessage string
+	// Refusal when the provider declined to answer (see Refusal).
+	Refusal *Refusal
 	// ProviderExtra is opaque, provider-namespaced cargo that doesn't fit the
 	// flat projection above (e.g. Gemini per-tool-call thought signatures). It is
 	// persisted on the AssistantEvent and replayed via Message.ProviderExtra.
 	ProviderExtra map[string]any
+}
+
+type Refusal struct {
+	Category    string
+	Explanation string
 }
 
 // IsOutputLimitStopReason reports whether a provider explicitly says the
@@ -141,6 +153,23 @@ type Response struct {
 func IsOutputLimitStopReason(reason string) bool {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "length", "max_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsNormalStopReason reports whether a stop reason is an ordinary ending: the
+// model finished its turn or made tool calls. Anything else (output limit,
+// refusal, a malformed tool call, a provider-side filter, …) is worth
+// surfacing. An empty reason is treated as normal: providers that don't report
+// one, and events written before the field existed.
+func IsNormalStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "",
+		"end_turn", "tool_use", "stop_sequence", // Anthropic
+		"stop",                        // Gemini STOP; OpenAI-compatible stop
+		"tool_calls", "function_call": // OpenAI-compatible
 		return true
 	default:
 		return false

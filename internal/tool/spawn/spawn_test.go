@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -113,6 +114,16 @@ func TestSpawnLinkMode(t *testing.T) {
 	}
 	if !strings.Contains(linkCaptured.Root(), "myrepo-amplio/worktrees/") {
 		t.Errorf("child root = %q, want under myrepo-amplio/worktrees/", linkCaptured.Root())
+	}
+	// Named "<runID>-<session>", not the bare session id: session ids repeat
+	// across runs, and the worktrees dir (like a CitC alias namespace) is shared
+	// by every run on the repo.
+	m := regexp.MustCompile(`Spawned sub-agent "([^"]+)"`).FindStringSubmatch(res.Content)
+	if m == nil {
+		t.Fatalf("no session id in spawn result: %s", res.Content)
+	}
+	if got, want := filepath.Base(linkCaptured.Root()), workspace.LinkName(runID, m[1]); got != want {
+		t.Errorf("linked worktree name = %q, want %q", got, want)
 	}
 	if !workspace.PathExists(linkCaptured.Root()) {
 		t.Errorf("linked worktree dir missing: %s", linkCaptured.Root())

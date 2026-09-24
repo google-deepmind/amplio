@@ -27,6 +27,7 @@ import (
 	"amplio/internal/event"
 	"amplio/internal/tool"
 	"amplio/internal/util"
+	"amplio/internal/workspace"
 )
 
 type Params struct {
@@ -80,12 +81,14 @@ func makeExecutor(env *agent.Env, parentSessionID string) tool.Executor {
 		}
 
 		// Workspace: share the parent's by default, or create an isolated linked
-		// workspace (worktree / CitC link) named after the child session so
-		// parallel sub-agents don't clobber each other's files.
+		// workspace (worktree / CitC link) so parallel sub-agents don't clobber
+		// each other's files. Named "<runID>-<session>" (workspace.LinkName), not
+		// the bare session id: session ids repeat across runs, and a link's name
+		// can live in a namespace shared by all runs (a CitC alias is per-user).
 		childEnv := env
 		linkedInfo := ""
 		if params.WorkspaceMode == "link" {
-			linked, err := env.Workspace.CreateLinked(ctx, sessionID)
+			linked, err := env.Workspace.CreateLinked(ctx, workspace.LinkName(env.RunID, sessionID))
 			if err != nil {
 				return &tool.Result{
 					Content: fmt.Sprintf("Error creating linked workspace: %s", err),

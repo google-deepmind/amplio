@@ -843,6 +843,126 @@ func TestServer_ChatProjection(t *testing.T) {
 	}
 }
 
+// A refused turn is usually an EMPTY assistant turn, which the chat feed
+// otherwise drops ("nothing to show"). It must surface instead, carrying the
+// provider's category and explanation so the UI can say why there's no reply;
+// a plain empty turn stays hidden.
+func TestServer_ChatProjection_Refusal(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, db.SessionRecord{
+		RunID: testRun, SessionID: "chatty-bot", AgentType: "chatbot", Status: db.SessionIdle,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvanceStep(ctx, testRun, "chatty-bot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeStep(ctx, testRun, "chatty-bot", 1, []event.Event{
+		&event.UserEvent{Content: "what do you mean?"},
+		&event.AssistantEvent{StopReason: "refusal", Refusal: &event.Refusal{
+			Category:    "reasoning_extraction",
+			Explanation: "This request was blocked.",
+		}},
+		&event.AssistantEvent{StopReason: "end_turn"},                           // plain empty turn: still hidden
+		&event.AssistantEvent{StopReason: "refusal", Refusal: &event.Refusal{}}, // no details given
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	_, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/chatty-bot/chat?token=secret", "")
+	var feed chatFeed
+	if err := json.Unmarshal(body, &feed); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Messages) != 3 {
+		t.Fatalf("messages = %d, want operator + 2 refused turns (plain empty turn hidden): %s", len(feed.Messages), body)
+	}
+	bot := feed.Messages[1]
+	if bot.Kind != "chatbot" || bot.Content != "" || bot.Refusal == nil ||
+		bot.Refusal.Category != "reasoning_extraction" || bot.Refusal.Explanation != "This request was blocked." {
+		t.Errorf("refused bubble = %+v (refusal %+v), want chatbot bubble with category + explanation", bot, bot.Refusal)
+	}
+	// Category and explanation are always present (the client types them as
+	// plain strings); a refusal without details sends them empty.
+	if !strings.Contains(string(body), `"refusal":{"category":"","explanation":""}`) {
+		t.Errorf("detail-less refusal should send empty category/explanation keys: %s", body)
+	}
+}
+
+// Abnormal stops are flagged for the operator in both views: the chat feed and
+// the trajectory's events carry a stop_notice (with the provider's message and
+// whether the output limit cut the turn off). An empty turn with a notice is
+// shown, not dropped. Normal endings and refusals (own notice) get none.
+func TestServer_StopNotice(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, db.SessionRecord{
+		RunID: testRun, SessionID: "chatty-bot", AgentType: "chatbot", Status: db.SessionIdle,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvanceStep(ctx, testRun, "chatty-bot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeStep(ctx, testRun, "chatty-bot", 1, []event.Event{
+		&event.UserEvent{Content: "go"},
+		&event.AssistantEvent{Content: "partial answer", StopReason: "max_tokens"},
+		&event.AssistantEvent{StopReason: "MALFORMED_FUNCTION_CALL", StopMessage: "Malformed function call: print(x)"},
+		&event.AssistantEvent{Content: "fine", StopReason: "end_turn"},
+		&event.AssistantEvent{StopReason: "refusal", Refusal: &event.Refusal{Category: "cyber"}},
+		&event.AssistantEvent{StopReason: "STOP"}, // empty + normal: still hidden in chat
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	_, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/chatty-bot/chat?token=secret", "")
+	var feed chatFeed
+	if err := json.Unmarshal(body, &feed); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Messages) != 5 {
+		t.Fatalf("messages = %d, want operator + 4 turns (empty normal turn hidden): %s", len(feed.Messages), body)
+	}
+	cut, malformed, fine, refused := feed.Messages[1], feed.Messages[2], feed.Messages[3], feed.Messages[4]
+	if n := cut.StopNotice; n == nil || n.Reason != "max_tokens" || !n.Truncated {
+		t.Errorf("truncated turn notice = %+v, want max_tokens truncated", n)
+	}
+	if n := malformed.StopNotice; n == nil || n.Reason != "MALFORMED_FUNCTION_CALL" || n.Message != "Malformed function call: print(x)" || n.Truncated {
+		t.Errorf("malformed turn notice = %+v, want reason + message, not truncated", n)
+	}
+	if fine.StopNotice != nil || refused.StopNotice != nil || refused.Refusal == nil {
+		t.Errorf("normal turn notice = %+v, refused turn notice = %+v (refusal %+v), want none (refusal has its own)", fine.StopNotice, refused.StopNotice, refused.Refusal)
+	}
+
+	_, body = doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/chatty-bot/events?step=1&token=secret", "")
+	var evs []eventDTO
+	if err := json.Unmarshal(body, &evs); err != nil {
+		t.Fatalf("events: %v: %s", err, body)
+	}
+	var notices []string
+	for _, e := range evs {
+		if e.StopNotice != nil {
+			notices = append(notices, e.StopNotice.Reason)
+		}
+	}
+	if strings.Join(notices, ",") != "max_tokens,MALFORMED_FUNCTION_CALL" {
+		t.Errorf("trajectory events with a stop_notice = %v, want [max_tokens MALFORMED_FUNCTION_CALL]", notices)
+	}
+}
+
 // A RANGED chat request (from_step/to_step) is the read-only session-log viewer
 // browsing one closed phase: the phase's own turns come back as bubbles (no
 // boundary rollup), with no cards and no usage. It also works on a non-chatbot

@@ -516,6 +516,32 @@ type respAcc struct {
 	usage    *genai.GenerateContentResponseUsageMetadata
 	finish   genai.FinishReason
 	anySig   bool
+	// Refusal evidence (see refusal()): promptFeedback when the PROMPT was
+	// blocked, else the candidate's finishMessage and safetyRatings.
+	// finishMsg is also the StopMessage of a non-refusal stop.
+	promptFeedback *genai.GenerateContentResponsePromptFeedback
+	finishMsg      string
+	ratings        []*genai.SafetyRating
+}
+
+// promptBlockedStopReason is the StopReason for a turn whose prompt Gemini
+// blocked. Gemini returns no candidate at all then — so no finishReason — and
+// the turn would otherwise persist with an empty stop reason. The native
+// blockReason is kept in Refusal.Category.
+const promptBlockedStopReason = "PROMPT_BLOCKED"
+
+// refusalFinishReasons are the finishReasons meaning a policy filter stopped
+// the output (safety, blocklist, prohibited content, PII, recitation), as
+// opposed to a normal, length or tool-call ending.
+var refusalFinishReasons = map[genai.FinishReason]bool{
+	genai.FinishReasonSafety:                 true,
+	genai.FinishReasonRecitation:             true,
+	genai.FinishReasonBlocklist:              true,
+	genai.FinishReasonProhibitedContent:      true,
+	genai.FinishReasonSPII:                   true,
+	genai.FinishReasonImageSafety:            true,
+	genai.FinishReasonImageProhibitedContent: true,
+	genai.FinishReasonImageRecitation:        true,
 }
 
 func (a *respAcc) add(resp *genai.GenerateContentResponse) {
@@ -525,12 +551,23 @@ func (a *respAcc) add(resp *genai.GenerateContentResponse) {
 	if resp.UsageMetadata != nil {
 		a.usage = resp.UsageMetadata
 	}
+	// A blocked prompt arrives as promptFeedback with NO candidates (only in the
+	// first stream chunk), so capture it before the early return below.
+	if pf := resp.PromptFeedback; pf != nil && pf.BlockReason != "" {
+		a.promptFeedback = pf
+	}
 	if len(resp.Candidates) == 0 {
 		return
 	}
 	cand := resp.Candidates[0]
 	if cand.FinishReason != "" {
 		a.finish = cand.FinishReason
+	}
+	if cand.FinishMessage != "" {
+		a.finishMsg = cand.FinishMessage
+	}
+	if len(cand.SafetyRatings) > 0 {
+		a.ratings = cand.SafetyRatings
 	}
 	if cand.Content == nil {
 		return
@@ -570,6 +607,13 @@ func (a *respAcc) response() *llm.Response {
 		Thoughts:   a.thoughts.String(),
 		ToolCalls:  a.calls,
 		StopReason: string(a.finish),
+		Refusal:    a.refusal(),
+	}
+	if r.Refusal == nil {
+		r.StopMessage = a.finishMsg // a refusal's message is its Explanation
+	}
+	if a.promptFeedback != nil && r.StopReason == "" {
+		r.StopReason = promptBlockedStopReason
 	}
 	if a.usage != nil {
 		r.Usage = llm.Usage{
@@ -589,6 +633,55 @@ func (a *respAcc) response() *llm.Response {
 		}
 	}
 	return r
+}
+
+// refusal reports why Gemini declined, if it did: a blocked prompt
+// (promptFeedback.blockReason) takes precedence over a filtered output
+// (a policy finishReason). Nil for any other turn.
+func (a *respAcc) refusal() *llm.Refusal {
+	if pf := a.promptFeedback; pf != nil {
+		return &llm.Refusal{
+			Category:    string(pf.BlockReason),
+			Explanation: firstNonEmpty(pf.BlockReasonMessage, blockedRatings(pf.SafetyRatings)),
+		}
+	}
+	if !refusalFinishReasons[a.finish] {
+		return nil
+	}
+	return &llm.Refusal{
+		Category:    string(a.finish),
+		Explanation: firstNonEmpty(a.finishMsg, blockedRatings(a.ratings)),
+	}
+}
+
+// blockedRatings summarizes the safety ratings that actually caused a block
+// (e.g. "blocked: HARM_CATEGORY_DANGEROUS_CONTENT (HIGH)"), as a fallback
+// explanation when Gemini sent no message. Empty if none is marked blocked.
+func blockedRatings(ratings []*genai.SafetyRating) string {
+	var parts []string
+	for _, sr := range ratings {
+		if sr == nil || !sr.Blocked {
+			continue
+		}
+		s := string(sr.Category)
+		if sr.Probability != "" {
+			s += " (" + string(sr.Probability) + ")"
+		}
+		parts = append(parts, s)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "blocked: " + strings.Join(parts, ", ")
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // --- streaming ---

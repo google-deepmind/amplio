@@ -27,11 +27,13 @@
 	// and `optimistic` (the live page produces them; the log viewer passes none).
 	import { tick } from 'svelte';
 	import { api } from '$lib/api';
-	import type { ChatBubble, ChatToolCall, AgentEvent } from '$lib/types';
+	import type { ChatBubble, ChatToolCall, AgentEvent, Refusal, StopNotice } from '$lib/types';
 	import CopyButton from './CopyButton.svelte';
 	import ChatNavigator from './ChatNavigator.svelte';
 	import ToolCall from './ToolCall.svelte';
 	import Thoughts from './Thoughts.svelte';
+	import RefusalNotice from './Refusal.svelte';
+	import StopNoticeView from './StopNotice.svelte';
 	import { renderMarkdown } from '$lib/markdown';
 	import {
 		CircleNotchIcon,
@@ -236,7 +238,9 @@
 				streaming: boolean,
 				step: number,
 				eid: string = '',
-				rewriteText: string = ''
+				rewriteText: string = '',
+				refusal: Refusal | undefined = undefined,
+				stopNotice: StopNotice | undefined = undefined
 			)}
 				<!-- data-eid is the navigator's scroll target: it resolves a segment to a
 				     DOM node without the navigator knowing anything about this markup. -->
@@ -278,6 +282,8 @@
 						{/if}
 						{#if thoughts}<Thoughts {thoughts} {streaming} />{/if}
 						{#if content}<div class="md">{@html renderMarkdown(shown, { linkifyArtifacts: true })}</div>{/if}
+						{#if refusal}<RefusalNotice {refusal} />{/if}
+						{#if stopNotice}<StopNoticeView notice={stopNotice} />{/if}
 					</div>
 					{#if streaming}<span class="cursor"></span>{/if}
 					{#if toolCalls.length}
@@ -398,7 +404,7 @@
 						<div class="md dim small compaction-body">{@html renderMarkdown(m.content)}</div>
 					</details>
 				{:else}
-					{@render chatbotInline(m.content, m.thoughts ?? '', m.tool_calls, false, m.step, m.event_id, m.rewrite ?? '')}
+					{@render chatbotInline(m.content, m.thoughts ?? '', m.tool_calls, false, m.step, m.event_id, m.rewrite ?? '', m.refusal, m.stop_notice)}
 				{/if}
 
 				{#if row.showSep || row.reserved}

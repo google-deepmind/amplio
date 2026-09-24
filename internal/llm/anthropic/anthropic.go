@@ -165,6 +165,18 @@ func (p *provider) Stream(ctx context.Context, req llm.Request) (llm.Stream, err
 	return &anthropicStream{stream: stream}, nil
 }
 
+// convertRefusal maps a stop_reason "refusal" turn onto llm.Refusal, from the
+// stop_details the safety classifier attaches (category + explanation, either
+// of which may be null). Nil for every other stop reason.
+//
+// https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
+func convertRefusal(msg *anthropic.Message) *llm.Refusal {
+	if msg.StopReason != anthropic.StopReasonRefusal {
+		return nil
+	}
+	return &llm.Refusal{Category: string(msg.StopDetails.Category), Explanation: msg.StopDetails.Explanation}
+}
+
 // callOpts adds the X-Vertex-Ai-Session-Id header (for cache/routing affinity)
 // to the spec reqOpts when the request has a SessionID.
 func (p *provider) callOpts(req llm.Request) []option.RequestOption {
@@ -424,6 +436,7 @@ func convertTools(tools []llm.ToolDef) []anthropic.ToolUnionParam {
 func convertResponse(msg *anthropic.Message) *llm.Response {
 	resp := &llm.Response{
 		StopReason: string(msg.StopReason),
+		Refusal:    convertRefusal(msg),
 		Usage: llm.Usage{
 			// With prompt caching on, Anthropic splits input tokens into three
 			// disjoint buckets: InputTokens is only the NEWLY-processed (uncached)

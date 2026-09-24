@@ -101,13 +101,22 @@
 			if (m.kind === 'chatbot') {
 				steps.add(m.step);
 				cur.tools += m.tool_calls?.length ?? 0;
-				if (!m.tool_calls?.length && (m.content ?? '').trim()) {
-					cur.rows.push({ kind: 'summary', eid: m.event_id, text: m.content, big: !sawSummary });
+				// A refused or abnormally stopped turn usually has no content; label
+				// it so it isn't a gap.
+				const text = (m.content ?? '').trim()
+					? m.content
+					: m.refusal
+						? `Model declined${m.refusal.category ? ` (${m.refusal.category})` : ''}`
+						: m.stop_notice
+							? `Stopped: ${m.stop_notice.reason}`
+							: '';
+				if (!m.tool_calls?.length && text) {
+					cur.rows.push({ kind: 'summary', eid: m.event_id, text, big: !sawSummary });
 					sawSummary = true;
-				} else if ((m.content ?? '').trim()) {
+				} else if (text) {
 					// Spoke while still working. Remembered so an interrupted segment can
 					// show the last thing the agent actually said instead of nothing.
-					cur.lastSaid = { eid: m.event_id, text: m.content };
+					cur.lastSaid = { eid: m.event_id, text };
 				}
 			} else if (m.kind === 'environment') {
 				// Notifications aggregate: they reach 26 in a single live window, and

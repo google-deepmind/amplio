@@ -396,6 +396,9 @@ type eventDTO struct {
 	Generation int             `json:"generation"`
 	CreatedAt  time.Time       `json:"created_at"`
 	Event      json.RawMessage `json:"event"`
+	// StopNotice is set on an assistant turn that stopped abnormally (see
+	// stopNoticeFor), so the trajectory can flag it without knowing providers.
+	StopNotice *stopNotice `json:"stop_notice,omitempty"`
 }
 
 func toEventDTO(r db.EventRecord) (eventDTO, error) {
@@ -403,7 +406,29 @@ func toEventDTO(r db.EventRecord) (eventDTO, error) {
 	if err != nil {
 		return eventDTO{}, err
 	}
-	return eventDTO{Step: r.Step, Generation: r.Generation, CreatedAt: r.CreatedAt, Event: data}, nil
+	dto := eventDTO{Step: r.Step, Generation: r.Generation, CreatedAt: r.CreatedAt, Event: data}
+	if a, ok := r.Event.(*event.AssistantEvent); ok {
+		dto.StopNotice = stopNoticeFor(a)
+	}
+	return dto, nil
+}
+
+// stopNotice flags an assistant turn that ended abnormally: cut off at the
+// output limit, a malformed tool call, a provider-side filter, and so on.
+// Refusals are excluded; they have their own notice (Refusal).
+type stopNotice struct {
+	Reason    string `json:"reason"`    // the provider's stop reason, verbatim
+	Message   string `json:"message"`   // the provider's detail, "" when it gave none
+	Truncated bool   `json:"truncated"` // the output-token limit cut the turn off
+}
+
+// stopNoticeFor decides, in one place for every view, whether a turn's stop
+// reason is worth showing. Nil for a normal ending or a refusal.
+func stopNoticeFor(a *event.AssistantEvent) *stopNotice {
+	if a.Refusal != nil || llm.IsNormalStopReason(a.StopReason) {
+		return nil
+	}
+	return &stopNotice{Reason: a.StopReason, Message: a.StopMessage, Truncated: llm.IsOutputLimitStopReason(a.StopReason)}
 }
 
 type observationDTO struct {

@@ -125,6 +125,16 @@ into the loop rather than concluding on nothing, bounded by a small in-memory
 counter so a degenerate model can't loop forever (see
 `eventloop.maxConcludeNudges`).
 
+A turn the provider **refused** (`AssistantEvent.Refusal` is set: an Anthropic
+`refusal` stop, a Gemini blocked prompt or policy stop) is not an accidental
+conclusion and is not nudged: replaying the same context would usually be
+refused again. An autonomous agent instead ends **`crashed`** with the refusal's
+stop reason, category and explanation as the error, whether the refused turn
+carried no text or a partial reply — so the parent gets
+`child_result(crashed, <reason>)` rather than an empty `concluded` result. The
+same check runs on the resume path when a refused turn is the stream tail. An
+interactive agent just parks `idle`; the operator sees the refusal in the chat.
+
 **Operator/user input is a `UserEvent`, not a `MessageEvent`.** `MessageEvent` is
 agent-to-agent (`send_message`) or environment (`$AMPLIO_NOTIFY`); rendering user
 input as a `MessageEvent` would tempt a chatbot to "reply" to the user via

@@ -16,6 +16,38 @@ package llm
 
 import "testing"
 
+func TestIsNormalStopReason(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   bool
+	}{
+		{"", true},
+		{"end_turn", true},
+		{"tool_use", true},
+		{"stop_sequence", true},
+		{"STOP", true},
+		{"stop", true},
+		{" tool_calls ", true},
+		{"function_call", true},
+		{"max_tokens", false},
+		{"MAX_TOKENS", false},
+		{"length", false},
+		{"refusal", false},
+		{"pause_turn", false},
+		{"model_context_window_exceeded", false},
+		{"MALFORMED_FUNCTION_CALL", false},
+		{"SAFETY", false},
+		{"OTHER", false},
+		{"content_filter", false},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			if got := IsNormalStopReason(tc.reason); got != tc.want {
+				t.Fatalf("IsNormalStopReason(%q) = %v, want %v", tc.reason, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsOutputLimitStopReason(t *testing.T) {
 	for _, tc := range []struct {
 		reason string

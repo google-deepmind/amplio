@@ -333,6 +333,13 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 			}
 			return false, true, nil
 		}
+		// Refusal guard, on the RECOVERY path. A refused turn persisted just before
+		// the process died must fail the session exactly like the live loop does,
+		// not be nudged (as an empty turn) or concluded (with partial text). The
+		// caller routes the error through recordFailure.
+		if tail.Refusal != nil {
+			return false, false, refusalError(tail.StopReason, tail.Refusal.Category, tail.Refusal.Explanation)
+		}
 		// Output-limit guard, on the RECOVERY path. A persisted no-tool response
 		// with an explicit output-limit stop is incomplete, so append the same nudge
 		// as the live loop and continue instead of converting a crash window into a
@@ -434,6 +441,28 @@ func (a *EventLoopAgent) repairOrphanToolCalls(ctx context.Context, events []db.
 func isDegenerateTurn(content string) bool {
 	trimmed := strings.TrimSpace(content)
 	return trimmed == "" || trimmed == emptyAssistantPlaceholder
+}
+
+// errProviderRefused marks the failure recorded when a provider declined an
+// autonomous agent's turn (llm.Response.Refusal set: an Anthropic refusal, a
+// Gemini blocked prompt or policy stop). Wrapped by refusalError so callers can
+// match it with errors.Is.
+var errProviderRefused = errors.New("provider refused the turn")
+
+// refusalError renders a provider refusal as the session's failure: the stop
+// reason, the refusal category and the provider's explanation, so the crash
+// marker on the session's own stream and the parent's child_result(crashed)
+// both say why the agent stopped. An empty category reads "unspecified",
+// matching AssistantEvent.ToText.
+func refusalError(stopReason, category, explanation string) error {
+	if category == "" {
+		category = "unspecified"
+	}
+	err := fmt.Errorf("%w (stop_reason=%q, category=%s)", errProviderRefused, stopReason, category)
+	if explanation = strings.TrimSpace(explanation); explanation != "" {
+		err = fmt.Errorf("%w: %s", err, explanation)
+	}
+	return err
 }
 
 // tailAssistantAtRest returns the trailing event iff it is a no-tool
@@ -753,6 +782,8 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 			Thoughts:      resp.Thoughts,
 			ToolCalls:     convertToolCalls(resp.ToolCalls),
 			StopReason:    resp.StopReason,
+			StopMessage:   resp.StopMessage,
+			Refusal:       convertRefusal(resp.Refusal),
 			ProviderExtra: resp.ProviderExtra,
 			Usage: &event.Usage{
 				PromptTokens:     resp.Usage.PromptTokens,
@@ -819,6 +850,18 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		// A bare no-tool-call turn means "done for now". What it produces
 		// depends on the agent's nature (see docs/internals/session_lifecycle.md).
 		if !a.cfg.Interactive {
+			// A provider refusal is a verdict on the request, not an accidental
+			// empty turn or a cut-off one: fail the session with the provider's
+			// reason. Checked FIRST so a refused turn is never nudged as "empty"
+			// (the retry would replay the same context and usually be refused
+			// again) and never concluded, whether it carries no text or a partial
+			// reply cut short by the refusal. The crash reaches the parent as
+			// child_result(crashed) carrying the reason, instead of an empty
+			// "successful" conclusion. Interactive agents are unaffected: the
+			// operator sees the refusal in the chat and decides what to do.
+			if resp.Refusal != nil {
+				return a.recordFailure(ctx, refusalError(resp.StopReason, resp.Refusal.Category, resp.Refusal.Explanation))
+			}
 			// An explicit output-limit stop means the provider cut generation off. The
 			// persisted assistant turn is useful context, but it is not a trustworthy
 			// autonomous result. Nudge the agent back into the normal loop and require
@@ -1083,6 +1126,13 @@ func eventToolCallsToLLM(tcs []event.ToolCall) []llm.ToolCall {
 		result[i] = llm.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
 	}
 	return result
+}
+
+func convertRefusal(r *llm.Refusal) *event.Refusal {
+	if r == nil {
+		return nil
+	}
+	return &event.Refusal{Category: r.Category, Explanation: r.Explanation}
 }
 
 func convertToolCalls(tcs []llm.ToolCall) []event.ToolCall {

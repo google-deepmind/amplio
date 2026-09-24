@@ -104,11 +104,13 @@ func (w *gitWorkspace) Describe(_ context.Context, parentSessionID string) strin
 }
 
 // CreateLinked creates an isolated git worktree (detached at the parent's
-// current HEAD) sharing the repo's object store, named after childSessionID. It
-// lives at `<mainRepoParent>/<repo>-amplio/worktrees/<childSessionID>` (on the
-// repo's own drive, never inside the repo, so no .gitignore change is needed),
-// and the child is rooted at the same sub-folder the parent was, if any.
-func (w *gitWorkspace) CreateLinked(ctx context.Context, childSessionID string) (workspace.Workspace, error) {
+// current HEAD) sharing the repo's object store. It lives at
+// `<mainRepoParent>/<repo>-amplio/worktrees/<name>` (on the repo's own drive,
+// never inside the repo, so no .gitignore change is needed), and the child is
+// rooted at the same sub-folder the parent was, if any. name is
+// workspace.LinkName ("<runID>-<session>"), so every run on the repo shares the
+// worktrees dir without clashing, grouped per run.
+func (w *gitWorkspace) CreateLinked(ctx context.Context, name string) (workspace.Workspace, error) {
 	// Resolve the shared repo (the lock key) and the main worktree root (the
 	// placement anchor) — both derived from the common git dir, so nested links
 	// all group under the one main repo.
@@ -136,7 +138,7 @@ func (w *gitWorkspace) CreateLinked(ctx context.Context, childSessionID string) 
 	release := linkLocks.Acquire(commonDir)
 	defer release()
 
-	placement := workspace.FreeSiblingPath(baseDir, childSessionID)
+	placement := workspace.FreeSiblingPath(baseDir, name)
 	if err := os.MkdirAll(filepath.Dir(placement), 0o755); err != nil {
 		return nil, fmt.Errorf("git link: create worktree parent: %w", err)
 	}

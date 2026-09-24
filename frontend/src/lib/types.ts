@@ -126,6 +126,26 @@ export interface ChatBubble {
   // Plain-prose restatement of `content`, when the run's model opted in
   // (see internal/responserewrite). Absent is normal: show the original.
   rewrite?: string;
+  // Set when the provider declined this turn; content is then usually empty.
+  refusal?: Refusal;
+  // Set when the turn stopped abnormally (output limit, malformed tool call, …).
+  stop_notice?: StopNotice;
+}
+
+// StopNotice flags an assistant turn that ended abnormally. The server decides
+// which stop reasons qualify (refusals have their own notice, Refusal).
+export interface StopNotice {
+  reason: string; // the provider's stop reason, verbatim
+  message: string; // the provider's detail, "" when it gave none
+  truncated: boolean; // the output-token limit cut the turn off
+}
+
+// Refusal: the provider declined a turn (safety classifier, content filter,
+// blocked prompt). Category and explanation are the provider's own, verbatim;
+// "" when it gave none.
+export interface Refusal {
+  category: string;
+  explanation: string;
 }
 
 export interface PhaseCard {
@@ -267,6 +287,7 @@ export interface EventDTO {
   generation: number;
   created_at: string;
   event: AgentEvent;
+  stop_notice?: StopNotice; // assistant turn that stopped abnormally
 }
 
 // Attachment is a tool-result binary artifact (today, view_file images). The
@@ -292,6 +313,7 @@ export interface AgentEvent {
   sender_type?: string;
   child_session_id?: string;
   verdict?: string;
+  refusal?: Refusal; // assistant only: the provider declined this turn
 }
 
 // Artifact browser (run Files tab).

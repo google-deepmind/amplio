@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -122,14 +123,16 @@ func TestRoundTrip_Lossless(t *testing.T) {
 			{ToolCallDelta: &llm.ToolCallDelta{ID: thoughtSignature, ArgumentsDelta: `"ls"}`}},
 		},
 		final: &llm.Response{
-			Content:    "partial",
-			Thoughts:   "let me think",
-			StopReason: "tool_use",
-			ToolCalls:  []llm.ToolCall{{ID: thoughtSignature, Name: "bash", Arguments: `{"cmd":"ls"}`}},
+			Content:     "partial",
+			Thoughts:    "let me think",
+			StopReason:  "tool_use",
+			StopMessage: "some provider detail",
+			ToolCalls:   []llm.ToolCall{{ID: thoughtSignature, Name: "bash", Arguments: `{"cmd":"ls"}`}},
 			Usage: llm.Usage{
 				PromptTokens: 113_000, CompletionTokens: 42, TotalTokens: 113_042,
 				CacheReadTokens: 100_000, CacheWriteTokens: 13_000,
 			},
+			Refusal: &llm.Refusal{Category: "cyber", Explanation: "declined"},
 			ProviderExtra: map[string]any{
 				"beyond.fc_sigs_b64": []any{"c2lnbmF0dXJl", "YW5vdGhlcg=="},
 				"nested":             map[string]any{"depth": "two"},
@@ -201,6 +204,29 @@ func TestRoundTrip_Lossless(t *testing.T) {
 	}
 	if !reflect.DeepEqual(final.ProviderExtra, fake.final.ProviderExtra) {
 		t.Errorf("provider_extra did not survive: %#v", final.ProviderExtra)
+	}
+	// Refusal is a top-level field, so (unlike provider_extra) the wire must
+	// name it explicitly in both directions or a bridged refusal is silently lost.
+	if !reflect.DeepEqual(final.Refusal, fake.final.Refusal) {
+		t.Errorf("refusal did not survive: %#v", final.Refusal)
+	}
+}
+
+// A refusal with no details is still a refusal: presence is the signal, so an
+// empty Refusal must cross the bridge as non-nil, with both fields on the wire.
+func TestRoundTrip_EmptyRefusalKeepsPresence(t *testing.T) {
+	fake := &fakeProvider{final: &llm.Response{StopReason: "refusal", Refusal: &llm.Refusal{}}}
+	p := serveBridge(t, fake, nil)
+	got, err := p.Call(context.Background(), llm.Request{})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if got.Refusal == nil || *got.Refusal != (llm.Refusal{}) {
+		t.Errorf("Refusal = %+v, want a non-nil empty refusal", got.Refusal)
+	}
+	b, _ := json.Marshal(responseToWire(fake.final))
+	if !strings.Contains(string(b), `"refusal":{"category":"","explanation":""}`) {
+		t.Errorf("wire = %s, want both refusal fields written", b)
 	}
 }
 

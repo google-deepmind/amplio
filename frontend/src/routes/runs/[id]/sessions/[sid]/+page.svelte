@@ -198,7 +198,7 @@
 				{:else}
 					{@const paired = pairEvents(stepEvents[st.step])}
 					{#each paired.display as e, i (i)}
-						<EventCard ev={e.event} step={e.step} {runId} results={paired.results} />
+						<EventCard ev={e.event} step={e.step} {runId} results={paired.results} stopNotice={e.stop_notice} />
 					{/each}
 				{/if}
 			{:else}

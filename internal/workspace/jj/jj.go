@@ -97,12 +97,13 @@ func (w *jjWorkspace) Describe(_ context.Context, parentSessionID string) string
 	return strings.Join(lines, "\n")
 }
 
-// CreateLinked adds an isolated jj workspace sharing the repo, named after
-// childSessionID, at `<mainRepoParent>/<repo>-amplio/worktrees/<sessionID>`
-// (same drive, outside the repo). `jj workspace add` is serialized per repo to
+// CreateLinked adds an isolated jj workspace sharing the repo, at
+// `<mainRepoParent>/<repo>-amplio/worktrees/<name>` (same drive, outside the
+// repo); name is workspace.LinkName ("<runID>-<session>"), so every run on the
+// repo shares the worktrees dir without clashing, grouped per run. `jj workspace add` is serialized per repo to
 // avoid divergent operation heads, and snapshot.auto-update-stale is enabled so
 // concurrent workspaces don't trip each other into stale errors.
-func (w *jjWorkspace) CreateLinked(ctx context.Context, childSessionID string) (workspace.Workspace, error) {
+func (w *jjWorkspace) CreateLinked(ctx context.Context, name string) (workspace.Workspace, error) {
 	currentRoot, err := w.workspaceRoot(ctx)
 	if err != nil {
 		return nil, err
@@ -118,7 +119,7 @@ func (w *jjWorkspace) CreateLinked(ctx context.Context, childSessionID string) (
 	release := linkLocks.Acquire(store)
 	defer release()
 
-	placement := workspace.FreeSiblingPath(baseDir, childSessionID)
+	placement := workspace.FreeSiblingPath(baseDir, name)
 	if err := os.MkdirAll(filepath.Dir(placement), 0o755); err != nil {
 		return nil, fmt.Errorf("jj link: create worktree parent: %w", err)
 	}
