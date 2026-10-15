@@ -236,10 +236,10 @@
 		max-width: 28rem;
 		/* Safety guard, not a fit. The menu opens UPWARD, so what actually bounds
 		   it is the gap between the trigger and the top of the viewport — which CSS
-		   can't see. 65vh approximates that generously: it leaves a normal menu
+		   can't see. 65dvh approximates that generously: it leaves a normal menu
 		   alone and only engages when the list would otherwise run off-screen,
 		   where the top entries would be unreachable rather than merely clipped. */
-		max-height: 65vh;
+		max-height: 65dvh;
 		overflow-y: auto;
 		overscroll-behavior: contain; /* don't chain the scroll to the page behind */
 		background: var(--bg-elev2);

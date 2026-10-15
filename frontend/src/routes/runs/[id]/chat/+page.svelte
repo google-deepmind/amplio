@@ -32,6 +32,7 @@
 	import { logHref } from '$lib/logView.svelte';
 	import { AndroidLogoIcon, FolderIcon, PathIcon, ScrollIcon } from 'phosphor-svelte';
 	import { iconForName } from '$lib/sessionIcon';
+	import { atLeast } from '$lib/viewport.svelte';
 	import { toolIcon } from '$lib/toolIcon';
 
 	const store = getRunStore();
@@ -313,8 +314,14 @@
 	// before it could show anything. Below this the sub-agent count still shows in
 	// the status bar, which is the honest rendering at that width.
 	const SIDE_PANEL_MIN = 1320;
-	let viewportW = $state(typeof window !== 'undefined' ? window.innerWidth : 1400);
-	const panelMode = $derived(viewportW >= SIDE_PANEL_MIN);
+	// A media query, not a bound innerWidth: only the crossing matters, and a
+	// drag (or an iOS URL-bar collapse) should not re-evaluate the whole view.
+	// Same threshold, same firing point — body is overflow:hidden, so there is
+	// no root scrollbar for the two measurements to disagree about.
+	// Created at the top level, not inside the $derived: a query built during a
+	// reaction never subscribes it (see $lib/viewport.svelte.ts).
+	const sidePanelRoom = atLeast(SIDE_PANEL_MIN);
+	const panelMode = $derived(sidePanelRoom.current);
 	// The aside renders when there's room AND something to show — either ambient
 	// content or the artifacts browser. Never shown just because it COULD be.
 	const asideVisible = $derived(panelMode && (liveTree.live > 0 || artifactsOpen));
@@ -328,10 +335,12 @@
 	//
 	// Stored in px (not a fraction): the conversation column is a reading measure,
 	// so it should stay put when the window resizes and let the panel absorb the
-	// change — the same contract the non-dragged layout already has. Persisted
-	// GLOBALLY, not per-run: unlike "is artifacts open", a comfortable split is a
-	// property of the operator's screen, not of one run.
-	const SPLIT_KEY = 'amplio-chat-split';
+	// change — the same contract the non-dragged layout already has. Scoped to the
+	// run, like the artifacts prefs above: how much room the panel deserves is a
+	// property of what that run put in it (a run whose artifacts are wide diffs
+	// wants a different split from one that only ever shows sub-agent rows), and a
+	// split dragged for one run shouldn't follow you into the next.
+	const splitKey = $derived(store.runId ? `amplio-chat-split:${store.runId}` : '');
 	// Floors, in px. Below CHAT_MIN the conversation stops being readable (and its
 	// composer/status bar start wrapping); below PANEL_MIN the artifact browser's
 	// breadcrumb toolbar can no longer show a path. Dragging past either end just
@@ -368,18 +377,25 @@
 		asideVisible && chatWidth !== null ? `flex: 0 0 ${clampChat(chatWidth)}px` : ''
 	);
 
+	// Restore on every run switch, not just on mount: the chat view is reused
+	// across runs, so a run with no stored width has to actively reset to null
+	// (the CSS default) rather than inherit the previous run's split.
 	$effect(() => {
-		if (!browser) return;
-		const saved = Number(localStorage.getItem(SPLIT_KEY));
-		if (Number.isFinite(saved) && saved > 0) chatWidth = saved;
+		if (!browser || !splitKey) return;
+		const saved = Number(localStorage.getItem(splitKey));
+		chatWidth = Number.isFinite(saved) && saved > 0 ? saved : null;
 	});
 	// Skipped mid-drag: the value changes every pointer frame and only the one it
 	// settles on is worth a synchronous localStorage write. Reading `dragging`
 	// makes this effect re-run when the drag ends, which is when it persists.
+	//
+	// Runs AFTER the restore effect above on a run switch (effects fire in
+	// creation order), so it writes the value that was just restored for the new
+	// key, never the outgoing run's width into the incoming run's key.
 	$effect(() => {
-		if (!browser || dragging) return;
-		if (chatWidth === null) localStorage.removeItem(SPLIT_KEY);
-		else localStorage.setItem(SPLIT_KEY, String(chatWidth));
+		if (!browser || !splitKey || dragging) return;
+		if (chatWidth === null) localStorage.removeItem(splitKey);
+		else localStorage.setItem(splitKey, String(chatWidth));
 	});
 
 	// Measured live rather than read from `chatWidth`, so the first drag starts
@@ -586,10 +602,6 @@
 <svelte:head>
 	<title>{pageTitle(runLabel)}</title>
 </svelte:head>
-
-<!-- Track viewport width so the aside can appear/disappear with room; ESC
-     closes the tool-call modal (native dialog handles this itself too). -->
-<svelte:window bind:innerWidth={viewportW} />
 
 {#if !store.detail}
 	<p class="dim">Loading…</p>

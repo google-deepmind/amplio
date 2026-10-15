@@ -385,6 +385,9 @@
 		{/if}
 	</div>
 
+	<!-- Metadata strip. `display: contents` except on phone, where it becomes the
+	     row's second line. -->
+	<div class="metastrip">
 	{#if canOpenInEditor}
 		<a
 			class="chip editor"
@@ -424,6 +427,7 @@
 		<PathIcon size={12} weight="bold" />
 		{run.root_step} · {timeAgo(lastChange)}
 	</span>
+	</div>
 
 	<!--
 		Grade picker at the trailing end (just before the ⋮ menu): grade is an
@@ -433,6 +437,9 @@
 		only, like the ⋮ menu (read-only viewers don't grade).
 	-->
 	{#if auth.authed}
+		<!-- Same trick: a no-op grouping on desktop, the cluster pinned right of
+		     the title on phone. -->
+		<div class="actions">
 		<GradePicker {run} onmutated={() => onmutated?.()} />
 		<div class="menu-wrap" use:clickOutside={closeMenu}>
 			<button class="iconbtn" aria-label="More actions" title="More actions" onclick={toggleMenu}>
@@ -535,6 +542,7 @@
 				</div>
 			{/if}
 		</div>
+		</div>
 	{/if}
 </div>
 
@@ -562,6 +570,12 @@
 		align-items: center;
 		gap: 0.7rem;
 		padding: 0.55rem 0.9rem;
+	}
+	/* Layout no-ops here (children stay direct flex items of .card); real boxes
+	   only at the phone breakpoint below. */
+	.metastrip,
+	.actions {
+		display: contents;
 	}
 	/* Leading slot: just the identity/star glyph now (the grade picker moved to
 	   the trailing end). flex-shrink:0 + centered so it holds its size and the
@@ -826,5 +840,93 @@
 	.menu .item.danger.armed {
 		background: color-mix(in srgb, var(--err) 22%, transparent);
 		color: var(--err);
+	}
+
+	/* Phone: the one-line row needs ~530px, so it wraps into two — identity,
+	   title and controls on top, metadata underneath. */
+	@media (max-width: 640px) {
+		.card {
+			flex-wrap: wrap;
+			align-items: flex-start;
+			gap: 0.3rem;
+			padding: 0.5rem 0.7rem;
+		}
+		.lead {
+			padding-top: 0.1rem; /* sit on the title's first line, not its middle */
+		}
+		.title-wrap {
+			flex: 1 1 0;
+		}
+		.titleblock {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 0.1rem;
+		}
+		/* One line, ellipsised — same as desktop. Wrapping to two lines cost a
+		   row's worth of height per long title and made the list scan worse
+		   than the truncation does. */
+		.title {
+			width: 100%;
+			min-width: 0;
+		}
+		/* Owns its own line now (so the fade-into-the-chips mask goes), and keeps
+		   to one, for the same reason as the title. */
+		.task {
+			flex: 0 1 auto;
+			width: 100%;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			mask-image: none;
+			-webkit-mask-image: none;
+		}
+		/* Controls stay on the title line. `order` rather than moving the markup:
+		   the DOM sequence is the reading order the desktop row wants. */
+		.actions {
+			order: 1;
+			display: flex;
+			align-items: center;
+			gap: 0.2rem;
+			flex-shrink: 0;
+			margin-left: auto;
+		}
+		.metastrip {
+			order: 2;
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 0.35rem;
+			flex-basis: 100%;
+			min-width: 0;
+		}
+		.chip {
+			max-width: 100%;
+		}
+		/* 44px of TAP without 44px of BOX. app.css gives every phone button a
+		   44px min-height; in a list row that makes three icon buttons the
+		   tallest thing on the title line and inflates every row to 92px to
+		   hold 24px of text. Here the floor comes off and the hit area becomes
+		   an invisible overlay, so the target stays thumb-sized while the row
+		   collapses to its content. Horizontal reach stops at half the gap, or
+		   adjacent buttons would swallow each other's taps. */
+		.identity-btn,
+		.iconbtn,
+		.actions :global(.grade-btn) {
+			position: relative;
+			min-width: 0;
+			min-height: 0;
+			padding-inline: 0.55rem;
+		}
+		/* Vertical only: horizontal reach comes from real padding above, so the
+		   overlay never spills outside .actions and inflates its scroll width. */
+		.identity-btn::after,
+		.iconbtn::after,
+		.actions :global(.grade-btn)::after {
+			content: '';
+			position: absolute;
+			inset: -11px 0;
+		}
+		.menu {
+			max-width: calc(100vw - 1.4rem);
+		}
 	}
 </style>

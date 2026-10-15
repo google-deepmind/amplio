@@ -28,29 +28,50 @@ import type { RunEvent } from './types';
 // refetch_all.
 export function openStream(runID: string | null, onEvent: (ev: RunEvent) => void): () => void {
 	const url = runID ? `/api/runs/${runID}/stream` : '/api/stream';
-	const es = new EventSource(url);
-	es.onopen = () => serverHealth.markOk();
-	es.onerror = () => {
-		// EventSource auto-reconnects; treat CONNECTING as transient (no banner
-		// yet, serverHealth promotes after a brief grace period) and CLOSED as a
-		// hard failure.
-		if (es.readyState === EventSource.CLOSED) serverHealth.markDown();
-		else serverHealth.markReconnecting();
-	};
-	es.onmessage = (e: MessageEvent) => {
-		try {
-			const ev = JSON.parse(e.data) as RunEvent;
-			// Global signals are dispatched directly to their stores so every open
-			// SSE delivers them uniformly (and per-route subscribers don't each
-			// need to know about them). Run-scoped events still flow to onEvent.
-			if (ev.kind === 'sysstat' && ev.sysstat) {
-				sysstat.update(ev.sysstat);
-				return;
+	let es = connect();
+
+	function connect(): EventSource {
+		const src = new EventSource(url);
+		src.onopen = () => serverHealth.markOk();
+		src.onerror = () => {
+			// CONNECTING is transient (serverHealth promotes after a grace period);
+			// CLOSED is a hard failure.
+			if (src.readyState === EventSource.CLOSED) serverHealth.markDown();
+			else serverHealth.markReconnecting();
+		};
+		src.onmessage = (e: MessageEvent) => {
+			try {
+				const ev = JSON.parse(e.data) as RunEvent;
+				// Global signals go straight to their stores; run-scoped events still
+				// flow to onEvent.
+				if (ev.kind === 'sysstat' && ev.sysstat) {
+					sysstat.update(ev.sysstat);
+					return;
+				}
+				onEvent(ev);
+			} catch {
+				// ignore malformed frame
 			}
-			onEvent(ev);
-		} catch {
-			// ignore malformed frame
-		}
+		};
+		return src;
+	}
+
+	// The browser's auto-reconnect gives up at CLOSED, and mobile Safari lands
+	// there routinely by tearing down a backgrounded tab's sockets: the page
+	// comes back looking alive while showing a frozen run. Returning to the
+	// foreground is the cheapest moment to check. Redial on anything that isn't
+	// OPEN — a woken tab is often mid-backoff in CONNECTING — and let the
+	// server's refetch_all prime repair whatever was missed.
+	const onVisible = () => {
+		if (document.visibilityState !== 'visible') return;
+		if (es.readyState === EventSource.OPEN) return;
+		es.close(); // no-op if already closed; prevents two live sockets per stream
+		es = connect();
 	};
-	return () => es.close();
+	document.addEventListener('visibilitychange', onVisible);
+
+	return () => {
+		document.removeEventListener('visibilitychange', onVisible);
+		es.close();
+	};
 }

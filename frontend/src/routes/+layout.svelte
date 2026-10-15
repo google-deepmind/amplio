@@ -81,4 +81,20 @@
 		   exactly, so this never shows a scrollbar there. */
 		overflow-y: auto;
 	}
+
+	@media (max-width: 640px) {
+		main {
+			/* Full-bleed horizontally: 2.4rem of gutter is a sixth of a 360px
+			   screen, and the content inside is already boxed — cards, bubbles and
+			   panels carry their own padding, so what the gutter buys on a phone is
+			   a narrower column, not breathing room.
+
+			   The bottom pad is the fixed RunNav tab bar's footprint (--bottom-nav-h
+			   already includes the safe-area inset), reserved app-wide rather than
+			   only under /runs so that a view can never end up with its last row
+			   under the bar; on the tab-bar-less pages it simply reads as the bottom
+			   padding those pages had anyway. */
+			padding: 0.9rem 0 calc(var(--bottom-nav-h) + 0.75rem);
+		}
+	}
 </style>

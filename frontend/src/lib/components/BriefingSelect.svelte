@@ -160,7 +160,7 @@
 		left: 0;
 		min-width: 320px;
 		max-width: 30rem;
-		max-height: 65vh;
+		max-height: 65dvh;
 		overflow: auto;
 		background: var(--bg-elev);
 		border: 1px solid var(--border);

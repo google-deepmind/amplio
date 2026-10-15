@@ -34,7 +34,7 @@
 		return 'ok';
 	});
 
-	const text = $derived(sysstat.memPct === null ? 'RAM —' : `RAM ${Math.round(sysstat.memPct)}%`);
+	const text = $derived(sysstat.memPct === null ? '—' : `${Math.round(sysstat.memPct)}%`);
 
 	const tooltip = $derived(
 		sysstat.memPct === null
@@ -43,4 +43,4 @@
 	);
 </script>
 
-<StatChip {tier} pct={sysstat.memPct} {text} {tooltip} icon={MemoryIcon} />
+<StatChip {tier} pct={sysstat.memPct} label="RAM" {text} {tooltip} icon={MemoryIcon} />

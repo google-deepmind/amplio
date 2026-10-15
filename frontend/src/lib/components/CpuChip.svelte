@@ -31,7 +31,7 @@
 		return 'critical';
 	});
 
-	const text = $derived(sysstat.cpuPct === null ? 'CPU —' : `CPU ${Math.round(sysstat.cpuPct)}%`);
+	const text = $derived(sysstat.cpuPct === null ? '—' : `${Math.round(sysstat.cpuPct)}%`);
 
 	const tooltip = $derived.by(() => {
 		const parts: string[] = [];
@@ -41,4 +41,4 @@
 	});
 </script>
 
-<StatChip {tier} pct={sysstat.cpuPct} {text} {tooltip} icon={CpuIcon} />
+<StatChip {tier} pct={sysstat.cpuPct} label="CPU" {text} {tooltip} icon={CpuIcon} />

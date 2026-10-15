@@ -27,6 +27,7 @@
 	import { auth } from '$lib/auth.svelte';
 	import { prefetchWorkspaceInfo } from '$lib/workspaceInfo';
 	import { prefetchModelMenu } from '$lib/modelMenu';
+	import { FunnelIcon } from 'phosphor-svelte';
 	import { prefetchBriefings } from '$lib/briefingLibrary';
 	import { clearRunPrefill } from '$lib/runPrefill.svelte';
 	import { pageTitle } from '$lib/title';
@@ -61,7 +62,15 @@
 	// effective grade (neither human nor critic); else a grade name matched against
 	// the effective grade (human `grade` if set, else `report_grade`).
 	const gradeFilter = $derived(page.url.searchParams.get('grade') ?? 'all');
+	// Phone only: the selects and toggles fold away behind one button (see the
+	// media query). Desktop ignores it — there they are always in the row.
+	let filtersOpen = $state(false);
 	let showArchived = $state(false);
+	// Drives the dot on the collapsed Filters button: with the controls hidden,
+	// nothing else says a filter is on.
+	const filtersActive = $derived(
+		statusFilter !== 'all' || gradeFilter !== 'all' || starredOnly || showArchived
+	);
 
 	// The search box binds to this local for instant typing feedback; the URL (and
 	// thus the server refetch) is updated debounced (see onSearchInput). Seeded
@@ -236,6 +245,16 @@
 				bind:value={searchInput}
 				oninput={onSearchInput}
 			/>
+			<button
+				class="filters-toggle"
+				aria-expanded={filtersOpen}
+				onclick={() => (filtersOpen = !filtersOpen)}
+			>
+				<FunnelIcon size={16} weight={filtersActive ? 'fill' : 'regular'} />
+				<span class="sr-only">Filters</span>
+				{#if filtersActive}<span class="filters-dot"></span>{/if}
+			</button>
+			<div class="secondary" class:open={filtersOpen}>
 			<select
 				value={statusFilter}
 				onchange={(e) => setFilter(e.currentTarget.value)}
@@ -271,6 +290,7 @@
 			<label class="chip">
 				<input type="checkbox" bind:checked={showArchived} onchange={() => refresh()} /> Archived
 			</label>
+			</div>
 		</div>
 	</div>
 	{#if error}<p class="err">{error}</p>{/if}
@@ -415,5 +435,82 @@
 	.chip.on {
 		color: var(--accent);
 		border-color: var(--accent-dim);
+	}
+	/* Both are phone-only affordances: on desktop the controls are simply in the
+	   row, and `display: contents` keeps them direct flex children of it. */
+	.filters-toggle {
+		display: none;
+	}
+	.secondary {
+		display: contents;
+	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+	}
+
+	/* <main> is full-bleed on phone (the rows are boxed); the page's own
+	   furniture is not, so it still needs a gutter. */
+	@media (max-width: 640px) {
+		.toolbar,
+		.compose {
+			padding-inline: 0.6rem;
+		}
+		/* The heading and five filter controls cost 143px — a sixth of the screen
+		   — before a single run row. The heading is redundant (the nav says where
+		   you are), and the controls fold behind one button. */
+		.toolbar h2 {
+			display: none;
+		}
+		.filters-toggle {
+			display: inline-flex;
+			position: relative;
+			align-items: center;
+			justify-content: center;
+			min-width: 44px;
+			min-height: 44px;
+			border: 1px solid var(--border);
+			border-radius: var(--radius-pill);
+			background: var(--bg-elev);
+			color: var(--text-dim);
+		}
+		.filters-dot {
+			position: absolute;
+			top: 0.55rem;
+			right: 0.6rem;
+			width: 6px;
+			height: 6px;
+			border-radius: 50%;
+			background: var(--accent);
+		}
+		.secondary {
+			display: none;
+		}
+		.secondary.open {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 0.5rem;
+			flex-basis: 100%;
+		}
+		/* min-width: 0 or the input keeps its intrinsic ~20ch width, refuses to
+		   shrink, and pushes the funnel onto a second line. */
+		.filters .search {
+			width: auto;
+			flex: 1 1 0;
+			min-width: 0;
+		}
+		/* The toolbar is a space-between row; with the heading hidden the filter
+		   group is its only child and should own the full width. Wrapping stays
+		   ON so the expanded panel can take a second line; search and the funnel
+		   still share the first because the input shrinks to 0 (above) rather
+		   than demanding its intrinsic width. */
+		.filters {
+			flex: 1;
+		}
 	}
 </style>

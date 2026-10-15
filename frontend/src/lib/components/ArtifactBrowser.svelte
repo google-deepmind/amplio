@@ -1092,7 +1092,7 @@
 		display: block;
 		width: 100%;
 		height: 100%;
-		min-height: min(28rem, 70vh);
+		min-height: min(28rem, 70dvh);
 		border: none;
 		background: var(--bg-elev);
 	}
@@ -1103,7 +1103,7 @@
 	}
 	.preview .pre {
 		margin: 0;
-		max-height: 60vh;
+		max-height: 60dvh;
 		overflow: auto;
 	}
 	.err {
@@ -1147,7 +1147,7 @@
 			border-radius: var(--radius-md);
 		}
 		/* In the split, the preview fills the pane, so let its <pre> use the full
-		   column height rather than the top-down 60vh cap. */
+		   column height rather than the top-down 60dvh cap. */
 		.files:not(.compact) .preview .pre {
 			max-height: none;
 		}

@@ -37,7 +37,7 @@
 	});
 
 	const text = $derived(
-		sysstat.swapPct === null ? 'SWAP —' : `SWAP ${Math.round(sysstat.swapPct)}%`
+		sysstat.swapPct === null ? '—' : `${Math.round(sysstat.swapPct)}%`
 	);
 
 	const tooltip =
@@ -45,4 +45,4 @@
 		'cold pages in swap even when memory is plentiful.';
 </script>
 
-<StatChip {tier} pct={sysstat.swapPct} {text} {tooltip} icon={SwapIcon} />
+<StatChip {tier} pct={sysstat.swapPct} label="SWAP" {text} {tooltip} icon={SwapIcon} />

@@ -15,11 +15,22 @@
 -->
 
 <script lang="ts">
-	import { RowsIcon, PulseIcon, BellIcon, BookOpenIcon, EyeIcon, InfoIcon } from 'phosphor-svelte';
+	import {
+		RowsIcon,
+		PulseIcon,
+		BellIcon,
+		BookOpenIcon,
+		EyeIcon,
+		InfoIcon,
+		ListIcon,
+		XIcon
+	} from 'phosphor-svelte';
+	import { fly } from 'svelte/transition';
 	import { runsStore } from '$lib/runsStore.svelte';
 	import { updates } from '$lib/updates.svelte';
 	import { auth } from '$lib/auth.svelte';
 	import { sysstat } from '$lib/sysstat.svelte';
+	import { viewport } from '$lib/viewport.svelte';
 	import { GcertChip, INTERNAL } from './internal';
 	import CpuChip from './CpuChip.svelte';
 	import MemChip from './MemChip.svelte';
@@ -33,8 +44,24 @@
 	// Nav items are stable (always present) so layout never shifts as runs
 	// come and go; only the (N) suffix appears/disappears with the count.
 
+	// The row holds the brand OR the nav, not both. Chips stay (they are the
+	// reason to glance here); the nav entries move into a drawer.
 	const activeCount = $derived(runsStore.activeCount);
 	const unreadCount = $derived(updates.count);
+	let drawerOpen = $state(false);
+	// Phone-only; drop it on the way out so rotating back doesn't restore it.
+	$effect(() => {
+		if (!viewport.isPhone) drawerOpen = false;
+	});
+	// Wired only while open, so desktop carries no extra global key listener.
+	$effect(() => {
+		if (!drawerOpen) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === 'Escape') drawerOpen = false;
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	});
 </script>
 
 <header class="bar">
@@ -43,45 +70,67 @@
 	     brand + status chips stay aligned with the content column instead of
 	     drifting to the screen corners; on narrower screens both layers
 	     collapse to the same width so the seam is invisible. -->
+	<!-- One definition of the nav entries, rendered either inline (desktop) or
+	     inside the phone drawer. Two copies would drift the moment someone adds
+	     a destination. -->
+	{#snippet navItems()}
+		<a href="/" class="nav-item" onclick={() => (drawerOpen = false)}>
+			<RowsIcon size={14} weight="bold" />
+			<span>All Runs</span>
+		</a>
+		<a
+			href="/?filter=active"
+			class="nav-item"
+			title="{activeCount} run(s) not yet terminal"
+			onclick={() => (drawerOpen = false)}
+		>
+			<PulseIcon size={14} weight="bold" />
+			<span>Active Runs</span>
+			{#if activeCount > 0}
+				<span class="count count-active">({activeCount})</span>
+			{/if}
+		</a>
+		<a
+			href="/?filter=updates"
+			class="nav-item"
+			title="{unreadCount} run(s) with unseen updates"
+			onclick={() => (drawerOpen = false)}
+		>
+			<BellIcon size={14} weight="bold" />
+			<span>Recent Updates</span>
+			{#if unreadCount > 0}
+				<span class="count count-unread">({unreadCount})</span>
+			{/if}
+		</a>
+		<a href="/recall" class="nav-item" onclick={() => (drawerOpen = false)}>
+			<BookOpenIcon size={14} weight="bold" />
+			<span>Recall</span>
+		</a>
+		<a href="/about" class="nav-item" onclick={() => (drawerOpen = false)}>
+			<InfoIcon size={14} weight="bold" />
+			<span>About</span>
+		</a>
+	{/snippet}
 	<div class="inner">
 		<div class="left">
+			{#if viewport.isPhone}
+				<button
+					class="menu-toggle"
+					aria-label={drawerOpen ? 'Close menu' : 'Open menu'}
+					aria-expanded={drawerOpen}
+					onclick={() => (drawerOpen = !drawerOpen)}
+				>
+					{#if drawerOpen}
+						<XIcon size={20} weight="bold" />
+					{:else}
+						<ListIcon size={20} weight="bold" />
+					{/if}
+				</button>
+			{/if}
 			<a href="/" class="brand">amplio</a>
-			<nav class="nav">
-				<a href="/" class="nav-item">
-					<RowsIcon size={14} weight="bold" />
-					<span>All Runs</span>
-				</a>
-				<a
-					href="/?filter=active"
-					class="nav-item"
-					title="{activeCount} run(s) not yet terminal"
-				>
-					<PulseIcon size={14} weight="bold" />
-					<span>Active Runs</span>
-					{#if activeCount > 0}
-						<span class="count count-active">({activeCount})</span>
-					{/if}
-				</a>
-				<a
-					href="/?filter=updates"
-					class="nav-item"
-					title="{unreadCount} run(s) with unseen updates"
-				>
-					<BellIcon size={14} weight="bold" />
-					<span>Recent Updates</span>
-					{#if unreadCount > 0}
-						<span class="count count-unread">({unreadCount})</span>
-					{/if}
-				</a>
-				<a href="/recall" class="nav-item">
-					<BookOpenIcon size={14} weight="bold" />
-					<span>Recall</span>
-				</a>
-				<a href="/about" class="nav-item">
-					<InfoIcon size={14} weight="bold" />
-					<span>About</span>
-				</a>
-			</nav>
+			{#if !viewport.isPhone}
+				<nav class="nav">{@render navItems()}</nav>
+			{/if}
 		</div>
 		<div class="right">
 			{#if auth.ready && !auth.authed}
@@ -104,6 +153,13 @@
 			{/if}
 		</div>
 	</div>
+	{#if viewport.isPhone && drawerOpen}
+		<!-- Both live INSIDE the sticky bar so they hang off its bottom edge
+		     whatever height it happens to be, and inherit its stacking context (no
+		     second z-index scale to keep straight against the run views). -->
+		<button class="scrim" aria-label="Close menu" onclick={() => (drawerOpen = false)}></button>
+		<nav class="drawer" transition:fly={{ y: -8, duration: 150 }}>{@render navItems()}</nav>
+	{/if}
 </header>
 
 <style>
@@ -192,5 +248,79 @@
 	}
 	.nav-item:hover .count-unread {
 		color: var(--accent);
+	}
+
+	/* Phone additions. The desktop rules above are untouched; everything here is
+	   either a phone-only element (.menu-toggle, .drawer, .scrim) or lives in the
+	   media query below. */
+	.menu-toggle {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 44px;
+		padding: 0 0.5rem;
+		color: var(--text-dim);
+		background: none;
+		border: none;
+	}
+	.scrim {
+		position: absolute;
+		inset: 100% 0 auto 0;
+		height: 100dvh;
+		background: color-mix(in srgb, var(--bg) 65%, transparent);
+		border: none;
+		border-radius: 0;
+		padding: 0;
+	}
+	.drawer {
+		position: absolute;
+		inset: 100% 0 auto 0;
+		display: flex;
+		flex-direction: column;
+		background: var(--bg-elev);
+		border-bottom: 1px solid var(--border);
+		padding: 0.3rem 0;
+	}
+	.drawer .nav-item {
+		/* Full-width rows, not the inline chips of the desktop nav: a drawer entry
+		   is a tap target, so the whole line is hit area. */
+		gap: 0.6rem;
+		min-height: 44px;
+		padding: 0 clamp(1.2rem, 3vw, 2.5rem);
+		color: var(--text);
+	}
+
+	@media (max-width: 640px) {
+		.inner {
+			/* Tighter gutter than the desktop clamp, and a smaller gap: the status
+			   chips need every pixel to stay on one line at 360px. */
+			gap: 0.5rem;
+			padding: 0.4rem 0.6rem;
+		}
+		.left {
+			gap: 0.4rem;
+			/* Rigid: squeezed to 100px against 113px of content, the wordmark spilled
+			   into the first chip. The chips are the scrollable half, not this. */
+			flex: 0 0 auto;
+		}
+		.brand {
+			font-size: var(--fs-lg);
+			flex-shrink: 0;
+		}
+		.right {
+			gap: 0.3rem;
+			flex: 1 1 0;
+			justify-content: flex-end;
+			min-width: 0;
+			/* Chips are the one thing here that can legitimately outgrow the row
+			   (four of them with the corp build). Scrolling them beats wrapping the
+			   bar to two lines or truncating a number mid-digit. */
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+		/* ...which only scrolls if the chips refuse to be squeezed. */
+		.right > :global(*) {
+			flex-shrink: 0;
+		}
 	}
 </style>

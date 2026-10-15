@@ -35,6 +35,13 @@
 	--fs-lg: 1rem;
 	--fs-xl: 1.1rem;
 
+	/* Footprint of the fixed phone chrome: the RunNav tab bar plus the
+	   home-indicator inset. Zero on wider screens, where the nav is in flow.
+	   Declared here, not in
+	   RunNav, because the layout has to reserve the space and the sheet has to
+	   stack on top of it — three places that must agree on one number. */
+	--bottom-nav-h: 0px;
+
 	/* Corner radii. --radius-pill for fully-rounded chips/badges. */
 	--radius-xs: 4px;
 	--radius-sm: 6px;
@@ -43,6 +50,30 @@
 	--radius-pill: 999px;
 
 	color-scheme: dark;
+}
+
+/* Phone. In sync with PHONE_MAX in $lib/viewport.svelte.ts. */
+@media (max-width: 640px) {
+	:root {
+		--bottom-nav-h: calc(3.5rem + 1px + env(safe-area-inset-bottom, 0px));
+	}
+
+	/* 44px is where both vendors' touch guidelines land; desktop controls are
+	   sized for a 1px cursor, so give every interactive element that floor on
+	   touch-sized screens. Gated on width rather than `pointer: coarse` on
+	   purpose: coarse also matches touchscreen laptops, and desktop must render
+	   byte-identically to how it does today.
+
+	   min-height, not padding: it grows short controls without moving the text
+	   inside taller ones, so nothing re-flows that already fit. Checkboxes and
+	   radios are excluded — a 44px checkbox is a design mistake, its LABEL is
+	   the target. */
+	button,
+	select,
+	textarea,
+	input:not([type='checkbox']):not([type='radio']) {
+		min-height: 44px;
+	}
 }
 
 * {

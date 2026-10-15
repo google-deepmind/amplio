@@ -39,13 +39,16 @@
 	let {
 		tier,
 		pct = null,
+		label = '',
 		text,
 		tooltip = '',
 		icon
 	}: {
 		tier: Tier;
 		pct?: number | null; // 0-100, or null when unknown
-		text: string;
+		// Signal name ("CPU"), split from the reading so phone can drop it.
+		label?: string;
+		text: string; // the reading itself ("37%", "166h")
 		tooltip?: string;
 		icon?: IconType; // optional phosphor-svelte icon; renders left of text
 	} = $props();
@@ -58,7 +61,11 @@
 	<span class="chip tier-{tier}" title={tooltip}>
 		<span class="fill" style="width: {clampedPct}%"></span>
 		{#if Icon}<span class="icon"><Icon size={13} weight="bold" /></span>{/if}
-		<span class="text">{text}</span>
+		<!-- The label lives INSIDE .text, space included, so desktop renders the
+		     single "CPU 37%" text run it always has; phone only hides the label.
+		     The space is part of the expression on purpose: Svelte strips a literal
+		     trailing space inside an element, which would render "CPU37%". -->
+		<span class="text">{#if label}<span class="label">{label + ' '}</span>{/if}{text}</span>
 	</span>
 {/if}
 
@@ -94,12 +101,48 @@
 			background-color 0.2s ease,
 			opacity 0.2s ease;
 	}
+	/* Phone: three labelled chips wanted 260px of a 225px slot at 360px, so the
+	   first was always sliced. The icon identifies the signal; the tooltip still
+	   spells it out. Everything here is phone-only: desktop renders exactly as
+	   it did before the label was split out. */
+	@media (max-width: 640px) {
+		.chip {
+			font-size: var(--fs-xs);
+			padding: 0.3rem 0.5rem;
+			/* A floor, or the strip reflows every time CPU crosses 10%. */
+			min-width: 3.7rem;
+			justify-content: center;
+			line-height: 1;
+		}
+		/* Centers the glyphs rather than the line box: trims the half-leading and
+		   the descender well digits never reach (1.6px of visible offset). Falls
+		   back to the line-height above where unsupported (Firefox). */
+		.text {
+			text-box-trim: trim-both;
+			text-box-edge: cap alphabetic;
+		}
+		/* Visually hidden, not display:none, so a screen reader still hears
+		   "CPU 37%" rather than a bare "37%". */
+		.label {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+	}
 	.icon {
 		position: relative; /* sits above .fill */
 		z-index: 1;
 		display: inline-flex;
 		align-items: center;
 		margin-right: 0.35rem;
+	}
+	@media (max-width: 640px) {
+		.icon {
+			margin-right: 0.25rem;
+		}
 	}
 	.text {
 		position: relative; /* sits above .fill */

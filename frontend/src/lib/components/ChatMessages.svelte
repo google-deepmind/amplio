@@ -784,7 +784,7 @@
 		padding: 0;
 		max-width: 56rem;
 		width: calc(100vw - 3rem);
-		max-height: 80vh;
+		max-height: 80dvh;
 		overflow-y: auto;
 		box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
 		color: var(--text);
