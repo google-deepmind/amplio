@@ -256,6 +256,9 @@ func (p *provider) buildBody(req llm.Request, stream bool) map[string]any {
 	}
 	if len(req.Tools) > 0 {
 		body["tools"] = convertTools(req.Tools)
+		if req.DisableToolCalls {
+			body["tool_choice"] = "none"
+		}
 	}
 	if stream {
 		body["stream"] = true

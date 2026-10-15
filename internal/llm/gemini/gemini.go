@@ -354,6 +354,11 @@ func (p *provider) build(req llm.Request) ([]*genai.Content, *genai.GenerateCont
 	}
 	if len(req.Tools) > 0 {
 		config.Tools = convertTools(req.Tools)
+		if req.DisableToolCalls {
+			config.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
+				Mode: genai.FunctionCallingConfigModeNone,
+			}}
+		}
 	}
 	return contents, config, nil
 }

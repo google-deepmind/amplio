@@ -353,6 +353,29 @@ func TestBuildOmitsEmptySystemInstruction(t *testing.T) {
 	}
 }
 
+func TestBuildDisableToolCallsSetsModeNone(t *testing.T) {
+	p := &provider{maxTokens: 1024}
+	tools := []llm.ToolDef{{Name: "a", Description: "tool a", Schema: []byte(`{"type":"object"}`)}}
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "hi"}}
+
+	_, disabled, err := p.build(llm.Request{Tools: tools, Messages: msgs, DisableToolCalls: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, normal, err := p.build(llm.Request{Tools: tools, Messages: msgs})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if disabled.ToolConfig == nil || disabled.ToolConfig.FunctionCallingConfig == nil ||
+		disabled.ToolConfig.FunctionCallingConfig.Mode != genai.FunctionCallingConfigModeNone || len(disabled.Tools) == 0 {
+		t.Errorf("disabled: ToolConfig=%+v tools=%d, want mode NONE with tools still declared", disabled.ToolConfig, len(disabled.Tools))
+	}
+	if normal.ToolConfig != nil {
+		t.Errorf("normal request must not set ToolConfig: %+v", normal.ToolConfig)
+	}
+}
+
 func TestIsTransient(t *testing.T) {
 	if isTransient(nil) {
 		t.Error("nil error is never transient")

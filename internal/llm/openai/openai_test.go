@@ -757,6 +757,26 @@ func TestBuildBody_ProfileDefaults(t *testing.T) {
 	}
 }
 
+func TestBuildBody_DisableToolCallsSetsToolChoiceNone(t *testing.T) {
+	srv, got := serveSSE(t, "data: [DONE]\n")
+	s, err := newProvider(t, srv.URL).Stream(context.Background(), llm.Request{
+		Messages:         []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		Tools:            []llm.ToolDef{{Name: "a", Description: "tool a", Schema: []byte(`{"type":"object"}`)}},
+		DisableToolCalls: true,
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	drain(t, s)
+
+	if (*got)["tool_choice"] != "none" {
+		t.Errorf("tool_choice = %v, want \"none\"", (*got)["tool_choice"])
+	}
+	if _, ok := (*got)["tools"]; !ok {
+		t.Error("tools must stay declared when tool calls are disabled")
+	}
+}
+
 // Spec args are passed through verbatim so a server-specific knob never needs a
 // code change here; dotted keys nest, and values take their natural JSON type.
 func TestBuildBody_SpecArgPassthrough(t *testing.T) {

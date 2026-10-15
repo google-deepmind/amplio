@@ -16,6 +16,7 @@ package compaction
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -100,5 +101,40 @@ func TestCompact_EmptySummaryIsError(t *testing.T) {
 	hq := &hqMock{out: "   "}
 	if _, err := Compact(context.Background(), Deps{Store: s, HQ: hq, RunID: runID, SessionID: "s1"}, 2); err == nil {
 		t.Fatal("expected an error for an empty summary")
+	}
+}
+
+// drillingHQ calls session_steps whenever it may, and writes its summary only
+// when tool calls are disabled: the summarizer that used to exhaust the loop.
+type drillingHQ struct{ calls, forced int }
+
+func (m *drillingHQ) Call(_ context.Context, req llm.Request) (*llm.Response, error) {
+	m.calls++
+	if req.DisableToolCalls {
+		m.forced++
+		return &llm.Response{Content: "Summary written on the forced final turn."}, nil
+	}
+	return &llm.Response{ToolCalls: []llm.ToolCall{{
+		ID: fmt.Sprintf("tc%d", m.calls), Name: "session_steps", Arguments: `{"session_id":"s1","start_step":1,"end_step":1}`,
+	}}}, nil
+}
+func (*drillingHQ) Stream(context.Context, llm.Request) (llm.Stream, error) { return nil, nil }
+func (*drillingHQ) ModelID() string                                         { return "mock-hq" }
+func (*drillingHQ) MaxTokens() int                                          { return 1000 }
+
+func TestCompact_SummarizerThatKeepsDrillingStillProducesSummary(t *testing.T) {
+	s, runID := seed(t)
+	hq := &drillingHQ{}
+
+	out, err := Compact(context.Background(), Deps{Store: s, HQ: hq, RunID: runID, SessionID: "s1"}, 2)
+
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !strings.HasPrefix(out, "Summary written on the forced final turn.") {
+		t.Errorf("summary = %q, want the forced-final-turn prose", out)
+	}
+	if hq.calls != maxIterations || hq.forced != 1 {
+		t.Errorf("calls=%d forced=%d, want %d calls with exactly the last one forced", hq.calls, hq.forced, maxIterations)
 	}
 }

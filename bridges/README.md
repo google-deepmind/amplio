@@ -71,7 +71,8 @@ Request body (JSON):
      "provider_extra": {}          // opaque round-tripped cargo (e.g. thought signatures)
     }
   ],
-  "tools": [{"name": "...", "description": "...", "schema": {json schema}}]
+  "tools": [{"name": "...", "description": "...", "schema": {json schema}}],
+  "disable_tool_calls": true      // optional, omitted when false: make no tool call this turn
 }
 ```
 
@@ -113,6 +114,10 @@ Notes:
   omitted field reads as `""`): `category` is the backend's policy label,
   `explanation` human-readable text. amplio persists it on the assistant turn
   for diagnosis and never replays it.
+- `disable_tool_calls` keeps `tools` declared (they match the tool calls already
+  in `messages`) but asks for an answer without calling any, e.g. the backend's
+  `tool_choice: none`. amplio sends it on a forced final turn; a bridge that
+  cannot express it may ignore it.
 - Stream NDJSON incrementally (flush each line). With HTTP/1.0 the stream ends on
   connection close after the `final` line.
 

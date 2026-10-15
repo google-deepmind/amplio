@@ -72,8 +72,12 @@ type Request struct {
 	SystemPrompt string
 	Messages     []Message
 	Tools        []ToolDef
-	MaxTokens    int
-	Temperature  *float64 // nil = provider default
+	// DisableToolCalls asks the provider not to call any tool on this turn
+	// (tool_choice=none) while Tools stay declared, consistent with the tool calls
+	// already in Messages. Providers that cannot express it ignore it.
+	DisableToolCalls bool
+	MaxTokens        int
+	Temperature      *float64 // nil = provider default
 	// SessionID, when set, is used by the provider for cache/routing affinity
 	// (Anthropic-on-Vertex sends it as X-Vertex-Ai-Session-Id). See
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/prompt-caching#use_prompt_caching_with_the_global_endpoint

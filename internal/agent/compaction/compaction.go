@@ -49,7 +49,9 @@ var systemPrompt = sync.OnceValue(func() string {
 })
 
 // maxIterations bounds the drill-down loop so a misbehaving summarizer can't
-// spin forever on the agent's critical recovery path.
+// spin forever on the agent's critical recovery path. Its last iteration is a
+// forced no-tool turn (ForceFinalAnswer): compaction runs because the provider
+// rejected the prompt as too long, so a failed compaction crashes the session.
 const maxIterations = 12
 
 // Deps holds what Compact needs: the store to read session state, the HQ
@@ -75,10 +77,11 @@ func Compact(ctx context.Context, deps Deps, boundaryStep int) (string, error) {
 
 	inspectDeps := &inspect.Deps{Store: deps.Store, RunID: deps.RunID}
 	summary, err := ephemeral.Run(ctx, ephemeral.Config{
-		LLM:           deps.HQ,
-		Tools:         []*tool.Tool{inspect.SessionSteps(inspectDeps)},
-		SystemPrompt:  systemPrompt(),
-		MaxIterations: maxIterations,
+		LLM:              deps.HQ,
+		Tools:            []*tool.Tool{inspect.SessionSteps(inspectDeps)},
+		SystemPrompt:     systemPrompt(),
+		MaxIterations:    maxIterations,
+		ForceFinalAnswer: true,
 	}, buildTask(deps.SessionID, boundaryStep, layered))
 	if err != nil {
 		return "", fmt.Errorf("compaction loop: %w", err)

@@ -16,6 +16,7 @@ package eventloop
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -407,8 +408,8 @@ func TestEventLoop_ResumeAtRestEmptyIsNudged(t *testing.T) {
 }
 
 // The nudge is BOUNDED: a model that keeps emitting empty turns is nudged at
-// most maxConcludeNudges times, then the empty conclusion is allowed through
-// (proves no infinite loop).
+// most maxConcludeNudges times, then the session fails instead of handing its
+// parent an empty "successful" result (proves no infinite loop).
 func TestEventLoop_EmptyConclusionNudgeBounded(t *testing.T) {
 	store, runID, registry := testSetup(t)
 	ctx := context.Background()
@@ -420,18 +421,18 @@ func TestEventLoop_EmptyConclusionNudgeBounded(t *testing.T) {
 		SystemPrompt: "sp", LLM: mock, Store: store, Registry: registry,
 		Tools: []*tool.Tool{}, Workspace: plain.New("/tmp"),
 	})
-	if err := ag.Run(ctx); err != nil {
-		t.Fatal(err)
+	if err := ag.Run(ctx); !errors.Is(err, errEmptyResult) {
+		t.Fatalf("Run error = %v, want errEmptyResult", err)
 	}
 	if want := maxConcludeNudges + 1; mock.CallCount() != want {
-		t.Errorf("call count = %d, want %d (maxConcludeNudges nudges then conclude)", mock.CallCount(), want)
+		t.Errorf("call count = %d, want %d (maxConcludeNudges nudges then fail)", mock.CallCount(), want)
 	}
 	if n := countNudgeEvents(t, store, runID); n != maxConcludeNudges {
 		t.Errorf("nudge events = %d, want %d", n, maxConcludeNudges)
 	}
 	sess, _ := store.GetSession(ctx, runID, "main-agent")
-	if sess.Status != db.SessionConcluded {
-		t.Errorf("status = %q, want concluded", sess.Status)
+	if sess.Status != db.SessionCrashed {
+		t.Errorf("status = %q, want crashed", sess.Status)
 	}
 }
 

@@ -50,9 +50,11 @@ var criticSystemPrompt = sync.OnceValue(func() string {
 	return strings.Replace(keenCriticTemplate, "__CITATION_CONVENTIONS__", criticCitationConventions, 1)
 })
 
-// criticMaxIterations bounds the keen-critic's investigation loop. The
-// underlying soft guidance is 5-15 calls with a ~25 hard stop; 30 leaves
-// headroom for edge cases.
+// criticMaxIterations bounds the keen-critic's investigation loop. The prompt
+// asks for 5-15 calls, but the model cannot see its count (Opus 5.5 at max
+// effort often kept investigating to the cap), so the loop forces the report
+// with tools disabled shortly before the cap (ForceFinalAnswer, leaving room
+// for JSON repairs).
 const criticMaxIterations = 30
 
 // Deps are the per-run dependencies the critic needs. The Finalizer builds these
@@ -141,6 +143,9 @@ func runKeenCritic(ctx context.Context, deps Deps, runID, task string, prev, rep
 		Tools:         criticTools(deps, runID),
 		SystemPrompt:  criticSystemPrompt(),
 		MaxIterations: criticMaxIterations,
+		// A critic still investigating when the budget runs out writes its report
+		// from what it has, instead of the run getting an ungraded fallback.
+		ForceFinalAnswer: true,
 	}, briefing, 0)
 	if err != nil || crit == nil || strings.TrimSpace(crit.Summary) == "" {
 		slog.Warn("keen-critic did not produce a valid report", "run_id", runID, "error", err)

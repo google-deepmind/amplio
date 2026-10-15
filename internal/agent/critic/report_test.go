@@ -237,6 +237,35 @@ func TestGenerateReport_FallbackOnNoSubmit(t *testing.T) {
 	}
 }
 
+// investigatingMock keeps calling tools whenever it may, and writes its report
+// only when tool calls are disabled: the critic that used to hit the cap.
+type investigatingMock struct{}
+
+func (investigatingMock) Call(_ context.Context, req llm.Request) (*llm.Response, error) {
+	if req.DisableToolCalls || len(req.Tools) == 0 {
+		return &llm.Response{Content: `{"summary":"Report written on the forced final turn.","grade":4}`}, nil
+	}
+	return &llm.Response{ToolCalls: []llm.ToolCall{{ID: "s", Name: "session_list", Arguments: `{}`}}}, nil
+}
+func (investigatingMock) Stream(context.Context, llm.Request) (llm.Stream, error) { return nil, nil }
+func (investigatingMock) ModelID() string                                         { return "mock-hq" }
+func (investigatingMock) MaxTokens() int                                          { return 1000 }
+
+func TestGenerateReport_CriticThatKeepsInvestigatingStillGrades(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	seedRun(t, store, "r", "task")
+	seedSession(t, store, "r", "main-agent", "standard_agent", db.SessionConcluded, 1)
+	addPhase(t, store, "r", "main-agent", 1, 1, "Phase", "did work", nil)
+
+	report, err := GenerateReport(ctx, Deps{Store: store, HQ: investigatingMock{}, CWD: "."}, "r", nil)
+
+	must(t, err)
+	if report.Grade != 4 || strings.HasPrefix(report.Summary, "[narrative generation failed]") {
+		t.Fatalf("report = {grade:%d summary:%q}, want the forced, graded report", report.Grade, report.Summary)
+	}
+}
+
 func TestReportStore_Versioning(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()

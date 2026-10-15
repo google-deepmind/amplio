@@ -34,6 +34,10 @@ type wireRequest struct {
 	SystemPrompt string        `json:"system_prompt,omitempty"`
 	Messages     []wireMessage `json:"messages"`
 	Tools        []wireTool    `json:"tools,omitempty"`
+	// DisableToolCalls mirrors llm.Request.DisableToolCalls: Tools stay declared
+	// but the backend should not call them this turn. Omitted when false, so
+	// other requests are unchanged on the wire; a bridge may ignore it.
+	DisableToolCalls bool `json:"disable_tool_calls,omitempty"`
 	// SessionID is the harness's conversation id, forwarded so a backend can key
 	// cache/routing affinity on it (the Claude provider sends it as
 	// X-Vertex-Ai-Session-Id). Dropping it costs prompt-cache hits, which at
@@ -129,11 +133,12 @@ func (p *provider) toWire(req llm.Request) wireRequest {
 		maxTokens = p.maxTokens
 	}
 	w := wireRequest{
-		Model:        p.model,
-		MaxTokens:    maxTokens,
-		Temperature:  req.Temperature,
-		SystemPrompt: req.SystemPrompt,
-		SessionID:    req.SessionID,
+		Model:            p.model,
+		MaxTokens:        maxTokens,
+		Temperature:      req.Temperature,
+		SystemPrompt:     req.SystemPrompt,
+		DisableToolCalls: req.DisableToolCalls,
+		SessionID:        req.SessionID,
 	}
 	for _, m := range req.Messages {
 		wm := wireMessage{
@@ -204,10 +209,11 @@ func (l *wireLine) toStreamEvent() llm.StreamEvent {
 
 func (w *wireRequest) toLLM() llm.Request {
 	req := llm.Request{
-		SystemPrompt: w.SystemPrompt,
-		MaxTokens:    w.MaxTokens,
-		Temperature:  w.Temperature,
-		SessionID:    w.SessionID,
+		SystemPrompt:     w.SystemPrompt,
+		MaxTokens:        w.MaxTokens,
+		Temperature:      w.Temperature,
+		DisableToolCalls: w.DisableToolCalls,
+		SessionID:        w.SessionID,
 	}
 	for _, m := range w.Messages {
 		msg := llm.Message{

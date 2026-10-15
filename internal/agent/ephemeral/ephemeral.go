@@ -40,9 +40,22 @@ type Config struct {
 	Tools         []*tool.Tool
 	SystemPrompt  string
 	MaxIterations int // safety limit to prevent infinite loops (0 = default 50)
+	// ForceFinalAnswer makes the last allowed iteration a no-tool turn (tool calls
+	// disabled plus finalTurnNudge), so a model that keeps calling tools still
+	// answers instead of the loop failing with "exceeded N iterations".
+	ForceFinalAnswer bool
+
+	// finalReserve moves the forced final turn this many iterations earlier and
+	// keeps tool calls disabled after it: RunTyped reserves them for output
+	// repairs of the forced answer.
+	finalReserve int
 }
 
 const defaultMaxIterations = 50
+
+// finalTurnNudge is the user turn that opens a ForceFinalAnswer turn.
+const finalTurnNudge = "This is your final turn: tool calls are disabled. Reply now with your " +
+	"complete final answer, based on what you have gathered so far."
 
 // Run executes a multi-turn LLM conversation with tools entirely in memory.
 // Returns the final text response (the first no-tool LLM reply).
@@ -91,9 +104,15 @@ func run(ctx context.Context, cfg Config, task string, onFinal func(content stri
 			return "", ctx.Err()
 		}
 
+		forceAt := max(maxIter-1-cfg.finalReserve, 0)
+		forceFinal := cfg.ForceFinalAnswer && !finalizing && iter >= forceAt && len(toolDefs) > 0
+		if forceFinal && iter == forceAt {
+			messages = append(messages, llm.Message{Role: llm.RoleUser, Content: finalTurnNudge})
+		}
 		req := llm.Request{Messages: messages}
 		if !finalizing {
 			req.Tools = toolDefs
+			req.DisableToolCalls = forceFinal
 		}
 		resp, err := cfg.LLM.Call(ctx, req)
 		if err != nil {

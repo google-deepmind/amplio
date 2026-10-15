@@ -22,6 +22,7 @@ import (
 	"amplio/internal/llm"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 )
 
 func TestParseCacheTTL(t *testing.T) {
@@ -375,5 +376,26 @@ func TestConvertMessages_NoProviderExtraNoThinking(t *testing.T) {
 	c := convertMessages(msgs)[0].Content
 	if len(c) != 2 || c[0].OfText == nil || c[1].OfToolUse == nil {
 		t.Fatalf("want [text, tool_use], got %d blocks: %+v", len(c), c)
+	}
+}
+
+func TestBuildParams_DisableToolCallsSetsToolChoiceNone(t *testing.T) {
+	p := &provider{model: "claude-opus-4-8", maxTokens: 1024}
+	tools := []llm.ToolDef{{Name: "a", Description: "tool a", Schema: []byte(`{"properties":{}}`)}}
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "hello"}}
+
+	disabled := p.buildParams(llm.Request{Tools: tools, Messages: msgs, DisableToolCalls: true})
+	normal := p.buildParams(llm.Request{Tools: tools, Messages: msgs})
+	noTools := p.buildParams(llm.Request{Messages: msgs, DisableToolCalls: true})
+
+	if disabled.ToolChoice.OfNone == nil || len(disabled.Tools) != 1 {
+		t.Errorf("disabled: tool_choice none=%v tools=%d, want none with tools still declared",
+			disabled.ToolChoice.OfNone != nil, len(disabled.Tools))
+	}
+	if !param.IsOmitted(normal.ToolChoice) {
+		t.Errorf("normal request must not set tool_choice: %+v", normal.ToolChoice)
+	}
+	if !param.IsOmitted(noTools.ToolChoice) {
+		t.Errorf("request without tools must not set tool_choice: %+v", noTools.ToolChoice)
 	}
 }

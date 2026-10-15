@@ -225,6 +225,9 @@ func (p *provider) buildParams(req llm.Request) anthropic.MessageNewParams {
 	}
 	if len(req.Tools) > 0 {
 		params.Tools = convertTools(req.Tools)
+		if req.DisableToolCalls {
+			params.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
+		}
 	}
 	// Automatic caching: a single top-level cache_control breakpoint that the
 	// service auto-places on the last cacheable block and rolls forward as the

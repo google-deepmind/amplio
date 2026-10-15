@@ -43,9 +43,15 @@ const DefaultIdleTimeout = 30 * time.Minute
 
 // maxConcludeNudges bounds how many times an autonomous agent is nudged back
 // into the loop after an empty no-tool turn (a likely-accidental conclusion)
-// before the empty conclusion is allowed through. Small so a degenerate model
-// wastes at most this many extra calls; see concludeNudgeText.
+// before it fails with errEmptyResult. Small so a degenerate model wastes at
+// most this many extra calls; see concludeNudgeText.
 const maxConcludeNudges = 2
+
+// errEmptyResult marks an autonomous agent that still ended its turn with no
+// text and no tool calls after every nudge. Concluding instead would hand its
+// parent an empty "successful" result; failing lets the parent or operator see
+// why and retry.
+var errEmptyResult = errors.New("agent produced no result")
 
 // maxOutputLimitNudges bounds retries after the provider explicitly reports
 // that generation was cut off by the output-token limit. Unlike an empty turn,
@@ -909,7 +915,11 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 			// AssistantEvent stays persisted (step-model invariant); eventToMessage
 			// projects it as a non-empty placeholder so the replayed context is
 			// provider-safe and the nudge that follows reads coherently.
-			if isDegenerateTurn(resp.Content) && a.concludeNudges < maxConcludeNudges {
+			if isDegenerateTurn(resp.Content) {
+				if a.concludeNudges >= maxConcludeNudges {
+					return a.recordFailure(ctx, fmt.Errorf("%w after %d nudges (last stop_reason=%q)",
+						errEmptyResult, maxConcludeNudges, resp.StopReason))
+				}
 				a.concludeNudges++
 				a.logger.Debug("empty no-tool turn; nudging instead of concluding", "nudge", a.concludeNudges)
 				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,

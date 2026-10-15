@@ -144,3 +144,37 @@ func TestRunTyped_FenceTolerant(t *testing.T) {
 		t.Errorf("got %+v calls=%d", got, mock.CallCount())
 	}
 }
+
+// A typed loop with ForceFinalAnswer forces the answer early enough to repair
+// it: the forced turn lands outputRepairs iterations before the cap.
+func TestRunTyped_ForceFinalAnswerLeavesRoomForRepairs(t *testing.T) {
+	loop := llm.Response{ToolCalls: []llm.ToolCall{{ID: "tc", Name: "echo", Arguments: `{"message":"x"}`}}}
+	mock := &llm.MockProvider{Model: "test", Responses: []llm.Response{
+		loop,
+		loop,
+		{Content: `{"summary":"forced"}`}, // forced turn: invalid (missing grade)
+		{Content: `{"summary":"forced","grade":3}`}, // repaired
+	}}
+
+	got, err := RunTyped[out](context.Background(), Config{
+		LLM: mock, Tools: []*tool.Tool{echoTool()}, SystemPrompt: "sys",
+		MaxIterations: 5, ForceFinalAnswer: true,
+	}, "do it", 0)
+
+	if err != nil {
+		t.Fatalf("RunTyped: %v", err)
+	}
+	if got.Grade != 3 {
+		t.Errorf("got %+v, want the repaired forced answer", got)
+	}
+	reqs := mock.Recorded()
+	if len(reqs) != 4 {
+		t.Fatalf("calls = %d, want 4", len(reqs))
+	}
+	if forced := reqs[2]; !forced.DisableToolCalls || len(forced.Tools) == 0 {
+		t.Errorf("third call: DisableToolCalls=%v tools=%d, want the forced final turn (maxIter-1-repairs)", forced.DisableToolCalls, len(forced.Tools))
+	}
+	if reqs[1].DisableToolCalls {
+		t.Error("tool calls disabled before the forced turn")
+	}
+}

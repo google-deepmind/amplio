@@ -191,6 +191,65 @@ func TestRun_MaxIterations(t *testing.T) {
 	}
 }
 
+// A model that keeps calling tools still answers when ForceFinalAnswer is set:
+// the last iteration disables tool calls and asks for the final answer.
+func TestRun_ForceFinalAnswerOnLastIteration(t *testing.T) {
+	loop := llm.Response{ToolCalls: []llm.ToolCall{{ID: "tc", Name: "echo", Arguments: `{"message":"loop"}`}}}
+	mock := &llm.MockProvider{Model: "test", Responses: []llm.Response{loop, loop, {Content: "best answer so far"}}}
+
+	result, err := Run(context.Background(), Config{
+		LLM:              mock,
+		Tools:            []*tool.Tool{echoTool()},
+		SystemPrompt:     "You are helpful.",
+		MaxIterations:    3,
+		ForceFinalAnswer: true,
+	}, "Loop forever")
+
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result != "best answer so far" {
+		t.Errorf("result = %q, want the forced final answer", result)
+	}
+	reqs := mock.Recorded()
+	if len(reqs) != 3 {
+		t.Fatalf("LLM calls = %d, want 3", len(reqs))
+	}
+	if reqs[0].DisableToolCalls || reqs[1].DisableToolCalls {
+		t.Error("tool calls disabled before the last iteration")
+	}
+	last := reqs[2]
+	if !last.DisableToolCalls || len(last.Tools) == 0 {
+		t.Errorf("last call: DisableToolCalls=%v tools=%d, want disabled with tools still declared",
+			last.DisableToolCalls, len(last.Tools))
+	}
+	if msg := last.Messages[len(last.Messages)-1]; msg.Role != llm.RoleUser || msg.Content != finalTurnNudge {
+		t.Errorf("last message = %s %q, want the final-turn nudge", msg.Role, msg.Content)
+	}
+}
+
+// A provider that cannot disable tool calls leaves the old failure mode intact.
+func TestRun_ForceFinalAnswerFailsIfModelStillCallsTools(t *testing.T) {
+	var responses []llm.Response
+	for range 3 {
+		responses = append(responses, llm.Response{
+			ToolCalls: []llm.ToolCall{{ID: "tc", Name: "echo", Arguments: `{"message":"loop"}`}},
+		})
+	}
+
+	_, err := Run(context.Background(), Config{
+		LLM:              &llm.MockProvider{Model: "test", Responses: responses},
+		Tools:            []*tool.Tool{echoTool()},
+		SystemPrompt:     "You are helpful.",
+		MaxIterations:    3,
+		ForceFinalAnswer: true,
+	}, "Loop forever")
+
+	if err == nil || !strings.Contains(err.Error(), "exceeded 3 iterations") {
+		t.Errorf("expected max iterations error, got: %v", err)
+	}
+}
+
 func TestRun_Cancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -224,5 +283,38 @@ func TestRun_RejectsSessionRequiredTools(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "requires session infrastructure") {
 		t.Errorf("expected session-required rejection, got: %v", err)
+	}
+}
+
+// If a provider ignores DisableToolCalls on the forced turn, tool calls stay
+// disabled on every later turn and the final-turn nudge is not repeated.
+func TestRun_ForcedFinalTurnStaysForced(t *testing.T) {
+	loop := llm.Response{ToolCalls: []llm.ToolCall{{ID: "tc", Name: "echo", Arguments: `{"message":"x"}`}}}
+	mock := &llm.MockProvider{Model: "test", Responses: []llm.Response{loop, loop, loop, {Content: "answer"}}}
+
+	// The last reply is not valid JSON, so the result is an error; only the
+	// request shapes matter here.
+	_, _ = RunTyped[out](context.Background(), Config{
+		LLM: mock, Tools: []*tool.Tool{echoTool()}, SystemPrompt: "sys",
+		MaxIterations: 4, ForceFinalAnswer: true,
+	}, "do it", 2)
+
+	reqs := mock.Recorded()
+	if len(reqs) != 4 {
+		t.Fatalf("calls = %d, want 4", len(reqs))
+	}
+	for i, r := range reqs {
+		if wantForced := i >= 1; r.DisableToolCalls != wantForced {
+			t.Errorf("call %d: DisableToolCalls = %v, want %v (forced from maxIter-1-repairs on)", i, r.DisableToolCalls, wantForced)
+		}
+	}
+	nudges := 0
+	for _, m := range reqs[3].Messages {
+		if m.Role == llm.RoleUser && m.Content == finalTurnNudge {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Errorf("final-turn nudges in the last request = %d, want exactly 1", nudges)
 	}
 }

@@ -155,7 +155,8 @@ func TestRoundTrip_Lossless(t *testing.T) {
 			},
 			{Role: llm.RoleToolResult, ToolCallID: thoughtSignature, Content: "a.txt", IsError: true},
 		},
-		Tools: []llm.ToolDef{{Name: "bash", Description: "run a command", Schema: []byte(`{"type":"object"}`)}},
+		Tools:            []llm.ToolDef{{Name: "bash", Description: "run a command", Schema: []byte(`{"type":"object"}`)}},
+		DisableToolCalls: true,
 	}
 
 	st, err := p.Stream(context.Background(), req)
@@ -182,6 +183,9 @@ func TestRoundTrip_Lossless(t *testing.T) {
 	}
 	if sent.Temperature == nil || *sent.Temperature != 0.25 {
 		t.Errorf("temperature = %v", sent.Temperature)
+	}
+	if !sent.DisableToolCalls {
+		t.Error("disable_tool_calls was dropped (a forced final turn would call tools)")
 	}
 	if !reflect.DeepEqual(sent.Messages, req.Messages) {
 		t.Errorf("messages differ:\n got %#v\nwant %#v", sent.Messages, req.Messages)

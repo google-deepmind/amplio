@@ -123,7 +123,9 @@ agent that ends a turn with **no tool calls AND empty content** (a likely
 *accidental* conclusion — the model reasoned but forgot to act) is nudged back
 into the loop rather than concluding on nothing, bounded by a small in-memory
 counter so a degenerate model can't loop forever (see
-`eventloop.maxConcludeNudges`).
+`eventloop.maxConcludeNudges`). If it still produces nothing, the session
+crashes (`errEmptyResult`) instead of handing its parent an empty "successful"
+result.
 
 A turn the provider **refused** (`AssistantEvent.Refusal` is set: an Anthropic
 `refusal` stop, a Gemini blocked prompt or policy stop) is not an accidental

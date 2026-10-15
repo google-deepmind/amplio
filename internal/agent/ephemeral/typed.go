@@ -43,6 +43,10 @@ func RunTyped[T any](ctx context.Context, cfg Config, task string, outputRepairs
 	if outputRepairs <= 0 {
 		outputRepairs = defaultOutputRepairs
 	}
+	// A forced final answer must leave room to repair it.
+	if cfg.ForceFinalAnswer {
+		cfg.finalReserve = outputRepairs
+	}
 	schema := jsonextract.SchemaFor[T]()
 
 	// Append the output contract to the system prompt rather than the task, so a
