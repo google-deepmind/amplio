@@ -23,8 +23,11 @@ import (
 
 	"amplio/internal/event"
 	"amplio/internal/llm"
+	"amplio/internal/telemetry"
 
 	"github.com/invopop/jsonschema"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -156,9 +159,19 @@ func ExecuteAll(ctx context.Context, calls []llm.ToolCall, toolMap map[string]*T
 
 	for i, tc := range calls {
 		results[i] = CallResult{ToolCallID: tc.ID}
+		start := func(ctx context.Context) (context.Context, trace.Span) {
+			return telemetry.Start(ctx, "execute_tool "+tc.Name, trace.WithAttributes(
+				attribute.String("gen_ai.operation.name", "execute_tool"),
+				attribute.String("gen_ai.tool.name", tc.Name),
+				attribute.String("gen_ai.tool.call.id", tc.ID),
+			))
+		}
 
 		t, ok := toolMap[tc.Name]
 		if !ok {
+			_, span := start(ctx)
+			telemetry.Fail(span, "unknown_tool")
+			span.End()
 			results[i].Result = &Result{
 				Content: fmt.Sprintf("Error: unknown tool %q", tc.Name),
 				IsError: true,
@@ -167,6 +180,9 @@ func ExecuteAll(ctx context.Context, calls []llm.ToolCall, toolMap map[string]*T
 			continue
 		}
 		if t.Exclusive && len(calls) > 1 {
+			_, span := start(ctx)
+			telemetry.Fail(span, "exclusive_tool")
+			span.End()
 			results[i].Result = &Result{
 				Content: fmt.Sprintf("Error: tool %q must be the only tool call in the step", tc.Name),
 				IsError: true,
@@ -177,7 +193,12 @@ func ExecuteAll(ctx context.Context, calls []llm.ToolCall, toolMap map[string]*T
 
 		i, tc, t := i, tc, t
 		g.Go(func() error {
-			results[i].Result = t.ParseAndExecute(gCtx, tc.Arguments)
+			ctx, span := start(gCtx)
+			defer span.End()
+			results[i].Result = t.ParseAndExecute(ctx, tc.Arguments)
+			if results[i].Result.IsError {
+				telemetry.Fail(span, "tool_error")
+			}
 			emit(i)
 			return nil
 		})

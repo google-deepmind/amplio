@@ -34,9 +34,13 @@ import (
 	"amplio/internal/imageutil"
 	"amplio/internal/llm"
 	"amplio/internal/session"
+	"amplio/internal/telemetry"
 	"amplio/internal/tool"
 	"amplio/internal/util"
 	"amplio/internal/workspace"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const DefaultIdleTimeout = 30 * time.Minute
@@ -718,9 +722,18 @@ func (a *EventLoopAgent) seedInitialRecall(ctx context.Context, task string) err
 // false only when resuming a mid-LLM-call crash, where the dead predecessor
 // already advanced and we must call the LLM at the existing call step rather
 // than double-bumping. Every subsequent iteration advances.
-func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
+func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) (retErr error) {
 	toolMap := tool.ByName(a.cfg.Tools)
 	toolDefs := tool.Defs(a.cfg.Tools)
+	var stepSpan trace.Span
+	defer func() {
+		if stepSpan != nil {
+			if retErr != nil || ctx.Err() != nil {
+				telemetry.Fail(stepSpan, "step_error")
+			}
+			stepSpan.End()
+		}
+	}()
 
 	// consecutiveCompactions guards against a pathological compact→retry→compact
 	// loop (e.g. a context limit so small even the post-compaction context can't
@@ -728,6 +741,12 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 	consecutiveCompactions := 0
 
 	for {
+		if stepSpan != nil {
+			stepSpan.End()
+		}
+		// Reset to the run context on every iteration; completed steps must
+		// not become ancestors of later steps or retain a growing context chain.
+		ctx := ctx
 		// ctx cancellation = shutdown OR a canceller-driven cancel. Either way
 		// stop and return: shutdown preserves the status (recovered later); a
 		// cancel already set it cancelled. The loop has no cancel logic of its own.
@@ -763,6 +782,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		needsAdvance = true   // every subsequent iteration advances
 		a.callStep = callStep // a crash this turn records at its call step
 		a.logger.Debug("calling LLM", "call_step", callStep, "current_step", newStep)
+		ctx, stepSpan = telemetry.StartStep(ctx, a.env.RunID, a.cfg.SessionID, a.cfg.ParentID, a.cfg.AgentType, callStep)
 
 		// Load context up to and including the call step (bootstrap + current
 		// generation, step <= callStep). Events at the bumped step — arrivals
@@ -784,6 +804,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 			SessionID: a.env.RunID + "/" + a.cfg.SessionID,
 		}, callStep)
 		if err != nil {
+			telemetry.Fail(stepSpan, "model_error")
 			// Reactive compaction: ONLY a provider-call error reaches here, so
 			// this is the one site that may be a context-window overflow. If the
 			// fast judge confirms it (and we haven't just compacted), summarize
@@ -938,6 +959,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		if err := a.env.Store.UpdateSessionStatus(ctx, a.env.RunID, a.cfg.SessionID, db.SessionIdle); err != nil {
 			return a.recordFailure(ctx, fmt.Errorf("idle session: %w", err))
 		}
+		stepSpan.End() // idle time is not part of the completed step
 		woken, err := a.waitForFollowUp(ctx)
 		if err != nil {
 			a.logger.Debug("context cancelled while idle, exiting")
@@ -1179,7 +1201,29 @@ func convertToolCalls(tcs []llm.ToolCall) []event.ToolCall {
 // streams, emitting each token delta as an ephemeral stream_chunk for the live
 // UI, and returns the accumulated response. Otherwise it makes a blocking call.
 // The persisted AssistantEvent is identical either way; chunks are preview-only.
-func (a *EventLoopAgent) callLLM(ctx context.Context, req llm.Request, callStep int) (*llm.Response, error) {
+func (a *EventLoopAgent) callLLM(ctx context.Context, req llm.Request, callStep int) (resp *llm.Response, err error) {
+	ctx, span := telemetry.Start(ctx, "chat "+a.env.LLM.ModelID(),
+		trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
+			attribute.String("gen_ai.operation.name", "chat"),
+			attribute.String("gen_ai.request.model", a.env.LLM.ModelID()),
+		))
+	defer func() {
+		if err != nil {
+			telemetry.Fail(span, "model_error")
+		} else if resp != nil && span.IsRecording() {
+			span.SetAttributes(
+				attribute.Int("gen_ai.usage.input_tokens", resp.Usage.PromptTokens),
+				attribute.Int("gen_ai.usage.output_tokens", resp.Usage.CompletionTokens),
+				attribute.Int("gen_ai.usage.cache_read.input_tokens", resp.Usage.CacheReadTokens),
+				attribute.Int("gen_ai.usage.cache_write.input_tokens", resp.Usage.CacheWriteTokens),
+				attribute.StringSlice("gen_ai.response.finish_reasons", []string{resp.StopReason}),
+			)
+			if resp.Refusal != nil {
+				telemetry.Fail(span, "model_refusal")
+			}
+		}
+		span.End()
+	}()
 	if !a.cfg.Interactive || a.env.Broadcaster == nil {
 		return a.env.LLM.Call(ctx, req)
 	}

@@ -33,6 +33,7 @@ import (
 	"amplio/internal/responserewrite"
 	"amplio/internal/runtime"
 	"amplio/internal/skills"
+	"amplio/internal/telemetry"
 )
 
 // system is the initialized, run-INDEPENDENT object graph shared by every mode
@@ -101,6 +102,11 @@ func setupSystem(ctx context.Context, cfg config.Config, opts systemOpts) (*syst
 		_ = store.Close()
 		return nil, fmt.Errorf("create system_llm_hq: %w", err)
 	}
+	shutdownTracing, err := telemetry.Init(ctx)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("initialize tracing: %w", err)
+	}
 
 	// Operator briefings: read once at startup, like the skill dirs. The
 	// selection a run stores is resolved against whatever is loaded here.
@@ -149,6 +155,9 @@ func setupSystem(ctx context.Context, cfg config.Config, opts systemOpts) (*syst
 		obs.Stop(ctx)             // drain final summaries before exit
 		bridgeprovider.Shutdown() // reap any bridge subprocesses
 		_ = store.Close()
+		if err := shutdownTracing(); err != nil {
+			slog.Warn("trace export did not finish before shutdown")
+		}
 	}
 
 	return &system{
