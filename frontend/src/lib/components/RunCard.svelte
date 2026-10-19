@@ -928,5 +928,26 @@
 		.menu {
 			max-width: calc(100vw - 1.4rem);
 		}
+		/* Run-header use (not a list row, so the titleblock is .plain): the card
+		   renders INSIDE RunTopBar and keeps only its controls. Title, status,
+		   workspace, model and steps are either in the bar already or on
+		   Overview one tap away; repeating them cost a second 73px row. */
+		.card:has(.titleblock.plain) {
+			border: none;
+			background: none;
+			padding: 0;
+			gap: 0;
+			flex-wrap: nowrap;
+		}
+		.card:has(.titleblock.plain) .lead,
+		.card:has(.titleblock.plain) .title-wrap,
+		.card:has(.titleblock.plain) .metastrip {
+			display: none;
+		}
+		.card:has(.titleblock.plain) .actions {
+			order: 0;
+			margin: 0;
+			gap: 0;
+		}
 	}
 </style>

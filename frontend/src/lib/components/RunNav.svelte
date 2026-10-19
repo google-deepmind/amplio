@@ -17,6 +17,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { fly } from 'svelte/transition';
+	import { RowsIcon, BookOpenIcon } from 'phosphor-svelte';
 	import {
 		TreeStructureIcon,
 		ChatCircleIcon,
@@ -29,6 +30,7 @@
 	import { logHref, recallSession } from '$lib/logView.svelte';
 	import { serverInfo } from '$lib/serverInfo.svelte';
 	import { viewport } from '$lib/viewport.svelte';
+	import { runMenu } from '$lib/runMenu.svelte';
 	import type { Component } from 'svelte';
 	import type { IconComponentProps } from 'phosphor-svelte';
 	import type { SessionDTO } from '$lib/types';
@@ -119,21 +121,15 @@
 			: [])
 	]);
 
-	const tabs = $derived(items.filter((it) => !it.secondary));
-	const moreItems = $derived(items.filter((it) => it.secondary));
-	let moreOpen = $state(false);
-	// More carries the active tint when the current view lives inside it: the tab
-	// bar is the only "where am I" indicator on a phone.
-	const moreActive = $derived(moreItems.some((it) => it.active));
-	// Rotating to landscape swaps the tab bar for the rail; close with it.
+	// Rotating to landscape swaps the drawer for the rail; close with it.
 	$effect(() => {
-		if (!viewport.isPhone) moreOpen = false;
+		if (!viewport.isPhone) runMenu.open = false;
 	});
 	// Wired only while open, so desktop carries no extra global key listener.
 	$effect(() => {
-		if (!moreOpen) return;
+		if (!runMenu.open) return;
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key === 'Escape') moreOpen = false;
+			if (e.key === 'Escape') runMenu.open = false;
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
@@ -141,57 +137,40 @@
 </script>
 
 <!-- Two shapes of the same nav, chosen in markup rather than CSS: the phone
-     form drops entries into a sheet, adds a button among the links, and lives
-     outside the layout flow. A CSS-only fork
-     would have to ship the sheet's DOM to every desktop page to do that. -->
+     form is a drawer opened from the run bar, not a restyled rail, and a
+     CSS-only fork would ship the drawer's DOM to every desktop page. -->
 {#if viewport.isPhone}
-	<nav class="tabbar" aria-label="Run sections">
-		{#each tabs as it (it.href)}
-			{@const Icon = it.icon}
-			<a
-				href={it.href}
-				class="tab"
-				class:active={it.active}
-				aria-current={it.active ? 'page' : undefined}
-				onclick={() => (moreOpen = false)}
-			>
-				<Icon size={22} weight={it.active ? 'fill' : 'regular'} />
-				<span class="label">{it.label}</span>
-			</a>
-		{/each}
-		<button
-			class="tab"
-			class:active={moreActive}
-			aria-expanded={moreOpen}
-			onclick={() => (moreOpen = !moreOpen)}
-		>
-			<DotsThreeOutlineIcon size={22} weight={moreActive || moreOpen ? 'fill' : 'regular'} />
-			<span class="label">More</span>
-		</button>
-	</nav>
-	{#if moreOpen}
-		<!-- Scrim first in the DOM so the sheet paints over it. A real <button>
+	{#if runMenu.open}
+		<!-- Scrim first in the DOM so the drawer paints over it. A real <button>
 		     rather than a click-handling div, which keeps tap-outside-to-dismiss
-		     reachable for
-		     anyone driving this with a keyboard or a screen reader. -->
-		<button class="scrim" aria-label="Close menu" onclick={() => (moreOpen = false)}></button>
-		<div class="sheet" transition:fly={{ y: 120, duration: 150 }}>
-			{#each moreItems as it (it.href)}
+		     reachable for anyone driving this with a keyboard or a screen reader. -->
+		<button class="scrim" aria-label="Close menu" onclick={() => (runMenu.open = false)}></button>
+		<nav class="drawer" aria-label="Run sections" transition:fly={{ x: -200, duration: 150 }}>
+			<p class="drawer-head dim small">This run</p>
+			{#each items as it (it.href)}
 				{@const Icon = it.icon}
 				<a
 					href={it.href}
-					class="sheet-item"
+					class="drawer-item"
 					class:active={it.active}
 					aria-current={it.active ? 'page' : undefined}
-					onclick={() => (moreOpen = false)}
+					onclick={() => (runMenu.open = false)}
 				>
 					<Icon size={20} weight={it.active ? 'fill' : 'regular'} />
 					<span>{it.label}</span>
+					{#if it.secondary}<span class="wide-hint dim small">wide</span>{/if}
 				</a>
 			{/each}
-			<!-- These views assume a wide window; say so before the tap. -->
-			<p class="sheet-note dim small">These views are best on a wide screen.</p>
-		</div>
+			<div class="drawer-sep" role="separator"></div>
+			<a class="drawer-item" href="/" onclick={() => (runMenu.open = false)}>
+				<RowsIcon size={20} />
+				<span>All Runs</span>
+			</a>
+			<a class="drawer-item" href="/recall" onclick={() => (runMenu.open = false)}>
+				<BookOpenIcon size={20} />
+				<span>Recall</span>
+			</a>
+		</nav>
 	{/if}
 {:else}
 	<nav class="rail">
@@ -247,81 +226,62 @@
 		background: color-mix(in srgb, var(--accent) 16%, transparent);
 	}
 
-	/* Phone: the rail becomes the bottom tab bar. Fixed, so a scrolling view
-	   keeps its nav under the thumb; the space it covers is reserved by
-	   <main>'s bottom padding via --bottom-nav-h,
-	   which is also where its height is defined (app.css) so the two cannot
-	   drift apart. Nothing below is reachable above 640px — the rail rules above
-	   are untouched. */
-	.tabbar {
-		position: fixed;
-		inset: auto 0 0 0;
-		z-index: 20;
-		display: flex;
-		background: var(--bg-elev);
-		border-top: 1px solid var(--border);
-		/* Inset keeps labels off the home indicator; the fill still runs to the
-		   edge, which is what makes the bar look anchored. */
-		padding-bottom: env(safe-area-inset-bottom, 0px);
-	}
-	.tab {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 0.1rem;
-		min-height: 3.5rem; /* the 44px floor, with room for icon + label */
-		padding: 0.35rem 0.2rem;
-		color: var(--text-dim);
-		font-size: var(--fs-xs);
-		/* The More entry is a <button>; strip the global button chrome so it is
-		   indistinguishable from the link tabs beside it. */
-		background: none;
-		border: none;
-		border-radius: 0;
-	}
-	.tab.active {
-		color: var(--accent);
-	}
-	.tab:hover {
-		text-decoration: none;
-	}
-	.scrim {
-		position: fixed;
-		inset: 0;
-		z-index: 19;
-		background: color-mix(in srgb, var(--bg) 65%, transparent);
-		border: none;
-		border-radius: 0;
-		padding: 0;
-	}
-	.sheet {
-		position: fixed;
-		/* Sits on the tab bar, not over it, so the sheet reads as part of More. */
-		inset: auto 0 var(--bottom-nav-h) 0;
-		z-index: 20;
-		display: flex;
-		flex-direction: column;
-		background: var(--bg-elev);
-		border-top: 1px solid var(--border);
-		padding: 0.4rem 0;
-	}
-	.sheet-item {
-		display: flex;
-		align-items: center;
-		gap: 0.7rem;
-		min-height: 44px;
-		padding: 0 1.1rem;
-		color: var(--text);
-	}
-	.sheet-item:hover {
-		text-decoration: none;
-	}
-	.sheet-item.active {
-		color: var(--accent);
-	}
-	.sheet-note {
-		margin: 0.3rem 1.1rem 0.2rem;
+	/* Phone: no bottom bar at all — it sat on top of the composer in chat. The
+	   rail's entries move into a left drawer opened from the run bar, so the
+	   bottom of the screen belongs to the view. */
+	@media (max-width: 640px) {
+		.scrim {
+			position: fixed;
+			inset: 0;
+			z-index: 29;
+			background: color-mix(in srgb, var(--bg) 65%, transparent);
+			border: none;
+			border-radius: 0;
+			padding: 0;
+		}
+		.drawer {
+			position: fixed;
+			inset: 0 auto 0 0;
+			z-index: 30;
+			width: min(17rem, 82vw);
+			padding: 0.6rem 0.5rem calc(0.6rem + env(safe-area-inset-bottom, 0px));
+			display: flex;
+			flex-direction: column;
+			gap: 0.15rem;
+			overflow-y: auto;
+			background: var(--bg-elev);
+			border-right: 1px solid var(--border);
+		}
+		.drawer-head {
+			text-transform: uppercase;
+			letter-spacing: 0.04em;
+			margin: 0.3rem 0.6rem 0.2rem;
+		}
+		.drawer-item {
+			display: flex;
+			align-items: center;
+			gap: 0.6rem;
+			min-height: 44px;
+			padding: 0 0.6rem;
+			border-radius: var(--radius-sm);
+			color: var(--text);
+		}
+		.drawer-item:hover {
+			text-decoration: none;
+			background: var(--bg-elev2);
+		}
+		.drawer-item.active {
+			color: var(--accent);
+			background: color-mix(in srgb, var(--accent) 12%, transparent);
+		}
+		/* These views assume a wide window; say so before the tap. */
+		.wide-hint {
+			margin-left: auto;
+		}
+		.drawer-sep {
+			height: 1px;
+			margin: 0.4rem 0.6rem;
+			background: var(--border);
+		}
 	}
 </style>

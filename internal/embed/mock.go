@@ -51,3 +51,14 @@ func (m Mock) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	}
 	return out, nil
 }
+
+// HybridMock is Mock posing as the built-in local embedder (an embed.Hybrid),
+// so tests can exercise the fused cosine + BM25 ranking without a table.
+type HybridMock struct{ Mock }
+
+// HybridMockAlpha is HybridMock's cosine weight (the local embedder's value).
+const HybridMockAlpha = 0.7
+
+func (HybridMock) ModelID() string { return "local_mock" }
+
+func (HybridMock) HybridAlpha() float64 { return HybridMockAlpha }

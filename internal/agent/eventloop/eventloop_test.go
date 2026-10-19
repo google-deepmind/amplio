@@ -407,6 +407,54 @@ func TestEventLoop_ResumeAtRestEmptyIsNudged(t *testing.T) {
 	}
 }
 
+// Recovery-path parity with the live loop: an empty at-rest tail whose nudges
+// are already spent fails with errEmptyResult instead of falling through to
+// conclude with an empty result. A respawned agent starts its counter at 0, so
+// the test presets it to reach the branch the invariant depends on.
+func TestEventLoop_ResumeAtRestEmptyNudgesSpentFails(t *testing.T) {
+	store, runID, registry := testSetup(t)
+	ctx := context.Background()
+	if err := store.CreateSession(ctx, db.SessionRecord{
+		RunID: runID, SessionID: "main-agent", AgentType: "standard_agent", Status: db.SessionOngoing,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvanceStep(ctx, runID, "main-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeStep(ctx, runID, "main-agent", 1, []event.Event{
+		&event.UserEvent{Content: "do the thing"},
+		&event.AssistantEvent{Content: "", StopReason: "end_turn"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &llm.MockProvider{
+		Model:     "test-model",
+		Responses: []llm.Response{{Content: "SHOULD NOT BE CALLED", StopReason: "end_turn"}},
+	}
+	ag := newT(testCfg{
+		RunID: runID, SessionID: "main-agent", Task: "q",
+		SystemPrompt: "sp", LLM: mock, Store: store, Registry: registry,
+		Tools: []*tool.Tool{}, Workspace: plain.New("/tmp"),
+	})
+	ag.concludeNudges = maxConcludeNudges
+
+	err := ag.Run(ctx)
+	if !errors.Is(err, errEmptyResult) || !strings.Contains(err.Error(), `last stop_reason="end_turn"`) {
+		t.Fatalf("Run error = %v, want errEmptyResult with the tail's stop reason", err)
+	}
+	if got := mock.CallCount(); got != 0 {
+		t.Errorf("LLM calls = %d, want 0 on the at-rest resume", got)
+	}
+	if n := countNudgeEvents(t, store, runID); n != 0 {
+		t.Errorf("nudge events = %d, want 0 once the nudges are spent", n)
+	}
+	if sess, _ := store.GetSession(ctx, runID, "main-agent"); sess.Status != db.SessionCrashed {
+		t.Errorf("status = %q, want crashed (not concluded with an empty result)", sess.Status)
+	}
+}
+
 // The nudge is BOUNDED: a model that keeps emitting empty turns is nudged at
 // most maxConcludeNudges times, then the session fails instead of handing its
 // parent an empty "successful" result (proves no infinite loop).

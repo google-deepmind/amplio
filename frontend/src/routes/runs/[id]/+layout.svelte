@@ -21,6 +21,9 @@
 	import { updates } from '$lib/updates.svelte';
 	import RunNav from '$lib/components/RunNav.svelte';
 	import RunHeader from '$lib/components/RunHeader.svelte';
+	import RunTopBar from '$lib/components/RunTopBar.svelte';
+	import { viewport } from '$lib/viewport.svelte';
+	import { swipeMenu } from '$lib/swipeMenu';
 
 	let { children } = $props();
 	const runId = $derived(page.params.id ?? '');
@@ -33,6 +36,11 @@
 		store.switchTo(runId); // re-points (and re-subscribes) when the [id] changes
 	});
 	$effect(() => () => store.destroy());
+	// The run's own status for the phone bar: the root session is the one
+	// without a parent (the spine), matching how the dashboard reports it.
+	const rootStatus = $derived(
+		store.detail?.sessions?.find((x) => !x.parent_id)?.status ?? ''
+	);
 
 	// Seen-state integration (server-authoritative), driven by detail.has_updates
 	// (the server's badge, refetched on each run-state signal) + tab visibility:
@@ -69,16 +77,37 @@
 	});
 </script>
 
-<div class="shell">
+<div class="shell" use:swipeMenu>
 	<RunNav {runId} sessions={store.detail?.sessions ?? []} />
 	<div class="main">
-		<RunHeader {store} />
+		{#if viewport.isPhone}
+			<!-- The run card rides INSIDE the bar on a phone, stripped by CSS to
+			     its grade picker and menu: one row instead of a header stacked
+			     under a header. -->
+			<RunTopBar title={store.detail?.title || store.detail?.task || runId} status={rootStatus}>
+				{#snippet trailing()}
+					<RunHeader {store} />
+				{/snippet}
+			</RunTopBar>
+		{:else}
+			<RunHeader {store} />
+		{/if}
 		{#if store.error}<p class="err">{store.error}</p>{/if}
 		<div class="content">{@render children()}</div>
 	</div>
 </div>
 
 <style>
+	/* No fixed bottom chrome in a run (the nav is a drawer now), so the gutter
+	   app.css reserves for the dashboard's tabs is dead space here. It has to
+	   be cancelled on <main> itself: that is where the padding is applied, and
+	   it is this shell's ANCESTOR, so a variable set here would never reach it. */
+	@media (max-width: 640px) {
+		:global(main:has(.shell)) {
+			padding-bottom: 0.4rem;
+		}
+	}
+
 	/* App-shell: the run nav + header stay put; .content is the scroll pane, so
 	   sub-views (overview/trajectory/chat) scroll within a persistent frame. */
 	.shell {

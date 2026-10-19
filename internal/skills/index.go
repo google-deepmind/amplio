@@ -23,27 +23,41 @@ import (
 
 	"amplio/internal/config"
 	"amplio/internal/embed"
+	"amplio/internal/textrank"
 	"amplio/internal/vec"
 )
 
 // Hit is one search result.
 type Hit struct {
 	Entry Entry
-	Score float64 // cosine similarity in [-1, 1]
+	// Score ranks the hit: cosine similarity in [-1, 1] with an API embedder,
+	// the fused cosine + BM25 score in [0, 1] otherwise (see embed.FusionWeight).
+	Score float64
 }
 
-// Index is an in-memory cosine-similarity index over skill descriptions. Build
-// once at startup (disk-cached embeddings); query repeatedly. Search is brute
-// force over a few hundred rows — fast enough without a vector index.
+// lexicalCacheKey is the cache's model key when there is no embedder: entries
+// are cached for their parsed fields only, with no vector.
+const lexicalCacheKey = "lexical"
+
+// Index is an in-memory similarity index over skill descriptions. Build once
+// at startup (disk-cached embeddings); query repeatedly. Search is brute force
+// over a few hundred rows — fast enough without a vector index.
+//
+// How it ranks follows the embedder (embed.FusionWeight): cosine alone for an
+// API embedder; cosine fused with BM25 for the built-in local one; BM25 alone
+// with no embedder (nil).
 type Index struct {
 	sources  []Source
-	embedder embed.Embedder
+	embedder embed.Embedder // nil: BM25 only
 	cache    Cache
+	alpha    float64 // cosine weight when fused
+	fused    bool    // rank by textrank.Fuse rather than cosine alone
 
 	mu      sync.RWMutex
 	entries map[string]Entry
 	names   []string        // row order
-	matrix  [][]float32     // L2-normalized vectors, row per name
+	matrix  [][]float32     // L2-normalized vectors, row per name (nil without an embedder)
+	lexical *textrank.BM25  // over embedText, row per name (nil unless fused)
 	pinned  map[string]bool // names of entries from a pinned source
 	built   bool
 
@@ -54,9 +68,33 @@ type Index struct {
 	initial int
 }
 
-// NewIndex constructs an index; call Build to populate (does I/O + embeds).
+// NewIndex constructs an index; call Build to populate (does I/O + embeds). A
+// nil embedder ranks by BM25 alone.
 func NewIndex(sources []Source, embedder embed.Embedder, cache Cache) *Index {
-	return &Index{sources: sources, embedder: embedder, cache: cache, initial: config.DefaultSkillsInitial}
+	alpha, fused := embed.FusionWeight(embedder)
+	return &Index{sources: sources, embedder: embedder, cache: cache, alpha: alpha, fused: fused,
+		initial: config.DefaultSkillsInitial}
+}
+
+// cacheKey is the model key the cache stores this index's entries under.
+func (ix *Index) cacheKey() string {
+	if ix.embedder == nil {
+		return lexicalCacheKey
+	}
+	return ix.embedder.ModelID()
+}
+
+// lexicalIndex builds the BM25 index over the entries' embedding texts, or nil
+// when the index ranks by cosine alone.
+func (ix *Index) lexicalIndex(names []string, entries map[string]Entry) *textrank.BM25 {
+	if !ix.fused {
+		return nil
+	}
+	docs := make([]string, len(names))
+	for i, n := range names {
+		docs[i] = embedText(entries[n])
+	}
+	return textrank.NewBM25(docs)
 }
 
 // SetInitialLimit sets how many relevance-ranked skills the session-start seed
@@ -83,7 +121,7 @@ func embedText(e Entry) string { return e.Name + ": " + e.Description }
 // to load the cache is logged-and-ignored; the index stays empty and Build
 // will recover from disk.
 func (ix *Index) LoadCached(ctx context.Context) int {
-	cached, err := ix.cache.Load(ctx, ix.embedder.ModelID())
+	cached, err := ix.cache.Load(ctx, ix.cacheKey())
 	if err != nil {
 		slog.Warn("skill cache hydrate failed; starting empty", "error", err)
 		return 0
@@ -100,7 +138,7 @@ func (ix *Index) LoadCached(ctx context.Context) int {
 	}
 	sort.Strings(names)
 	entryMap := make(map[string]Entry, len(cached))
-	matrix := make([][]float32, 0, len(cached))
+	var matrix [][]float32
 	for _, n := range names {
 		c := cached[n]
 		entryMap[n] = Entry{
@@ -110,11 +148,14 @@ func (ix *Index) LoadCached(ctx context.Context) int {
 			Path:        c.Path,
 			ContentHash: c.Hash,
 		}
-		matrix = append(matrix, vec.Normalize(c.Vector))
+		if ix.embedder != nil {
+			matrix = append(matrix, vec.Normalize(c.Vector))
+		}
 	}
 	pinned := pinnedNames(ix.sources, entryMap)
+	lexical := ix.lexicalIndex(names, entryMap)
 	ix.mu.Lock()
-	ix.entries, ix.names, ix.matrix, ix.pinned, ix.built = entryMap, names, matrix, pinned, true
+	ix.entries, ix.names, ix.matrix, ix.lexical, ix.pinned, ix.built = entryMap, names, matrix, lexical, pinned, true
 	ix.mu.Unlock()
 	slog.Info("skill index hydrated from cache (background reconcile to follow)", "skills", len(names), "pinned", len(pinned))
 	return len(names)
@@ -146,7 +187,7 @@ func (ix *Index) Build(ctx context.Context) error {
 
 func (ix *Index) buildOnce(ctx context.Context) error {
 	entries := scanSources(ix.sources)
-	model := ix.embedder.ModelID()
+	model := ix.cacheKey()
 
 	cached, err := ix.cache.Load(ctx, model)
 	if err != nil {
@@ -157,6 +198,10 @@ func (ix *Index) buildOnce(ctx context.Context) error {
 	var toEmbedNames, toEmbedTexts []string
 	reuse := make(map[string][]float32)
 	for _, e := range entries {
+		if ix.embedder == nil {
+			reuse[e.Name] = nil // nothing to embed: BM25 reads the entry itself
+			continue
+		}
 		if c, ok := cached[e.Name]; ok && c.Hash == e.ContentHash {
 			reuse[e.Name] = c.Vector
 			continue
@@ -178,7 +223,7 @@ func (ix *Index) buildOnce(ctx context.Context) error {
 
 	entryMap := make(map[string]Entry, len(entries))
 	names := make([]string, 0, len(entries))
-	matrix := make([][]float32, 0, len(entries))
+	var matrix [][]float32
 	save := make(map[string]CacheEntry, len(entries))
 	for _, e := range entries {
 		embVec, ok := reuse[e.Name]
@@ -190,7 +235,9 @@ func (ix *Index) buildOnce(ctx context.Context) error {
 		}
 		entryMap[e.Name] = e
 		names = append(names, e.Name)
-		matrix = append(matrix, vec.Normalize(embVec))
+		if ix.embedder != nil {
+			matrix = append(matrix, vec.Normalize(embVec))
+		}
 		save[e.Name] = CacheEntry{
 			Hash:        e.ContentHash,
 			Vector:      embVec,
@@ -205,8 +252,9 @@ func (ix *Index) buildOnce(ctx context.Context) error {
 	}
 
 	pinned := pinnedNames(ix.sources, entryMap)
+	lexical := ix.lexicalIndex(names, entryMap)
 	ix.mu.Lock()
-	ix.entries, ix.names, ix.matrix, ix.pinned, ix.built = entryMap, names, matrix, pinned, true
+	ix.entries, ix.names, ix.matrix, ix.lexical, ix.pinned, ix.built = entryMap, names, matrix, lexical, pinned, true
 	ix.mu.Unlock()
 	slog.Info("skill index built", "skills", len(names), "pinned", len(pinned), "embedded", len(fresh), "reused", len(reuse))
 	return nil
@@ -241,71 +289,114 @@ func (ix *Index) Load(name string) (Entry, bool) {
 	return e, ok
 }
 
-// Search returns up to k skills most similar to query, by cosine descending.
-// A degenerate query vector (norm below vec.MinNorm — e.g. the embedder
-// collapsed a whitespace-only string) returns nil rather than every-row-
-// tied-at-zero junk from an arbitrary unstable sort.
-func (ix *Index) Search(ctx context.Context, query string, k int) ([]Hit, error) {
-	ix.mu.RLock()
-	names, matrix, entries := ix.names, ix.matrix, ix.entries
-	ix.mu.RUnlock()
+// snapshot is one consistent view of the index for ranking a query.
+type snapshot struct {
+	names   []string
+	entries map[string]Entry
+	matrix  [][]float32
+	lexical *textrank.BM25
+	pinned  map[string]bool
+}
 
-	if k <= 0 || len(names) == 0 || query == "" {
+func (ix *Index) snapshot() snapshot {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return snapshot{ix.names, ix.entries, ix.matrix, ix.lexical, ix.pinned}
+}
+
+// Search returns up to k skills most relevant to query, by score descending.
+// A query with no usable signal (e.g. one the embedder collapses to a
+// near-zero vector, with no lexical match either) returns nil rather than
+// every-row-tied-at-zero junk from an arbitrary unstable sort.
+func (ix *Index) Search(ctx context.Context, query string, k int) ([]Hit, error) {
+	s := ix.snapshot()
+	if k <= 0 || len(s.names) == 0 || query == "" {
 		return nil, nil
 	}
-	scores, err := ix.score(ctx, query, matrix)
+	scores, eligible, err := ix.score(ctx, query, s)
 	if err != nil || scores == nil {
 		return nil, err
 	}
-	return topK(names, entries, scores, k, nil), nil
+	return topK(s, scores, k, func(i int) bool { return eligible == nil || eligible[i] }), nil
 }
 
 // Initial selects the skills listed at session start: EVERY skill from a pinned
 // source, plus the k most relevant of the rest (pinned ones never take one of
 // the k slots, and never appear twice). Pinned skills are ordered by relevance
 // to query, or by name when there is no query (a chat session) or ranking
-// failed. The query is embedded once for both.
+// failed. The query is scored once for both.
 //
 // On an embedding error it still returns the pinned skills (by name) along
 // with the error: they don't depend on the ranking, and the caller can log the
 // failure and list them anyway.
 func (ix *Index) Initial(ctx context.Context, query string, k int) (pinned []Entry, relevant []Hit, err error) {
-	ix.mu.RLock()
-	names, matrix, entries, pinnedSet := ix.names, ix.matrix, ix.entries, ix.pinned
-	ix.mu.RUnlock()
+	s := ix.snapshot()
 
 	var scores []float64
-	if query != "" && len(names) > 0 && (k > 0 || len(pinnedSet) > 0) {
-		scores, err = ix.score(ctx, query, matrix)
+	var eligible []bool
+	if query != "" && len(s.names) > 0 && (k > 0 || len(s.pinned) > 0) {
+		scores, eligible, err = ix.score(ctx, query, s)
 	}
 
-	if len(pinnedSet) > 0 {
+	if len(s.pinned) > 0 {
 		if scores != nil {
-			for _, h := range topK(names, entries, scores, len(names), func(n string) bool { return pinnedSet[n] }) {
+			for _, h := range topK(s, scores, len(s.names), func(i int) bool { return s.pinned[s.names[i]] }) {
 				pinned = append(pinned, h.Entry)
 			}
 		} else {
-			byName := make([]string, 0, len(pinnedSet))
-			for n := range pinnedSet {
+			byName := make([]string, 0, len(s.pinned))
+			for n := range s.pinned {
 				byName = append(byName, n)
 			}
 			sort.Strings(byName)
 			for _, n := range byName {
-				pinned = append(pinned, entries[n])
+				pinned = append(pinned, s.entries[n])
 			}
 		}
 	}
 	if scores != nil && k > 0 {
-		relevant = topK(names, entries, scores, k, func(n string) bool { return !pinnedSet[n] })
+		relevant = topK(s, scores, k, func(i int) bool {
+			return !s.pinned[s.names[i]] && (eligible == nil || eligible[i])
+		})
 	}
 	return pinned, relevant, err
 }
 
-// score embeds query and returns its cosine similarity to every row of matrix,
-// or nil for a degenerate query vector (norm below vec.MinNorm — e.g. the
-// embedder collapsed a whitespace-only string): every row tied at zero would
-// be arbitrary-order junk.
-func (ix *Index) score(ctx context.Context, query string, matrix [][]float32) ([]float64, error) {
+// score ranks every row for query (see Index for the three ranking modes).
+// nil scores mean the query carries no usable signal. eligible, when non-nil,
+// marks the rows that may be returned as relevant: without a cosine signal (no
+// embedder, or a degenerate query vector) a row sharing no term with the query
+// is no match at all.
+func (ix *Index) score(ctx context.Context, query string, s snapshot) (scores []float64, eligible []bool, err error) {
+	cos, err := ix.cosine(ctx, query, s.matrix)
+	if err != nil || !ix.fused {
+		return cos, nil, err
+	}
+	lex := s.lexical.Scores(query)
+	fused := textrank.Fuse(cos, lex, ix.alpha)
+	if cos != nil {
+		return fused, nil, nil
+	}
+	eligible = make([]bool, len(lex))
+	matched := false
+	for i, v := range lex {
+		eligible[i] = v > 0
+		matched = matched || v > 0
+	}
+	if !matched {
+		return nil, nil, nil
+	}
+	return fused, eligible, nil
+}
+
+// cosine embeds query and returns its cosine similarity to every row of
+// matrix, or nil without an embedder or for a degenerate query vector (norm
+// below vec.MinNorm — e.g. the embedder collapsed a whitespace-only string):
+// every row tied at zero would be arbitrary-order junk.
+func (ix *Index) cosine(ctx context.Context, query string, matrix [][]float32) ([]float64, error) {
+	if ix.embedder == nil {
+		return nil, nil
+	}
 	vecs, err := ix.embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, err
@@ -321,12 +412,12 @@ func (ix *Index) score(ctx context.Context, query string, matrix [][]float32) ([
 	return scores, nil
 }
 
-// topK returns up to k entries by descending score, considering only names for
-// which keep reports true (nil keep = all).
-func topK(names []string, entries map[string]Entry, scores []float64, k int, keep func(string) bool) []Hit {
-	idx := make([]int, 0, len(names))
-	for i, n := range names {
-		if keep == nil || keep(n) {
+// topK returns up to k entries by descending score, considering only the rows
+// for which keep reports true.
+func topK(s snapshot, scores []float64, k int, keep func(i int) bool) []Hit {
+	idx := make([]int, 0, len(s.names))
+	for i := range s.names {
+		if keep(i) {
 			idx = append(idx, i)
 		}
 	}
@@ -336,7 +427,7 @@ func topK(names []string, entries map[string]Entry, scores []float64, k int, kee
 	}
 	out := make([]Hit, 0, k)
 	for _, i := range idx[:k] {
-		out = append(out, Hit{Entry: entries[names[i]], Score: scores[i]})
+		out = append(out, Hit{Entry: s.entries[s.names[i]], Score: scores[i]})
 	}
 	return out
 }

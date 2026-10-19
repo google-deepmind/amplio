@@ -144,6 +144,41 @@ func TestMineLessons_Duplicate(t *testing.T) {
 	}
 }
 
+// BM25-only recall has no embedder: candidates are inserted unembedded, with no
+// near-duplicate check (the dedup mock would call this one a duplicate), and
+// the rebuilt index still finds them.
+func TestMineLessons_NoEmbedder(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	seedExistingLesson(t, store, embed.Mock{}, "old", "spanner permission denied gotcha", "old body")
+	ix := builtLessonIndex(t, store, nil)
+	deps := Deps{Store: store, LessonIndex: ix, HQ: mineMock{
+		extraction: `{"lessons":[{"title":"Again","description":"spanner permission denied gotcha","body":"new body"}]}`,
+		dedup:      `{"verdict":"duplicate","reason":"same knowledge"}`,
+	}}
+
+	n, err := MineLessons(ctx, deps, "run-4", miningReport())
+	must(t, err)
+	if n != 1 {
+		t.Fatalf("inserted = %d, want 1 (no dedup without an embedder)", n)
+	}
+	all, err := store.ListAllLessons(ctx)
+	must(t, err)
+	for _, l := range all {
+		if l.SourceRunID == "run-4" && (l.Embedding != nil || l.EmbedderID != "") {
+			t.Errorf("lesson mined without an embedder carries embedding=%v embedder_id=%q", l.Embedding, l.EmbedderID)
+		}
+	}
+	if ix.Size() != 2 {
+		t.Fatalf("index size = %d, want 2 (BM25 indexes every lesson)", ix.Size())
+	}
+	hits, err := ix.Search(ctx, "spanner permission", 5)
+	must(t, err)
+	if len(hits) != 2 {
+		t.Errorf("search found %d lessons, want both", len(hits))
+	}
+}
+
 // combinedMock answers both the keen-critic agentic loop (request carries the
 // investigation tools → end with the JSON report as content) and the mining
 // calls (no tools → extraction/dedup JSON).

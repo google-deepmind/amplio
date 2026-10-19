@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package lessons provides an in-memory cosine-similarity index over mined
-// lessons, with confidence-weighted ranking. Unlike the skill index it reads
-// from the DB (lessons carry their own stored embeddings), so Build does no
-// embedding — only Search embeds (the query). Ranking multiplies each lesson's
-// raw cosine by a confidence factor derived from its accumulated score and load
-// count, so well-attributed lessons surface above marginal ones.
+// Package lessons provides an in-memory similarity index over mined lessons,
+// with confidence-weighted ranking. Unlike the skill index it reads from the DB:
+// with an API embedder lessons carry their own stored embeddings, so Build does
+// no embedding — only Search embeds (the query); the built-in local embedder
+// and the BM25-only mode index every lesson's description instead (see Index).
+// Ranking is by relevance plus a small, bounded adjustment derived from each
+// lesson's accumulated score and load count: a well-rated lesson moves up among
+// about-equally relevant ones, and a lesson judged unhelpful or harmful drops
+// out of view, but relevance decides.
 package lessons

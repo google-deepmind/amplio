@@ -16,6 +16,7 @@ package lessons
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"amplio/internal/db"
@@ -108,18 +109,120 @@ func TestIndex_ConfidenceRanking(t *testing.T) {
 	}
 }
 
-func TestConfidenceMultiplier(t *testing.T) {
-	if m := confidenceMultiplier(0, 0); m != 1.0 {
-		t.Errorf("neutral lesson = %v, want 1.0", m)
+func TestConfidenceAdjustment(t *testing.T) {
+	if a := confidenceAdjustment(0, 0); a != 0 {
+		t.Errorf("neutral lesson = %v, want 0 (ranked by cosine alone)", a)
 	}
-	// A positive score boosts; more loads damp the same score (1+4/2=3 vs 1+4/10=1.4).
-	few, many := confidenceMultiplier(4, 0), confidenceMultiplier(4, 96)
-	if !(few > many && many > 1) {
-		t.Errorf("load damping: few-loads=%v should exceed many-loads=%v > 1", few, many)
+	// A positive score lifts; more loads damp the same score.
+	few, many := confidenceAdjustment(4, 0), confidenceAdjustment(4, 96)
+	if !(few > many && many > 0) {
+		t.Errorf("load damping: few-loads=%v should exceed many-loads=%v > 0", few, many)
 	}
-	// A very negative score floors at 0 (never flips a positive cosine).
-	if m := confidenceMultiplier(-100, 0); m != 0 {
-		t.Errorf("floor = %v, want 0", m)
+	// Bounded both ways: the bonus never exceeds confidenceBonus, the penalty never
+	// exceeds confidencePenalty, however extreme the score.
+	if a := confidenceAdjustment(1000, 0); a <= 0 || a > confidenceBonus {
+		t.Errorf("max bonus = %v, want in (0, %v]", a, confidenceBonus)
+	}
+	if a := confidenceAdjustment(-1000, 0); a >= 0 || a < -confidencePenalty {
+		t.Errorf("max penalty = %v, want in [-%v, 0)", a, confidencePenalty)
+	}
+	// Asymmetric: the same evidence counts for more when it is negative.
+	if up, down := confidenceAdjustment(1, 0), confidenceAdjustment(-1, 0); -down <= up {
+		t.Errorf("penalty %v should outweigh bonus %v for the same |score|", down, up)
+	}
+}
+
+// seedVec inserts a lesson with an explicit embedding, then applies its score.
+// Lets a test place lessons at chosen cosines to a query.
+func seedVec(t *testing.T, store db.Store, id string, v []float32, score int) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.InsertLesson(ctx, db.LessonRecord{
+		LessonID: id, Title: id, Description: id, Body: "body of " + id,
+		Embedding: v, EmbedderID: embed.Mock{}.ModelID(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if score != 0 {
+		if err := store.AddToLessonScore(ctx, id, score); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// atCos is a unit vector whose cosine to the query axis (1,0,0) is c.
+func atCos(c float64) []float32 {
+	return []float32{float32(c), float32(math.Sqrt(1 - c*c)), 0}
+}
+
+var queryAxis = []float32{1, 0, 0}
+
+func buildIndex(t *testing.T, store db.Store) *Index {
+	t.Helper()
+	ix := NewIndex(store, embed.Mock{})
+	if err := ix.Build(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return ix
+}
+
+func ids(hits []Hit) []string {
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = h.Lesson.LessonID
+	}
+	return out
+}
+
+// A track record reorders only lessons that are about equally relevant: the most
+// highly rated lesson cannot overtake one that is clearly more relevant. (Under the
+// multiplicative rule this replaced, 0.60 x (1 + 8/2) = 3.0 beat 0.70 x 1.)
+func TestIndex_ConfidenceCannotOverrideRelevance(t *testing.T) {
+	store := newStore(t)
+	seedVec(t, store, "relevant", atCos(0.70), 0)
+	seedVec(t, store, "well-rated", atCos(0.60), 8)
+	if got := ids(buildIndex(t, store).SearchVec(queryAxis, 2)); got[0] != "relevant" {
+		t.Fatalf("ranking = %v, want the more relevant lesson first", got)
+	}
+}
+
+// ...but among near-ties a positive track record wins.
+func TestIndex_ConfidenceBreaksNearTies(t *testing.T) {
+	store := newStore(t)
+	seedVec(t, store, "neutral", atCos(0.700), 0)
+	seedVec(t, store, "helpful-once", atCos(0.695), 1)
+	if got := ids(buildIndex(t, store).SearchVec(queryAxis, 2)); got[0] != "helpful-once" {
+		t.Fatalf("ranking = %v, want the rated lesson to win a near-tie", got)
+	}
+}
+
+// A lesson judged harmful drops below clearly less relevant neutral ones.
+func TestIndex_PenaltyDemotes(t *testing.T) {
+	store := newStore(t)
+	seedVec(t, store, "harmful", atCos(0.70), -3)
+	seedVec(t, store, "neutral", atCos(0.62), 0)
+	if got := ids(buildIndex(t, store).SearchVec(queryAxis, 2)); got[0] != "neutral" {
+		t.Fatalf("ranking = %v, want the harmful lesson demoted", got)
+	}
+}
+
+// Nearest answers "which lesson is closest?" by raw cosine, even when the
+// confidence-adjusted ranking would put a slightly less similar, well-rated lesson
+// first. Mining relies on this for its near-duplicate check.
+func TestIndex_NearestIgnoresConfidence(t *testing.T) {
+	store := newStore(t)
+	seedVec(t, store, "closest", atCos(0.95), 0)
+	seedVec(t, store, "well-rated", atCos(0.94), 8)
+	ix := buildIndex(t, store)
+	if top := ids(ix.SearchVec(queryAxis, 1)); top[0] != "well-rated" {
+		t.Fatalf("precondition: SearchVec top = %v, want the well-rated near-tie", top)
+	}
+	hit, ok := ix.Nearest(queryAxis)
+	if !ok || hit.Lesson.LessonID != "closest" || math.Abs(hit.Cosine-0.95) > 1e-6 {
+		t.Fatalf("Nearest = %+v (ok=%v), want lesson \"closest\" at cosine 0.95", hit, ok)
+	}
+	if _, ok := NewIndex(newStore(t), embed.Mock{}).Nearest(queryAxis); ok {
+		t.Error("Nearest on an empty index should report ok=false")
 	}
 }
 

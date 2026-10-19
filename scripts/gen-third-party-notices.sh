@@ -15,9 +15,9 @@
 
 # Regenerate THIRD_PARTY_NOTICES.txt: the attribution manifest for third-party
 # open-source components that are REDISTRIBUTED in amplio's release artifacts —
-# the cross-compiled Go binary (statically links its Go module deps) and the
-# embedded SvelteKit bundle (ships DOMPurify/marked/highlight.js/phosphor +
-# the Svelte runtime). The source repo itself bundles none of these (deps are
+# the cross-compiled Go binary (statically links its Go module deps, and embeds
+# an embedding table derived from MIT model weights) and the embedded SvelteKit
+# bundle (ships DOMPurify/marked/highlight.js/phosphor + the Svelte runtime). The source repo itself bundles none of these (deps are
 # fetched at build time), but the RELEASE TARBALLS do, which triggers the
 # MIT/Apache-2.0/BSD attribution clauses — this file satisfies them.
 #
@@ -113,6 +113,56 @@ for mod in "${!GO_LICENSE_OVERRIDE[@]}"; do
     } >> "$TMP"
   fi
 done
+
+# ── Model weights embedded in the binary ───────────────────────────────────
+# The built-in embedding table (internal/embed/local) is derived from MIT
+# weights at build time (make embed-table). The pinned revision is read from the
+# generator, which owns it.
+EMBED_REV="$(sed -n 's/^[[:space:]]*Revision:[[:space:]]*"\([0-9a-f]*\)",$/\1/p' "$ROOT/internal/embed/local/gentable/main.go")"
+if [ -z "$EMBED_REV" ]; then
+  echo "cannot find the pinned model revision in internal/embed/local/gentable/main.go" >&2
+  exit 1
+fi
+{
+  hr
+  echo "MODEL WEIGHTS (embedded in the amplio binary)"
+  hr
+  echo
+  echo "--- minishlab/potion-base-32M (MIT) ---"
+  echo
+  echo "The built-in embedding table is derived (PCA to 256 dimensions, int8"
+  echo "quantization) from the potion-base-32M static embedding model."
+  echo "Source: https://huggingface.co/minishlab/potion-base-32M (revision $EMBED_REV)"
+  echo "License: MIT, as declared by the model card. The model repository has no"
+  echo "LICENSE file; the text below is the MIT license of the MinishLab model2vec"
+  echo "project that publishes the model:"
+  echo "https://github.com/MinishLab/model2vec/blob/f6052f3b3ef4e0a60937a2fcc3d3aed95c80fa5a/LICENSE"
+  echo
+  cat <<'MIT'
+MIT License
+
+Copyright (c) 2024 Thomas van Dongen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+MIT
+  echo
+} >> "$TMP"
 
 # ── npm production dependencies bundled into the web UI ─────────────────────
 {

@@ -26,6 +26,7 @@
 		XIcon
 	} from 'phosphor-svelte';
 	import { fly } from 'svelte/transition';
+	import { page } from '$app/state';
 	import { runsStore } from '$lib/runsStore.svelte';
 	import { updates } from '$lib/updates.svelte';
 	import { auth } from '$lib/auth.svelte';
@@ -48,6 +49,9 @@
 	// reason to glance here); the nav entries move into a drawer.
 	const activeCount = $derived(runsStore.activeCount);
 	const unreadCount = $derived(updates.count);
+	// Inside a run on a phone the run shell shows its own compact bar (back,
+	// title, status), so this one would be 57px of duplicate chrome.
+	const inRun = $derived(page.url.pathname.startsWith('/runs/'));
 	let drawerOpen = $state(false);
 	// Phone-only; drop it on the way out so rotating back doesn't restore it.
 	$effect(() => {
@@ -64,7 +68,7 @@
 	});
 </script>
 
-<header class="bar">
+<header class="bar" class:hide-on-phone={inRun}>
 	<!-- Edge-to-edge background (the .bar) with the actual contents constrained
 	     to the same column as <main> below (the .inner). On wide displays the
 	     brand + status chips stay aligned with the content column instead of
@@ -291,6 +295,9 @@
 	}
 
 	@media (max-width: 640px) {
+		.bar.hide-on-phone {
+			display: none;
+		}
 		.inner {
 			/* Tighter gutter than the desktop clamp, and a smaller gap: the status
 			   chips need every pixel to stay on one line at 360px. */

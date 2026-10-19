@@ -489,3 +489,19 @@ func TestResolve_LessonSearchRejectsGarbageEnv(t *testing.T) {
 		t.Errorf("error should name the variable: %v", err)
 	}
 }
+
+// "local" and "none" are ordinary values at every layer; only an unset key
+// takes the build's default.
+func TestResolve_EmbedModelValues(t *testing.T) {
+	for _, v := range []string{EmbedModelLocal, EmbedModelNone, "gemini:gemini-embedding-001"} {
+		clearLayerEnv(t)
+		t.Setenv(EnvEmbedModel, v)
+		cfg, err := Resolve(t.TempDir(), Overrides{SystemLLMHQ: "x:hq", SystemLLMFast: "x:fast"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.EmbedModelOrDefault(); got != v {
+			t.Errorf("$%s=%q resolved to %q", EnvEmbedModel, v, got)
+		}
+	}
+}

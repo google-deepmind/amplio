@@ -288,19 +288,22 @@ llms = [
 
 ## Embedding providers
 
-Recall (skill + lesson similarity search) needs a text embedder, configured
+Recall (skill + lesson similarity search) uses a text embedder, configured
 separately via `embed_model` (or `--embed-model` / `$AMPLIO_EMBED_MODEL`). 
-The spec mirrors the LLM convention: `<backend>:<model>`.
+The spec mirrors the LLM convention: `<backend>:<model>`. Two bare values are
+reserved: `local`, the built-in embedder (below), and `none`, which turns
+recall off.
 
-`createEmbedder` (cmd/amplio) splits on the first `:` to pick the backend. A
-bare model name with no `:` defaults to the `vertex` backend (back-compat with
-older `embed_model` values).
+`createEmbedder` (cmd/amplio) splits on the first `:` to pick the backend. Any
+other bare model name with no `:` defaults to the `vertex` backend (back-compat
+with older `embed_model` values).
 
 | Backend  | Family / backend                            | Auth                                           |
 | -------- | ------------------------------------------- | ---------------------------------------------- |
 | `vertex` | Vertex AI embeddings (`google.golang.org/genai`) | ADC + `VERTEXAI_PROJECT`/`VERTEXAI_LOCATION` |
 | `gemini` | Gemini Developer API embeddings (`genai`)   | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`); no GCP |
 | `openai` | **any** OpenAI-compatible `/v1/embeddings`  | `OPENAI_API_KEY` (or `{api_key_env=…}`); none for a local server |
+| `local`  | built into the binary (no `:<model>` part)   | none |
 
 The `openai` backend takes the same `base_url` / `api_key_env` args as the chat
 provider, which is what lets a **self-hosted** deployment use recall at all:
@@ -319,8 +322,25 @@ Vertex-only, while `gemini-embedding-001` is available on both. Anthropic has no
 embedding models, so there is no `claude` embedder backend.
 
 The resolved `<backend>_<model>` is the **cache key** for stored vectors
-(skills + lessons). If `embed_model` is unset, recall is disabled (no embedder is built).
+(skills + lessons). If `embed_model` is unset, recall uses `local`; if an API
+embedder cannot be created, recall falls back to `local` with a warning
+([configuration](configuration.md#recall-skills-and-lessons)).
 
 ```toml
-embed_model = "vertex:text-embedding-005"   # or: gemini:gemini-embedding-001
+embed_model = "vertex:text-embedding-005"   # or: gemini:gemini-embedding-001, local, none
 ```
+
+### The local embedder
+
+`local` is a static embedding model compiled into the binary: the MIT-licensed
+[potion-base-32M](https://huggingface.co/minishlab/potion-base-32M), reduced to
+256 dimensions and stored as int8. A text's vector is the average of its word
+pieces' rows, so embedding takes microseconds and needs no network. Its scores
+are combined with a keyword (BM25) score, which catches literal matches the
+embedding misses.
+
+The table adds about 17 MB to the binary. `make build` downloads the pinned
+model once (cached under `${XDG_CACHE_HOME:-~/.cache}/amplio/localembed`),
+verifies its checksum and derives the table; a failure stops the build and names
+the opt-out, `make build LOCAL_EMBED=0`. Without the table, `local` ranks by
+BM25 alone.

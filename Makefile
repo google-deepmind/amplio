@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build dev test test-race test-integration lint fmt vuln cover frontend-build notices clean
+.PHONY: build embed-table dev test test-race test-integration lint fmt vuln cover frontend-build notices clean
 
 # Build tags applied to every go invocation. The internal tag switches in
 # environment-specific implementations (workspace backend, credential probe,
@@ -28,9 +28,26 @@ TAGS ?=
 # `internal` half.
 INTEGRATION_TAGS ?= -tags=integration
 
-# Build the amplio binary with embedded frontend.
-build: frontend-build
+# The built-in embedding table for local recall (internal/embed/local) is
+# derived from a pinned upstream model at build time and never committed.
+# LOCAL_EMBED=0 builds without it: recall then ranks by BM25 only.
+LOCAL_EMBED ?= 1
+EMBED_TABLE := internal/embed/local/data/table.bin
+
+# Build the amplio binary with embedded frontend and embedding table.
+build: frontend-build embed-table
 	go build $(TAGS) -o amplio ./cmd/amplio
+
+# Install the embedding table (download + verify + derive, all cached; a no-op
+# when the installed table is current). Fails loudly on any download, checksum
+# or derivation error rather than silently building without it.
+embed-table:
+ifeq ($(LOCAL_EMBED),0)
+	@rm -f $(EMBED_TABLE)
+	@echo "LOCAL_EMBED=0: building without the embedding table; recall will rank by BM25 only."
+else
+	go run ./internal/embed/local/gentable -out $(dir $(EMBED_TABLE))
+endif
 
 # Dev workflow instructions (run in separate terminals).
 dev:
@@ -86,5 +103,5 @@ notices:
 
 # Remove build artifacts.
 clean:
-	rm -f amplio coverage.out coverage.html
+	rm -f amplio coverage.out coverage.html $(EMBED_TABLE)
 	rm -rf frontend/build internal/server/webdist/client

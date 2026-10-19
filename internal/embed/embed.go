@@ -38,6 +38,33 @@ type Embedder interface {
 	ModelID() string
 }
 
+// Hybrid is an optional Embedder capability, implemented by the built-in local
+// embedder (internal/embed/local). Its cosine scores are weaker on their own,
+// so indexes rank by textrank.Fuse(cosine, BM25, HybridAlpha()) instead of
+// cosine alone. It is also in-process and cheap, so an index may re-embed its
+// whole corpus rather than depend on stored vectors. API embedders do not
+// implement it and are ranked by cosine only.
+type Hybrid interface {
+	Embedder
+	// HybridAlpha is the cosine weight in [0, 1]; BM25 gets the rest.
+	HybridAlpha() float64
+}
+
+// FusionWeight reports how an index should rank with e. fused=false means by
+// cosine alone (an API embedder). Otherwise rank by textrank.Fuse with cosine
+// weight alpha: the embedder's HybridAlpha, or 0 — BM25 only — when there is
+// no embedder at all (e == nil: the local backend in a binary built without
+// its table).
+func FusionWeight(e Embedder) (alpha float64, fused bool) {
+	if e == nil {
+		return 0, true
+	}
+	if h, ok := e.(Hybrid); ok {
+		return h.HybridAlpha(), true
+	}
+	return 1, false
+}
+
 const (
 	// Vertex text-embedding requests are capped by BOTH the instance count
 	// (hard limit 250) and the total input tokens (~20000). We batch under both,

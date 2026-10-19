@@ -82,8 +82,9 @@ recall search.
   critic extracts reusable lessons from what happened and files them in the
   database, where later runs can find them.
 
-Both need `embed_model` to be set; without it recall is disabled and amplio says
-so at startup.
+Both are ranked by the embedder `embed_model` names, by default the built-in
+local one; `embed_model = "none"` turns recall off, and amplio says which it is
+using at startup ([configuration](configuration.md#recall-skills-and-lessons)).
 
 To get the agent started, each session also begins with a short list of the
 skills and lessons most relevant to its task, plus any skills you **pinned** to

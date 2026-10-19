@@ -80,6 +80,8 @@ func schemaOf(v any) string {
 // persists new (complementary) or replacement (supersedes) lessons. Returns the
 // number of newly inserted lessons. Best-effort: per-candidate failures are
 // logged and skipped. Requires a built lesson index (for dedup + the embedder).
+// An index without an embedder (BM25-only recall) gets every candidate inserted
+// unembedded, with no near-duplicate check.
 func MineLessons(ctx context.Context, deps Deps, runID string, report *RunReport) (int, error) {
 	if deps.LessonIndex == nil || !deps.LessonIndex.IsBuilt() {
 		return 0, nil // no corpus to dedup against / store into
@@ -93,20 +95,32 @@ func MineLessons(ctx context.Context, deps Deps, runID string, report *RunReport
 	}
 
 	embedder := deps.LessonIndex.Embedder()
-	descs := make([]string, len(candidates))
-	for i, c := range candidates {
-		descs[i] = c.Description
-	}
-	vecs, err := embedder.Embed(ctx, descs)
-	if err != nil {
-		return 0, fmt.Errorf("embed candidates: %w", err)
+	vecs := make([][]float32, len(candidates)) // stays all-nil without an embedder
+	embedderID := ""
+	if embedder == nil {
+		slog.Info("mine: no embedder (BM25-only recall); inserting candidates unembedded, without a near-duplicate check",
+			"run_id", runID, "candidates", len(candidates))
+	} else {
+		descs := make([]string, len(candidates))
+		for i, c := range candidates {
+			descs[i] = c.Description
+		}
+		var err error
+		if vecs, err = embedder.Embed(ctx, descs); err != nil {
+			return 0, fmt.Errorf("embed candidates: %w", err)
+		}
+		embedderID = embedder.ModelID()
 	}
 
 	inserted, changed := 0, false
 	for i, c := range candidates {
 		verdict, existing := "complementary", (*db.LessonRecord)(nil)
-		if hits := deps.LessonIndex.SearchVec(vecs[i], 1); len(hits) > 0 && hits[0].Cosine >= dedupSimilarityThreshold {
-			existing = &hits[0].Lesson
+		// Nearest by raw cosine, not the top of the confidence-adjusted ranking:
+		// the question is "is there an existing lesson this close?", and a
+		// well-rated but less similar lesson must not shadow a true duplicate.
+		// (A nil vector finds nothing: no embedder, no dedup.)
+		if hit, ok := deps.LessonIndex.Nearest(vecs[i]); ok && hit.Cosine >= dedupSimilarityThreshold {
+			existing = &hit.Lesson
 			verdict = decideDedup(ctx, deps.HQ, c, *existing)
 		}
 		switch verdict {
@@ -115,7 +129,7 @@ func MineLessons(ctx context.Context, deps Deps, runID string, report *RunReport
 		case "supersedes":
 			if err := deps.Store.UpdateLesson(ctx, db.LessonRecord{
 				LessonID: existing.LessonID, Title: c.Title, Description: c.Description, Body: c.Body,
-				Embedding: vecs[i], EmbedderID: embedder.ModelID(),
+				Embedding: vecs[i], EmbedderID: embedderID,
 			}); err != nil {
 				slog.Warn("mine: update lesson failed", "lesson_id", existing.LessonID, "error", err)
 				continue
@@ -124,7 +138,7 @@ func MineLessons(ctx context.Context, deps Deps, runID string, report *RunReport
 		default: // complementary (and any unexpected verdict)
 			if err := deps.Store.InsertLesson(ctx, db.LessonRecord{
 				LessonID: db.NewLessonID(), Title: c.Title, Description: c.Description, Body: c.Body,
-				Embedding: vecs[i], EmbedderID: embedder.ModelID(), SourceRunID: runID,
+				Embedding: vecs[i], EmbedderID: embedderID, SourceRunID: runID,
 			}); err != nil {
 				slog.Warn("mine: insert lesson failed", "error", err)
 				continue

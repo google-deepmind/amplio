@@ -53,6 +53,12 @@ const maxConcludeNudges = 2
 // why and retry.
 var errEmptyResult = errors.New("agent produced no result")
 
+// emptyResultError is the failure recorded when the conclude nudges run out,
+// shared by the live loop and the recovery path so both report it identically.
+func emptyResultError(stopReason string) error {
+	return fmt.Errorf("%w after %d nudges (last stop_reason=%q)", errEmptyResult, maxConcludeNudges, stopReason)
+}
+
 // maxOutputLimitNudges bounds retries after the provider explicitly reports
 // that generation was cut off by the output-token limit. Unlike an empty turn,
 // an output-limited turn is never accepted as successful completion.
@@ -367,7 +373,15 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 		// instead and re-enter the loop: that also makes the tail a user event,
 		// which is what the provider requires before the next assistant turn
 		// (the reason this branch avoids re-calling the LLM in the first place).
-		if isDegenerateTurn(tail.Content) && a.concludeNudges < maxConcludeNudges {
+		// Once the nudges are spent, fail exactly as the live loop does: an empty
+		// tail must never fall through to the conclude below, or the parent gets
+		// an empty "successful" result. (Unreachable while the counter is only
+		// in memory — a respawned agent starts at 0 — but it keeps the invariant
+		// independent of that detail.)
+		if isDegenerateTurn(tail.Content) {
+			if a.concludeNudges >= maxConcludeNudges {
+				return false, false, emptyResultError(tail.StopReason)
+			}
 			a.concludeNudges++
 			a.logger.Debug("resume: at-rest turn is empty; nudging instead of concluding", "nudge", a.concludeNudges)
 			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
@@ -917,8 +931,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 			// provider-safe and the nudge that follows reads coherently.
 			if isDegenerateTurn(resp.Content) {
 				if a.concludeNudges >= maxConcludeNudges {
-					return a.recordFailure(ctx, fmt.Errorf("%w after %d nudges (last stop_reason=%q)",
-						errEmptyResult, maxConcludeNudges, resp.StopReason))
+					return a.recordFailure(ctx, emptyResultError(resp.StopReason))
 				}
 				a.concludeNudges++
 				a.logger.Debug("empty no-tool turn; nudging instead of concluding", "nudge", a.concludeNudges)

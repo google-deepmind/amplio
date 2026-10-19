@@ -55,6 +55,8 @@
 /* Phone. In sync with PHONE_MAX in $lib/viewport.svelte.ts. */
 @media (max-width: 640px) {
 	:root {
+		/* Reserved for the dashboard's bottom tabs. Run views have no bottom
+		   chrome any more (their nav is a drawer), and override this to 0. */
 		--bottom-nav-h: calc(3.5rem + 1px + env(safe-area-inset-bottom, 0px));
 	}
 

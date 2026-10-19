@@ -23,6 +23,7 @@ import (
 
 	"amplio/internal/config"
 	"amplio/internal/embed"
+	"amplio/internal/embed/local"
 	"amplio/internal/llm"
 	anthropicprovider "amplio/internal/llm/anthropic"
 	bridgeprovider "amplio/internal/llm/bridge"
@@ -143,14 +144,25 @@ func knownEndpoints() string {
 // /v1/embeddings endpoint — the hosted API, or ?base_url= for a local server,
 // which is what lets a self-hosted deployment use recall at all). A bare model
 // name (no ":") defaults to the vertex backend for back-compat with older
-// embed_model config values. Note model availability is backend-specific (e.g.
-// text-embedding-005 is Vertex-only; gemini-embedding-001 works on both).
+// embed_model config values, except the reserved "local" (the built-in
+// embedder; local.ErrNoTable when this binary lacks its table) and "none".
+// Note model availability is backend-specific (e.g. text-embedding-005 is
+// Vertex-only; gemini-embedding-001 works on both).
 func createEmbedder(ctx context.Context, spec string) (embed.Embedder, error) {
 	// A bare model name (no backend) predates the spec grammar and still means
 	// vertex, so it is resolved before parsing.
 	if base := llm.BaseSpec(spec); !strings.Contains(base, ":") {
-		if base == "" {
+		switch base {
+		case "":
 			return nil, fmt.Errorf("invalid embed model spec %q; want <backend>:<model>", spec)
+		case config.EmbedModelLocal:
+			e, err := local.New()
+			if err != nil {
+				return nil, err // not a typed nil inside the interface
+			}
+			return e, nil
+		case config.EmbedModelNone:
+			return nil, fmt.Errorf("embed model %q disables recall; there is no embedder", spec)
 		}
 		return embed.NewVertex(ctx, base)
 	}

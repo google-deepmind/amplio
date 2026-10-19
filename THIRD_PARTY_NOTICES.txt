@@ -5556,6 +5556,42 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 License: BSD-3-Clause (see the module's upstream repository).
 
 ================================================================================
+MODEL WEIGHTS (embedded in the amplio binary)
+================================================================================
+
+--- minishlab/potion-base-32M (MIT) ---
+
+The built-in embedding table is derived (PCA to 256 dimensions, int8
+quantization) from the potion-base-32M static embedding model.
+Source: https://huggingface.co/minishlab/potion-base-32M (revision 1e5a03f8eeb2c98b928fbbd846f22f816360919f)
+License: MIT, as declared by the model card. The model repository has no
+LICENSE file; the text below is the MIT license of the MinishLab model2vec
+project that publishes the model:
+https://github.com/MinishLab/model2vec/blob/f6052f3b3ef4e0a60937a2fcc3d3aed95c80fa5a/LICENSE
+
+MIT License
+
+Copyright (c) 2024 Thomas van Dongen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
 NPM PACKAGES (bundled into the amplio web UI)
 ================================================================================
 
@@ -6186,7 +6222,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
---- devalue@5.9.2 (MIT) ---
+--- devalue@5.9.4 (MIT) ---
 
 Copyright (c) 2018-19 [these people](https://github.com/rich-harris/devalue/graphs/contributors)
 
@@ -6196,7 +6232,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
---- dompurify@3.4.13 ((MPL-2.0 OR Apache-2.0)) ---
+--- dompurify@3.4.16 ((MPL-2.0 OR Apache-2.0)) ---
 
 Apache License
                            Version 2.0, January 2004

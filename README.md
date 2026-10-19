@@ -18,6 +18,10 @@ Amplio is a single binary with an embedded frontend. To build it yourself you ne
 make build
 ```
 
+The first build also downloads a 130 MB embedding model (cached) to build the
+local recall table; `make build LOCAL_EMBED=0` skips it, and recall then ranks by
+keyword match alone.
+
 ## Quick start
 
 Amplio needs two things: a **data directory** (a local SQLite database and
@@ -30,7 +34,8 @@ Write `~/.amplio/config.toml`:
 system_llm_hq   = "vertex-gemini:gemini-3.1-pro-preview"
 system_llm_fast = "vertex-gemini:gemini-3.6-flash"
 
-# Enables skill + lesson search. Recommended.
+# Optional: an API embedding model for skill + lesson search. Without it,
+# amplio uses its built-in local embedder.
 embed_model     = "vertex:text-embedding-005"
 
 [run]  # The model menu in the new-run form.

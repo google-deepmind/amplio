@@ -1899,6 +1899,12 @@ func (s *sqliteStore) PutSkillVectors(ctx context.Context, model string, vectors
 	keep := make(map[string]struct{}, len(vectors))
 	for _, v := range vectors {
 		keep[v.Name] = struct{}{}
+		// An entry cached without a vector (lexical recall: no embedder) is stored
+		// as an empty blob: the column is NOT NULL, and decodes back to nil.
+		blob := encodeEmbedding(v.Vector)
+		if blob == nil {
+			blob = []byte{}
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO SkillEmbedding (model, name, content_hash, vector, description, path, body)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1908,7 +1914,7 @@ func (s *sqliteStore) PutSkillVectors(ctx context.Context, model string, vectors
 			   description=excluded.description,
 			   path=excluded.path,
 			   body=excluded.body`,
-			model, v.Name, v.ContentHash, encodeEmbedding(v.Vector),
+			model, v.Name, v.ContentHash, blob,
 			v.Description, v.Path, v.Body); err != nil {
 			return fmt.Errorf("upsert skill vector %q: %w", v.Name, err)
 		}

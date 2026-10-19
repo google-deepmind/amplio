@@ -36,7 +36,7 @@ type Config struct {
 	Token         string      `toml:"token"`           // web auth token; random per `serve` when empty
 	SystemLLMHQ   string      `toml:"system_llm_hq"`   // observer phase summaries / reports (server-level)
 	SystemLLMFast string      `toml:"system_llm_fast"` // observer step summaries (server-level)
-	EmbedModel    string      `toml:"embed_model"`     // Vertex embedding model (skills + lessons recall)
+	EmbedModel    string      `toml:"embed_model"`     // recall embedder: "<backend>:<model>", "local" or "none"
 	Run           RunDefaults `toml:"run"`             // defaults applied to new runs
 	// Bridge names LLM bridge endpoints, so a spec can say WHICH link
 	// (bridge{endpoint=corp}:model) instead of repeating where it is and which
@@ -148,9 +148,18 @@ type LessonsConfig struct {
 // your own directory of SKILL.md files.
 var DefaultSkillsDir = ""
 
+// EmbedModelLocal and EmbedModelNone are the embed_model values that name no
+// API model: the built-in local embedder (BM25 only in a binary built without
+// its table), and recall switched off.
+const (
+	EmbedModelLocal = "local"
+	EmbedModelNone  = "none"
+)
+
 // DefaultEmbedModel is the embedding model used for recall when embed_model is
-// unset. Default empty in OSS (recall is then disabled — no embedder is built).
-var DefaultEmbedModel = ""
+// unset: the built-in local embedder in OSS, so recall works with no API; a 1P
+// init in load_internal.go overrides it.
+var DefaultEmbedModel = EmbedModelLocal
 
 // DefaultListen is the serve bind address when [listen] is unset. localhost in
 // OSS (safe default — not exposed to the network).
@@ -189,8 +198,7 @@ func (c Config) LessonSearchEnabled() bool {
 }
 
 // EmbedModelOrDefault returns the configured embedding model, or the built-in
-// default when unset. The result may be "" (OSS default) — callers treat an
-// empty model as "no embedder configured" and skip recall.
+// default when unset. Callers treat "" like EmbedModelNone (no recall).
 func (c Config) EmbedModelOrDefault() string {
 	if c.EmbedModel != "" {
 		return c.EmbedModel

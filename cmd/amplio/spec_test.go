@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"amplio/internal/config"
+	"amplio/internal/embed/local"
 	"amplio/internal/llm"
 )
 
@@ -156,6 +158,18 @@ func TestCreateEmbedder_SpecShapes(t *testing.T) {
 	if _, err := createEmbedder(context.Background(), "nope:model"); err == nil ||
 		!strings.Contains(err.Error(), "unknown embed backend") {
 		t.Errorf("unknown backend error = %v, want 'unknown embed backend'", err)
+	}
+
+	// The reserved bare names are not vertex model names.
+	if _, err := createEmbedder(context.Background(), "none"); err == nil || !strings.Contains(err.Error(), "disables recall") {
+		t.Errorf(`createEmbedder("none") error = %v, want "disables recall"`, err)
+	}
+	e, err = createEmbedder(context.Background(), "local")
+	switch {
+	case local.Available() && (err != nil || !strings.HasPrefix(e.ModelID(), "local_potion-base-32M-pca256-")):
+		t.Errorf(`createEmbedder("local") = %v, %v; want the built-in embedder`, e, err)
+	case !local.Available() && (e != nil || !errors.Is(err, local.ErrNoTable)):
+		t.Errorf(`createEmbedder("local") without a table = %v, %v; want local.ErrNoTable`, e, err)
 	}
 }
 

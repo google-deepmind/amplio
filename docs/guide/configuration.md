@@ -14,18 +14,18 @@ that is set:
 
 ## config.toml
 
-A minimal file needs only the two system models, but it is recommended to
-specify the `embed_model` as well.
+A minimal file needs only the two system models:
 
 ```toml
 system_llm_hq   = "vertex-claude:claude-opus-4-8"
 system_llm_fast = "vertex-claude:claude-sonnet-4-6"
-embed_model     = "vertex:text-embedding-005"
+embed_model     = "vertex:text-embedding-005"   # optional
 ```
 
 The system LLMs are used for system bookkeeping, such as auto-critic and
-compaction. The embed model is used for skill / lesson indexing, if
-not set, that sub-system will be disabled. Other useful configs:
+compaction. The embed model is used for skill / lesson search; if not set,
+amplio uses its built-in local embedder (see [recall](#recall-skills-and-lessons)
+below). Other useful configs:
 
 | key | default | what it does |
 |---|---|---|
@@ -94,24 +94,46 @@ how you switch skills off; omitting the key entirely means "use the default".
 
 Recall is the agent's search over two corpora: **skills** (documents you supply,
 loaded on demand) and **lessons** (mined automatically from past runs). Both are
-embedded, so both need `embed_model`:
+ranked by similarity to the query, using the embedder named by `embed_model`:
 
 ```toml
-embed_model = "vertex:text-embedding-005"
+embed_model = "vertex:text-embedding-005"   # an API model; see models.md
 
 [skills]
 dirs    = ["~/skills", "/team/shared/skills"]   # layered; last wins on a name clash
 blocked = ["noisy-skill"]
 ```
 
-Leave `embed_model` empty and amplio starts fine, reporting recall as disabled:
+`embed_model` takes three kinds of value:
 
-    Recall subsystem (agent skill + knowledge search):
-      ✗ skills    disabled — no embed model configured
-      ✗ knowledge disabled — no embed model configured
+| value | recall uses |
+|---|---|
+| `<backend>:<model>` | an embedding API ([models](models.md#embedding-providers)) |
+| `local` | the built-in embedder: no API, no credentials, no network |
+| `none` | nothing: recall is off |
+
+Left unset, it defaults to `local`. If the configured API embedder cannot be
+created, for example because its credentials are missing, amplio falls back to
+`local` and says so at startup rather than switching recall off:
+
+    Recall subsystem (embed model vertex:text-embedding-005):
+      ! embed model vertex:text-embedding-005 unavailable (VERTEXAI_PROJECT not set); using the built-in local embedder instead
+      ✓ skills    available (local: potion-base-32M, 873 skills)
+      ✓ knowledge available (local: potion-base-32M)
+
+The local embedder ranks well enough to find the right skill most of the time,
+but an API model is better at paraphrased queries; [models](models.md#the-local-embedder)
+has the comparison. Its embedding table is built into the binary by `make build`.
+A binary built with `make build LOCAL_EMBED=0`, or with plain `go build` in a
+checkout where `make embed-table` has never run, has no table, and `local` then
+ranks by keyword match (BM25) alone:
+
+      ✓ skills    available (local, BM25 only: binary built without the embedding table, 873 skills)
 
 Skills are re-scanned at startup, and their embeddings are cached in the
-database, so only new or changed files cost an embedding call.
+database, so only new or changed files cost an embedding call. With `local`,
+lessons are embedded in memory at startup, so lessons mined under an API model
+stay searchable after switching.
 
 ### What an agent sees at session start
 

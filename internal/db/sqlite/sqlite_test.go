@@ -1300,6 +1300,25 @@ func TestPutSkillVectors_EmptySet(t *testing.T) {
 	}
 }
 
+// TestPutSkillVectors_NoVector round-trips an entry cached without a vector
+// (lexical recall has no embedder) despite the NOT NULL vector column.
+func TestPutSkillVectors_NoVector(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.PutSkillVectors(ctx, "lexical", []db.SkillVector{
+		{Name: "alpha", ContentHash: "h1", Description: "d", Path: "/p", Body: "b"},
+	}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := s.GetSkillVectors(ctx, "lexical")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got) != 1 || got[0].Vector != nil || got[0].Description != "d" || got[0].Body != "b" {
+		t.Errorf("got %+v, want alpha with its fields and no vector", got)
+	}
+}
+
 // --- time / helper round-trips (N5) ---
 
 func TestB2I(t *testing.T) {

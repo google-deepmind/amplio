@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 	"amplio/internal/config"
 	"amplio/internal/db"
 	"amplio/internal/embed"
+	"amplio/internal/embed/local"
 	"amplio/internal/lessons"
 	"amplio/internal/runtime"
 	"amplio/internal/skills"
@@ -53,6 +55,7 @@ func recallDisabled(reason string) recallSubsystem {
 // knowledge are live.
 type recallStatus struct {
 	embedModel string
+	warning    string // e.g. the configured embedder failed and recall fell back
 	skills     recallSubsystem
 	knowledge  recallSubsystem
 }
@@ -94,6 +97,9 @@ func printRecallStatus(w io.Writer, st recallStatus) {
 		header = fmt.Sprintf("Recall subsystem (embed model %s):", st.embedModel)
 	}
 	fmt.Fprintln(w, header)
+	if st.warning != "" {
+		fmt.Fprintf(w, "  %s %s\n", paint("!", yellow), paint(st.warning, yellow))
+	}
 	line("skills", st.skills)
 	line("knowledge", st.knowledge)
 }
@@ -142,9 +148,62 @@ func skillCounts(ix *skills.Index, total int) string {
 	return fmt.Sprintf("%d skills, %d pinned", total, n)
 }
 
+// recallEmbedder is the embedder recall runs on, and how to report it.
+type recallEmbedder struct {
+	embedder embed.Embedder // nil: BM25 only
+	local    bool           // the built-in embedder (or its BM25-only fallback), not an API
+	mode     string         // status prefix for the local modes, "" for an API embedder
+	warning  string         // the configured embedder failed; recall fell back to local
+}
+
+// detail prefixes a status detail with the recall mode, if any.
+func (r recallEmbedder) detail(d string) string {
+	switch {
+	case r.mode == "":
+		return d
+	case d == "":
+		return r.mode
+	}
+	return r.mode + ", " + d
+}
+
+// resolveRecallEmbedder builds the embedder for spec. "local" is the built-in
+// embedder, degrading to BM25 only in a binary built without its table. When an
+// API embedder cannot be created (no credentials, bad spec), recall falls back
+// to local with a loud warning rather than switching off.
+func resolveRecallEmbedder(ctx context.Context, spec string) recallEmbedder {
+	if spec != config.EmbedModelLocal {
+		e, err := createEmbedder(ctx, spec)
+		if err == nil {
+			return recallEmbedder{embedder: e}
+		}
+		slog.Warn("embedder unavailable; recall falls back to the built-in local embedder",
+			"embed_model", spec, "error", err)
+		r := localRecallEmbedder()
+		r.warning = fmt.Sprintf("embed model %s unavailable (%v); using the built-in local embedder instead", spec, err)
+		return r
+	}
+	return localRecallEmbedder()
+}
+
+func localRecallEmbedder() recallEmbedder {
+	e, err := local.New()
+	switch {
+	case err == nil:
+		return recallEmbedder{embedder: e, local: true, mode: "local: " + e.Name()}
+	case errors.Is(err, local.ErrNoTable):
+		return recallEmbedder{local: true, mode: "local, BM25 only: " + err.Error()}
+	default: // a corrupt compiled-in table: a broken build, but recall can still run
+		slog.Error("built-in embedding table unusable; recall ranks by BM25 only", "error", err)
+		return recallEmbedder{local: true, mode: "local, BM25 only: embedding table unusable"}
+	}
+}
+
 // setupRecall builds the skill and lesson recall indexes from config, installs
-// them on the manager, and returns them (nil when unavailable). Lessons build
-// SYNCHRONOUSLY (DB-only — fast: ~ms).
+// them on the manager, and returns them (nil when unavailable) plus the API
+// embedder to lend (nil for the local backend: a borrower would cache its
+// vectors under the lender's model name). Lessons build SYNCHRONOUSLY (DB-only,
+// or in-memory local embedding — fast: ~ms).
 //
 // Skills use a two-stage build to keep startup snappy without sacrificing
 // recall availability:
@@ -163,27 +222,29 @@ func skillCounts(ix *skills.Index, total int) string {
 // empty results for the entire scan duration, which is a much worse UX than
 // the one-time wait. Subsequent restarts hit the warm cache and are instant.
 //
-// Degrades to no recall (logged) when the embedder is unavailable (e.g. no
-// Vertex creds).
+// Recall is off only when embed_model is "none". An API embedder that cannot
+// be created (e.g. no Vertex creds) falls back to the built-in local one.
 func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, cfg config.Config) (*skills.Index, *lessons.Index, embed.Embedder) {
 	var st recallStatus
 	defer func() { printRecallStatus(os.Stderr, st) }()
 
 	embedModel := cfg.EmbedModelOrDefault()
-	if embedModel == "" {
-		// No embedder configured: recall needs embeddings, so it's disabled.
-		// Set --embed-model / $AMPLIO_EMBED_MODEL / embed_model.
-		st.skills = recallDisabled("no embed model configured")
-		st.knowledge = recallDisabled("no embed model configured")
-		return nil, nil, nil
-	}
 	st.embedModel = embedModel
-	embedder, err := createEmbedder(ctx, embedModel)
-	if err != nil {
-		reason := fmt.Sprintf("embedder unavailable: %s", err)
+	if embedModel == "" || embedModel == config.EmbedModelNone {
+		reason := `turned off (embed_model = "none")`
+		if embedModel == "" {
+			reason = "no embed model configured"
+		}
 		st.skills = recallDisabled(reason)
 		st.knowledge = recallDisabled(reason)
 		return nil, nil, nil
+	}
+	re := resolveRecallEmbedder(ctx, embedModel)
+	st.warning = re.warning
+	embedder := re.embedder
+	lend := embedder
+	if re.local {
+		lend = nil
 	}
 
 	// Lessons ("knowledge"): synchronous; reads from the DB, populated by
@@ -203,7 +264,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 	case !cfg.LessonSearchEnabled():
 		st.knowledge = recallDisabled("search off (--lesson-search=false); mining + scoring still run")
 	default:
-		st.knowledge = recallEnabled("")
+		st.knowledge = recallEnabled(re.detail(""))
 	}
 	mgr.SetLessonIndex(lessonIx)
 
@@ -212,7 +273,7 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 	var skillIx *skills.Index
 	if len(dirs) == 0 {
 		st.skills = recallDisabled("no skill dirs configured")
-		return skillIx, lessonIx, embedder
+		return skillIx, lessonIx, lend
 	}
 	sources, unknownPinned := skillSources(dirs, cfg.Skills)
 	if len(unknownPinned) > 0 {
@@ -234,16 +295,16 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		if err := skillIx.Build(ctx); err != nil {
 			st.skills = recallDisabled(fmt.Sprintf("index build failed: %s", err))
 		} else {
-			st.skills = recallEnabled(skillCounts(skillIx, skillIx.Size()))
+			st.skills = recallEnabled(re.detail(skillCounts(skillIx, skillIx.Size())))
 		}
-		return skillIx, lessonIx, embedder
+		return skillIx, lessonIx, lend
 	}
 
 	// Stage 2: background reconcile against the on-disk corpus. During this
 	// window the index serves cached results (possibly slightly stale for
 	// skills whose SKILL.md changed since the last run); the atomic swap at
 	// Build's end refreshes everything.
-	st.skills = recallEnabled(skillCounts(skillIx, hydrated) + ", reconciling in background")
+	st.skills = recallEnabled(re.detail(skillCounts(skillIx, hydrated) + ", reconciling in background"))
 	go func() {
 		start := time.Now()
 		if err := skillIx.Build(ctx); err != nil {
@@ -252,5 +313,5 @@ func setupRecall(ctx context.Context, mgr *runtime.RunManager, store db.Store, c
 		}
 		slog.Info("skill index reconciled", "elapsed", time.Since(start).Round(time.Second))
 	}()
-	return skillIx, lessonIx, embedder
+	return skillIx, lessonIx, lend
 }
