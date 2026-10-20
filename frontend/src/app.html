@@ -2,7 +2,7 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
 		<meta name="text-scale" content="scale" />
 		<link rel="icon" type="image/svg+xml" href="%sveltekit.assets%/favicon.svg" />
 		<!-- Static fallback for the brief pre-hydration window; per-page
@@ -10,15 +10,7 @@
 		<title>Amplio</title>
 		%sveltekit.head%
 	</head>
-	<!-- "tap", not the default "hover": a touch screen never fires hover, so on a
-	     phone the default is simply "no preloading" and every route pays the full
-	     chunk fetch after the tap lands. "tap" fires on touchstart/mousedown, so
-	     the phone gets a head start it had none of before. Desktop trades a
-	     hover-length lead (usually a few hundred ms) for a mousedown-length one,
-	     which for a same-origin route chunk served by the local Go binary is
-	     still ahead of the click — and is behavior, not layout, so the promise
-	     that nothing above 640px CHANGES appearance holds. -->
-	<body data-sveltekit-preload-data="tap">
+	<body data-sveltekit-preload-data="hover">
 		<div style="display: contents">%sveltekit.body%</div>
 	</body>
 </html>

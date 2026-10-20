@@ -260,4 +260,10 @@
 		border-radius: var(--radius-sm);
 		display: block;
 	}
+
+	@media (max-width: 640px) {
+		.att-img img {
+			max-width: 100%;
+		}
+	}
 </style>

@@ -18,6 +18,7 @@
 	import type { RunStore } from '$lib/runContext.svelte';
 	import type { RunSummary } from '$lib/types';
 	import RunCard from './RunCard.svelte';
+	import { viewport } from '$lib/viewport.svelte';
 
 	// Run-page header: renders the unified <RunCard> in non-linkable mode
 	// (the page IS this run; clicking the title would go nowhere). The card
@@ -29,13 +30,10 @@
 	const detail = $derived(store.detail);
 	const sessions = $derived(detail?.sessions ?? []);
 
-	// Pick the primary root the same way the server does for runSummary: first
-	// non-chatbot if any (autonomous wins for status), else the first root.
-	const primaryRoot = $derived.by(() => {
-		const roots = sessions.filter((s) => !s.parent_id);
-		const auto = roots.find((s) => s.agent_type !== 'chatbot');
-		return auto ?? roots[0] ?? null;
-	});
+	// The server's pick (detail.root_session_id), same as the run bar's status.
+	const primaryRoot = $derived(
+		sessions.find((s) => s.session_id === detail?.root_session_id) ?? null
+	);
 
 	const summary = $derived.by((): RunSummary | null => {
 		if (!detail) return null;
@@ -72,5 +70,6 @@
 </script>
 
 {#if summary}
-	<RunCard run={summary} onmutated={() => store.refresh()} />
+	<!-- On a phone the run layout puts this header inside RunTopBar. -->
+	<RunCard run={summary} inBar={viewport.isPhone} onmutated={() => store.refresh()} />
 {/if}

@@ -45,6 +45,13 @@ type artifactListing struct {
 
 // artifactFile is one file in a recursive (flat) artifact listing: its full
 // subpath relative to the artifact root, plus size/mtime.
+// artifactAllListing is the recursive file listing (handleArtifactsAll). Both
+// the populated and the missing-dir answers use it, so the shape cannot drift.
+type artifactAllListing struct {
+	Root  string         `json:"root"`  // absolute artifact dir
+	Files []artifactFile `json:"files"` // every file, sorted by path; [] (never null) when none
+}
+
 type artifactFile struct {
 	Path  string `json:"path"` // subpath relative to root, forward-slashed
 	Size  int64  `json:"size"`
@@ -131,7 +138,8 @@ func (s *Server) handleArtifactsAll(w http.ResponseWriter, r *http.Request) {
 	base := config.ArtifactDir(id)
 	root, err := os.OpenRoot(base)
 	if errors.Is(err, fs.ErrNotExist) {
-		writeJSON(w, http.StatusOK, []string{})
+		// No artifact dir yet (nothing written): an empty listing, same shape.
+		writeJSON(w, http.StatusOK, artifactAllListing{Root: base, Files: []artifactFile{}})
 		return
 	}
 	if err != nil {
@@ -168,7 +176,7 @@ func (s *Server) handleArtifactsAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	writeJSON(w, http.StatusOK, map[string]any{"root": base, "files": files})
+	writeJSON(w, http.StatusOK, artifactAllListing{Root: base, Files: files})
 }
 
 // handleArtifactRaw serves a single file from a run's artifact dir. The file is

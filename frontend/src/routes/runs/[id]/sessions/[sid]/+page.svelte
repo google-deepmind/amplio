@@ -467,4 +467,55 @@
 		gap: 0.4rem;
 		padding: 0 0.75rem 0.6rem 1.6rem;
 	}
+
+	/* Phone: the pane is in the page's flow (see the layout), so .scroll stops
+	   scrolling; rows are the one-line 44px recipe. */
+	@media (max-width: 640px) {
+		/* The selected row of the phase index right above already names it. */
+		.ptitle {
+			display: none;
+		}
+		.tbtn {
+			position: relative;
+			flex-shrink: 0;
+			height: 30px;
+			min-height: 0;
+			padding: 0 var(--sp-2);
+			border: 0;
+		}
+		.tbtn::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
+		.scroll {
+			flex: none;
+			overflow: visible;
+			padding: var(--sp-3) 0 0;
+		}
+		.psummary,
+		.artifacts,
+		.lessons {
+			padding: 0 0 var(--sp-3);
+		}
+		/* Phase content, not list rows: the context and reason take their own line. */
+		.artifact,
+		.lesson {
+			flex-wrap: wrap;
+		}
+		.actx,
+		.lreason {
+			flex-basis: 100%;
+			white-space: normal;
+			overflow: visible;
+		}
+		summary {
+			height: var(--row-h);
+			padding: 0 var(--sp-3);
+			gap: var(--sp-2);
+		}
+		.events {
+			padding: 0 var(--sp-2) var(--sp-2);
+		}
+	}
 </style>

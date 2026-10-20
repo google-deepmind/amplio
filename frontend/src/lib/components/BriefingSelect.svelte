@@ -18,6 +18,8 @@
 	import { onMount } from 'svelte';
 	import type { BriefingInfo } from '$lib/types';
 	import { cachedBriefings, loadBriefings } from '$lib/briefingLibrary';
+	import { viewport } from '$lib/viewport.svelte';
+	import { closeOnBack } from '$lib/pickerSheet.svelte';
 	import { NotebookIcon, CaretDownIcon } from 'phosphor-svelte';
 
 	// Briefings are opt-in per run: an empty selection means none, so there is no
@@ -60,6 +62,26 @@
 			: [...selected, name];
 	}
 
+	closeOnBack(
+		() => open,
+		() => done()
+	);
+
+	// Close and hand focus back to the trigger: the menu's focused control is
+	// about to unmount, and losing focus would fold the host form.
+	let triggerEl = $state<HTMLButtonElement>();
+	function done() {
+		triggerEl?.focus();
+		open = false;
+	}
+
+	// Escape closes the menu, and only the menu (not a host sheet around it).
+	function onWrapKey(e: KeyboardEvent) {
+		if (e.key !== 'Escape' || !open) return;
+		e.preventDefault();
+		done();
+	}
+
 	function clickOutside(node: HTMLElement, cb: () => void) {
 		function handle(e: MouseEvent) {
 			if (!node.contains(e.target as Node)) cb();
@@ -88,9 +110,10 @@
 
 <!-- Nothing to choose from: don't spend a control on it. -->
 {#if all.length > 0}
-	<div class="wrap" use:clickOutside={() => (open = false)}>
+	<div class="wrap" use:clickOutside={() => (open = false)} onkeydown={onWrapKey} role="presentation">
 		<button
 			type="button"
+			bind:this={triggerEl}
 			class="trigger"
 			title="Briefings — extra context added to this run's prompt"
 			onclick={() => (open = !open)}
@@ -103,6 +126,10 @@
 		</button>
 		{#if open}
 			<div class="menu">
+				{#if viewport.isPhone}
+					<!-- Phone: the menu is a bottom sheet (StartRunForm); this is its header. -->
+					<div class="sheet-head"><span>Briefings</span><button type="button" class="done" onclick={done}>Done</button></div>
+				{/if}
 				{#each groups as [group, items] (group)}
 					{#if group}<div class="group">{group}</div>{/if}
 					{#each items as b (b.name)}
@@ -231,5 +258,22 @@
 		color: var(--danger, #f66);
 		padding: 0.4rem 0.5rem;
 		font-size: 0.8rem;
+	}
+
+
+	@media (max-width: 640px) {
+		.label {
+			flex: 1;
+			text-align: left;
+		}
+		.group {
+			font-size: var(--fs-xs);
+		}
+		.tag {
+			font-size: var(--fs-xs);
+		}
+		.desc {
+			font-size: var(--fs-sm);
+		}
 	}
 </style>

@@ -28,8 +28,9 @@ export function formatLocalIso(iso: string): string {
 }
 
 // Compact relative time for list rows ("just now", "3m", "5h", "2d", then a
-// locale date). Shared by the run card and the session rows.
-export function timeAgo(iso: string): string {
+// locale date; with `compact`, "3w" / "5mo" / "2y" instead). Shared by the run
+// card and the session rows.
+export function timeAgo(iso: string, compact = false): string {
 	const t = new Date(iso).getTime();
 	if (!t) return '';
 	const s = Math.floor((Date.now() - t) / 1000);
@@ -40,7 +41,10 @@ export function timeAgo(iso: string): string {
 	if (h < 24) return `${h}h`;
 	const d = Math.floor(h / 24);
 	if (d < 7) return `${d}d`;
-	return new Date(t).toLocaleDateString();
+	if (!compact) return new Date(t).toLocaleDateString();
+	if (d < 30) return `${Math.floor(d / 7)}w`;
+	if (d < 365) return `${Math.floor(d / 30)}mo`;
+	return `${Math.floor(d / 365)}y`;
 }
 
 // Compact elapsed duration since a timestamp, for live "running for…" tickers

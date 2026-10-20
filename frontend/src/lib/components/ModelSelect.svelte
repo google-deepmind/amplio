@@ -19,6 +19,8 @@
 	import { api } from '$lib/api';
 	import type { ModelEntry, ModelMenu } from '$lib/types';
 	import { cachedModelMenu, loadModelMenu } from '$lib/modelMenu';
+	import { viewport } from '$lib/viewport.svelte';
+	import { closeOnBack } from '$lib/pickerSheet.svelte';
 	import { CubeIcon, CaretDownIcon, PlusIcon, MinusIcon } from 'phosphor-svelte';
 
 	let { value = $bindable(''), onpick }: { value?: string; onpick?: () => void } = $props();
@@ -47,6 +49,26 @@
 
 	function focusEl(node: HTMLInputElement) {
 		node.focus();
+	}
+
+	closeOnBack(
+		() => open,
+		() => done()
+	);
+
+	// Close and hand focus back to the trigger: the menu's focused control is
+	// about to unmount, and losing focus would fold the host form.
+	let triggerEl = $state<HTMLButtonElement>();
+	function done() {
+		triggerEl?.focus();
+		open = false;
+	}
+
+	// Escape closes the menu, and only the menu (not a host sheet around it).
+	function onWrapKey(e: KeyboardEvent) {
+		if (e.key !== 'Escape' || !open) return;
+		e.preventDefault();
+		done();
 	}
 
 	// Close the popover on any click outside it.
@@ -119,9 +141,10 @@
 	}
 </script>
 
-<div class="wrap" use:clickOutside={() => (open = false)}>
+<div class="wrap" use:clickOutside={() => (open = false)} onkeydown={onWrapKey} role="presentation">
 	<button
 		type="button"
+		bind:this={triggerEl}
 		class="trigger"
 		title={value ? `Agent model\n${value}` : 'Agent model'}
 		onclick={() => (open = !open)}
@@ -132,6 +155,10 @@
 	</button>
 	{#if open}
 		<div class="menu">
+			{#if viewport.isPhone}
+				<!-- Phone: the menu is a bottom sheet (StartRunForm); this is its header. -->
+				<div class="sheet-head"><span>Model</span><button type="button" class="done" onclick={done}>Done</button></div>
+			{/if}
 			{#each models as m (m.spec)}
 				<div class="row" class:selected={m.spec === value}>
 					<!-- Two lines rather than a tooltip: the spec is what you are actually
@@ -175,7 +202,10 @@
 						placeholder="vertex:model-id"
 						onkeydown={(e) => {
 							if (e.key === 'Enter') add();
-							else if (e.key === 'Escape') adding = false;
+							else if (e.key === 'Escape') {
+								e.stopPropagation();
+								adding = false;
+							}
 						}}
 					/>
 					<button type="button" class="ok" onmousedown={keepFocus} onclick={add}>add</button>
@@ -345,5 +375,18 @@
 	.err {
 		font-size: var(--fs-sm);
 		margin: 0.25rem 0.5rem 0;
+	}
+
+
+	@media (max-width: 640px) {
+		.label {
+			flex: 1;
+			max-width: none;
+			text-align: left;
+		}
+		.pick-spec,
+		.dup {
+			font-size: var(--fs-xs);
+		}
 	}
 </style>

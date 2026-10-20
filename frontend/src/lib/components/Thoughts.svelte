@@ -97,4 +97,18 @@
 		   below it; the folded state stays compact (no .body rendered). */
 		margin-bottom: 0.6rem;
 	}
+
+	@media (max-width: 640px) {
+		/* 28px visible, 44px by overlay (a <summary> misses the global button floor). */
+		details.think summary.chip {
+			position: relative;
+			min-height: 28px;
+			align-items: center;
+		}
+		details.think summary.chip::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
+	}
 </style>

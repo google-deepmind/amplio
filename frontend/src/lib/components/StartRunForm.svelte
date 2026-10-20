@@ -19,6 +19,8 @@
 	import { api } from '$lib/api';
 	import { goto } from '$app/navigation';
 	import { peekRunPrefill, takeRunPrefill } from '$lib/runPrefill.svelte';
+	import { viewport } from '$lib/viewport.svelte';
+	import { closeOnBack } from '$lib/pickerSheet.svelte';
 	import ModelSelect from './ModelSelect.svelte';
 	import BriefingSelect from './BriefingSelect.svelte';
 	import WorkspaceField from './WorkspaceField.svelte';
@@ -81,7 +83,29 @@
 	const interactive = $derived(mode === 'interactive');
 	// Resting state is a single-line bar; expands while focused or once edited
 	// (dirty), so blurring a partially-filled form doesn't fold it shut.
-	const expanded = $derived(focused || dirty || text.trim().length > 0);
+	// Phone: the expanded form is a bottom sheet; tapping its scrim (or Escape)
+	// folds it back to the resting bar and keeps the draft.
+	let folded = $state(false);
+	const expanded = $derived(!folded && (focused || dirty || text.trim().length > 0));
+
+	// Back folds the sheet (a picker open inside it closes first).
+	closeOnBack(
+		() => expanded,
+		() => fold()
+	);
+
+	function onFormClick(e: MouseEvent) {
+		if (!viewport.isPhone || e.target !== formEl) return;
+		if (e.clientY < formEl.getBoundingClientRect().top) fold();
+	}
+	function onFormKey(e: KeyboardEvent) {
+		if (e.key === 'Escape' && viewport.isPhone && !e.defaultPrevented) fold();
+	}
+	function fold() {
+		folded = true;
+		focused = false;
+		(document.activeElement as HTMLElement | null)?.blur();
+	}
 
 	function onFocusOut(e: FocusEvent) {
 		const form = e.currentTarget as HTMLElement;
@@ -159,6 +183,9 @@
 	}
 </script>
 
+<!-- The click/keydown handlers only fold the phone sheet (scrim tap, Escape);
+     every control inside is a real input or button. -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <form
 	class="card composer"
 	class:expanded
@@ -166,8 +193,13 @@
 	bind:this={formEl}
 	onsubmit={submit}
 	oninput={() => (dirty = true)}
-	onfocusin={() => (focused = true)}
+	onfocusin={() => {
+		focused = true;
+		folded = false;
+	}}
 	onfocusout={onFocusOut}
+	onclick={onFormClick}
+	onkeydown={onFormKey}
 >
 	{#if expanded}
 		<div class="head">
@@ -397,5 +429,137 @@
 	.err {
 		font-size: var(--fs-md);
 		margin: 0.5rem 0 0;
+	}
+
+	/* Phone: expanded, the form is a bottom sheet over a scrim. Its footer (the
+	   pickers and Start) is a sticky action row, so with the keyboard up the
+	   fields scroll under it and Start stays reachable. --app-h is the visual
+	   viewport while a keyboard is open (see app.css); the bottom offset lifts
+	   the sheet above an iOS keyboard, where 100dvh does not shrink. */
+	@media (max-width: 640px) {
+		.composer.expanded {
+			position: fixed;
+			z-index: 30;
+			inset: auto 0 calc(100dvh - var(--app-h, 100dvh)) 0;
+			max-height: calc(var(--app-h, 100dvh) - var(--bar-h));
+			overflow-y: auto;
+			overscroll-behavior: contain;
+			padding: var(--sp-4) var(--gutter) 0;
+			border-width: 1px 0 0;
+			border-radius: var(--sheet-radius) var(--sheet-radius) 0 0;
+			box-shadow: 0 0 0 100vmax var(--scrim);
+		}
+		/* Transparent tap catcher over the scrim: a tap there lands on the form
+		   (see onFormClick) instead of the run list behind it. */
+		.composer.expanded::before {
+			content: '';
+			position: fixed;
+			inset: 0;
+			z-index: -1;
+		}
+		.head {
+			margin-bottom: var(--sp-2);
+		}
+		.title {
+			padding: 0 var(--sp-1);
+			margin-bottom: var(--sp-1);
+		}
+		.expanded .task {
+			min-height: 0;
+			margin-bottom: var(--sp-2);
+			resize: none;
+		}
+		.footer {
+			position: sticky;
+			bottom: 0;
+			gap: var(--sp-2);
+			margin-inline: calc(-1 * var(--gutter));
+			padding: var(--sp-2) var(--gutter) var(--sp-3);
+			background: var(--bg-elev);
+			border-top: 1px solid var(--border);
+		}
+		/* Two pickers per row; Start gets its own full-width row. */
+		.footer > :global(.wrap) {
+			flex: 1 1 9rem;
+			min-width: 0;
+		}
+		.footer > :global(.wrap > .trigger) {
+			width: 100%;
+		}
+		.modes button {
+			position: relative;
+			min-height: 36px;
+			min-width: var(--tap);
+			justify-content: center;
+		}
+		.modes button::after {
+			content: '';
+			position: absolute;
+			inset: -4px 0;
+		}
+		.start {
+			flex-basis: 100%;
+			margin-left: 0;
+		}
+		.kbd {
+			display: none;
+		}
+		/* The pickers' menus are bottom sheets too, over the form. The trigger's
+		   ::after catches taps on their scrim, so a tap there closes the menu
+		   (the trigger toggles it) instead of reaching the control underneath. */
+		.footer :global(.wrap > .menu) {
+			position: fixed;
+			z-index: 32;
+			inset: auto 0 calc(100dvh - var(--app-h, 100dvh)) 0;
+			min-width: 0;
+			max-width: none;
+			max-height: calc(var(--app-h, 100dvh) * 0.7);
+			overflow-y: auto;
+			overscroll-behavior: contain;
+			padding: 0 var(--sheet-pad-x, var(--sp-2)) var(--sp-3);
+			background: var(--bg-elev);
+			border: 1px solid var(--border);
+			border-bottom: none;
+			border-radius: var(--sheet-radius) var(--sheet-radius) 0 0;
+			box-shadow: 0 0 0 100vmax var(--scrim);
+		}
+		/* Sheet header (in each picker's markup): handle, title and a Done that
+		   stays in view while the sheet scrolls. */
+		.footer :global(.wrap > .menu > .sheet-head) {
+			position: sticky;
+			top: 0;
+			z-index: 1;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin-inline: calc(-1 * var(--sheet-pad-x, var(--sp-2)));
+			padding: var(--sp-4) calc(var(--gutter) - var(--sp-3)) var(--sp-2) var(--gutter);
+			background: var(--bg-elev);
+			font-size: var(--fs-md);
+			font-weight: 600;
+		}
+		.footer :global(.wrap > .menu > .sheet-head::before) {
+			content: '';
+			position: absolute;
+			top: var(--sp-2);
+			left: calc(50% - 16px);
+			width: 32px;
+			height: 4px;
+			border-radius: 2px;
+			background: var(--border);
+		}
+		.footer :global(.wrap > .menu > .sheet-head > .done) {
+			padding: 0 var(--sp-3);
+			background: none;
+			border: none;
+			color: var(--accent);
+			font-weight: 600;
+		}
+		.footer :global(.wrap:has(> .menu) > .trigger::after) {
+			content: '';
+			position: fixed;
+			inset: 0;
+			z-index: 31;
+		}
 	}
 </style>

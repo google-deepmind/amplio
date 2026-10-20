@@ -16,7 +16,8 @@
 
 <script lang="ts">
 	import { api } from '$lib/api';
-	import { goto } from '$app/navigation';
+	import { tick } from 'svelte';
+	import { beforeNavigate, goto } from '$app/navigation';
 	import { updates } from '$lib/updates.svelte';
 	import { auth } from '$lib/auth.svelte';
 	import { timeAgo } from '$lib/time';
@@ -38,12 +39,16 @@
 		TagIcon,
 		PathIcon,
 		CopyIcon,
-		TrashIcon
+		TrashIcon,
+		CheckIcon
 	} from 'phosphor-svelte';
 	import { iconForName } from '$lib/sessionIcon';
 	import { setRunPrefill } from '$lib/runPrefill.svelte';
 	import { EditorIcon, WorkspaceNameModal } from './internal';
 	import GradePicker from './GradePicker.svelte';
+	import MenuSheet from './MenuSheet.svelte';
+	import { menuKeys, popover } from '$lib/dismiss';
+	import { viewport, atLeast } from '$lib/viewport.svelte';
 
 	// Unified run card. The dashboard renders a list of these (linkable=true,
 	// title is a navigation <a>); the run page renders one (linkable=false,
@@ -65,11 +70,15 @@
 	// After any mutation the parent is informed via `onmutated` so it can
 	// refetch.
 
+	// inBar: the phone run page renders this card inside RunTopBar, stripped to
+	// its controls (phone CSS below).
 	let {
 		run,
 		linkable = false,
+		inBar = false,
 		onmutated
-	}: { run: RunSummary; linkable?: boolean; onmutated?: () => void } = $props();
+	}: { run: RunSummary; linkable?: boolean; inBar?: boolean; onmutated?: () => void } =
+		$props();
 
 	const isChat = $derived(run.root_agent_type === 'chatbot');
 	const hasUpdates = $derived(updates.hasUpdatesById(run.run_id));
@@ -79,7 +88,16 @@
 	const displayTitle = $derived(
 		run.title || run.task || (isChat ? '(untitled chat)' : '(no task)')
 	);
+	const wsName = $derived(run.workspace_name || run.workspace);
+	// Phone meta line: on 360-class phones (the --gutter breakpoint) the step
+	// count gives way so the workspace chip keeps its name.
+	const above375 = atLeast(376);
+	const showSteps = $derived(!viewport.isPhone || above375.current);
 	const lastChange = $derived(run.root_status_changed_at || run.created_at);
+	const metaText = $derived.by(() => {
+		const ago = timeAgo(lastChange, viewport.isPhone);
+		return showSteps ? `${run.root_step} · ${ago}` : ago;
+	});
 
 	// --- Workspace pill / "Name workspace" editor integration ---
 	//
@@ -211,11 +229,19 @@
 	// toggle-to-close. Without this, the user could arm Cancel, click outside,
 	// re-open the menu, and find Cancel still armed — confusing.
 	let menuOpen = $state(false);
+	let menuWrap = $state<HTMLElement>();
+	const pop = popover(() => closeMenu());
+	beforeNavigate(() => {
+		if (pop.release()) closeMenu();
+	});
+	$effect(() => () => void pop.closed());
 	function openMenu() {
 		menuOpen = true;
+		if (menuWrap) pop.opened(menuWrap);
 	}
 	function closeMenu() {
 		menuOpen = false;
+		pop.closed();
 		clearConfirmTimer();
 		confirmCancel = false;
 		clearDeleteTimer();
@@ -226,14 +252,6 @@
 		if (menuOpen) closeMenu();
 		else openMenu();
 	}
-	function clickOutside(node: HTMLElement, callback: () => void) {
-		const handle = (e: MouseEvent) => {
-			if (!node.contains(e.target as Node)) callback();
-		};
-		document.addEventListener('click', handle);
-		return { destroy: () => document.removeEventListener('click', handle) };
-	}
-
 	// Rename is a per-card inline edit overlay (title-row → input). Triggered
 	// from the menu, not from title click.
 	let editing = $state(false);
@@ -247,12 +265,21 @@
 		editing = true;
 		closeMenu();
 	}
+	// The editor replaces the title, so focus would fall to <body>; hand it back
+	// to the ⋮ trigger the rename came from.
+	let menuBtn = $state<HTMLButtonElement>();
+	function refocusMenuBtn() {
+		tick().then(() => menuBtn?.focus());
+	}
 	function cancelEdit() {
 		editing = false;
+		refocusMenuBtn();
 	}
-	async function saveEdit() {
+	// refocus=false on blur: focus already went where the user tapped.
+	async function saveEdit(refocus = true) {
 		if (!editing) return;
 		editing = false;
+		if (refocus) refocusMenuBtn();
 		const t = titleVal.trim();
 		if (t !== run.title) {
 			await api.updateRun(run.run_id, { title: t });
@@ -266,7 +293,11 @@
 	// visible, so staying would undo it within a refetch. Leaving is the whole
 	// mechanism, which is why it isn't optional.
 	async function markUnread() {
+		// Pop the sheet's history entry before navigating, or the dashboard
+		// would be pushed on top of it.
+		const popped = pop.closed();
 		closeMenu();
+		await popped;
 		// LEAVE FIRST, then mark. The PATCH makes the server emit run_updated; a
 		// still-mounted run page refetches, sees has_updates while visible, and
 		// clears the badge again — measured, not theoretical. Unmounting the page
@@ -299,7 +330,7 @@
 	{/if}
 {/snippet}
 
-<div class="card row">
+<div class="card row" class:in-bar={inBar}>
 	<!--
 		Leading slot: the identity/star glyph only. The grade picker used to sit
 		here too, but a smiley next to the object-style identity icon read as a
@@ -364,16 +395,43 @@
 	-->
 	<div class="title-wrap">
 		{#if editing}
-			<input
-				class="title-edit"
-				bind:value={titleVal}
-				use:focusEl
-				onkeydown={(e) => {
-					if (e.key === 'Enter') saveEdit();
-					else if (e.key === 'Escape') cancelEdit();
-				}}
-				onblur={saveEdit}
-			/>
+			<!-- Cancel/Save are for touch, where there is no Escape key and a tap
+			     elsewhere blurs (= saves); desktop hides them. mousedown is
+			     cancelled so tapping them does not blur the field first. -->
+			<div class="edit" role="group" aria-label="Rename run">
+				<input
+					class="title-edit"
+					aria-label="Run title"
+					enterkeyhint="done"
+					bind:value={titleVal}
+					use:focusEl
+					onkeydown={(e) => {
+						if (e.key === 'Enter') saveEdit();
+						else if (e.key === 'Escape') cancelEdit();
+					}}
+					onblur={(e) => {
+						// Window blur (app switch, notification shade) keeps the edit open.
+						if (!document.hasFocus()) return;
+						if (!e.currentTarget.parentElement?.contains(e.relatedTarget as Node)) saveEdit(false);
+					}}
+				/>
+				<button
+					class="edit-btn"
+					aria-label="Cancel rename"
+					onmousedown={(e) => e.preventDefault()}
+					onclick={cancelEdit}
+				>
+					<XIcon size={18} weight="bold" />
+				</button>
+				<button
+					class="edit-btn save"
+					aria-label="Save title"
+					onmousedown={(e) => e.preventDefault()}
+					onclick={() => saveEdit()}
+				>
+					<CheckIcon size={18} weight="bold" />
+				</button>
+			</div>
 		{:else if linkable}
 			<a class="titleblock" href={linkPath}>
 				{@render titleblockBody()}
@@ -397,19 +455,19 @@
 			title={`Open ${run.workspace_alias} · ${run.workspace}`}
 		>
 			<EditorIcon size={12} />
-			<span class="chip-text">{run.workspace_name || run.workspace}</span>
+			<span class="chip-text" style:--len={wsName.length}>{wsName}</span>
 			<ArrowSquareOutIcon size={10} weight="bold" />
 		</a>
 	{:else if run.workspace_name || run.workspace}
 		<span class="chip" title={run.workspace}>
 			<FolderIcon size={12} weight="bold" />
-			<span class="chip-text">{run.workspace_name || run.workspace}</span>
+			<span class="chip-text" style:--len={wsName.length}>{wsName}</span>
 		</span>
 	{/if}
 	{#if run.llm}
 		<!-- Short label in the chip, full spec in the tooltip: specs run to 120+
 		     chars and the chip is a glance target, not a reference. -->
-		<span class="chip" title="Model: {run.llm}">
+		<span class="chip model" title="Model: {run.llm}">
 			<CubeIcon size={12} weight="bold" />
 			<span class="chip-text">{run.llm_name || run.llm}</span>
 		</span>
@@ -424,8 +482,8 @@
 		class="meta dim"
 		title="step {run.root_step} · {new Date(lastChange).toLocaleString()}"
 	>
-		<PathIcon size={12} weight="bold" />
-		{run.root_step} · {timeAgo(lastChange)}
+		{#if showSteps}<PathIcon size={12} weight="bold" />{/if}
+		{metaText}
 	</span>
 	</div>
 
@@ -441,105 +499,120 @@
 		     the title on phone. -->
 		<div class="actions">
 		<GradePicker {run} onmutated={() => onmutated?.()} />
-		<div class="menu-wrap" use:clickOutside={closeMenu}>
-			<button class="iconbtn" aria-label="More actions" title="More actions" onclick={toggleMenu}>
+		<div class="menu-wrap" bind:this={menuWrap}>
+			<button
+				class="iconbtn"
+				bind:this={menuBtn}
+				aria-label="More actions"
+				title="More actions"
+				onclick={toggleMenu}
+			>
 				<DotsThreeVerticalIcon size={16} weight="bold" />
 			</button>
 			{#if menuOpen}
-				<div class="menu" role="menu">
-					<button class="item" onclick={startEdit}>
-						<PencilSimpleIcon size={14} />
-						Rename
-					</button>
-					<!-- Relaunch a variation: pre-fills the dashboard composer with this
-					     run's task/title/model. Dashboard-only (linkable), where the
-					     composer is present to receive it. -->
-					{#if linkable}
+				<MenuSheet label="Run actions" trigger={menuBtn} onclose={closeMenu}>
+					<div class="menu" role="menu" aria-label="Run actions" tabindex="-1" onkeydown={menuKeys}>
+						<button role="menuitem" class="item" onclick={startEdit}>
+							<PencilSimpleIcon size={14} />
+							Rename
+						</button>
+						<!-- Relaunch a variation: pre-fills the dashboard composer with this
+						     run's task/title/model. Dashboard-only (linkable), where the
+						     composer is present to receive it. -->
+						{#if linkable}
+							<button
+								role="menuitem"
+								class="item"
+								onclick={newRunLike}
+								title="Pre-fill the composer with this run's task, title, and model"
+							>
+								<CopyIcon size={14} />
+								New run like this…
+							</button>
+						{/if}
+						<!-- Star here is the secondary affordance; the identity icon is the
+						     primary one. Closing the menu afterwards keeps it tidy. -->
 						<button
+							role="menuitem"
 							class="item"
-							onclick={newRunLike}
-							title="Pre-fill the composer with this run's task, title, and model"
+							onclick={() => {
+								closeMenu();
+								toggleStar();
+							}}
 						>
-							<CopyIcon size={14} />
-							New run like this…
+							<StarIcon size={14} weight={run.starred ? 'fill' : 'regular'} />
+							{run.starred ? 'Unstar' : 'Star'}
 						</button>
-					{/if}
-					<!-- Star here is the secondary affordance; the identity icon is the
-					     primary one. Closing the menu afterwards keeps it tidy. -->
-					<button
-						class="item"
-						onclick={() => {
-							closeMenu();
-							toggleStar();
-						}}
-					>
-						<StarIcon size={14} weight={run.starred ? 'fill' : 'regular'} />
-						{run.starred ? 'Unstar' : 'Star'}
-					</button>
-					{#if canNameWorkspace}
+						{#if canNameWorkspace}
+							<button
+								role="menuitem"
+								class="item"
+								onclick={openNameWorkspace}
+								title="Name this workspace so it can be opened in an editor"
+							>
+								<TagIcon size={14} weight="bold" />
+								Name workspace…
+							</button>
+						{/if}
 						<button
+							role="menuitem"
 							class="item"
-							onclick={openNameWorkspace}
-							title="Name this workspace so it can be opened in an editor"
+							onclick={markUnread}
+							title="Put this run's badge back and return to the dashboard"
 						>
-							<TagIcon size={14} weight="bold" />
-							Name workspace…
+							<EnvelopeIcon size={14} weight="regular" />
+							Mark as unread
 						</button>
-					{/if}
-					<button
-						class="item"
-						onclick={markUnread}
-						title="Put this run's badge back and return to the dashboard"
-					>
-						<EnvelopeIcon size={14} weight="regular" />
-						Mark as unread
-					</button>
-					<button class="item" onclick={toggleArchive}>
-						<ArchiveIcon size={14} weight={run.archived ? 'fill' : 'regular'} />
-						{run.archived ? 'Unarchive' : 'Archive'}
-					</button>
-					<!-- Operational/destructive cluster. Delete is ALWAYS available (it's
-					     the escape hatch for corrupted/dead runs), so the divider always
-					     shows. -->
-					<div class="divider" role="separator"></div>
-					{#if canRestart}
-						<button
-							class="item recover"
-							onclick={restart}
-							disabled={restarting}
-							title="Revive this run's active spine (re-runs the crashed root)"
-						>
-							<ArrowClockwiseIcon size={14} weight="bold" />
-							{restarting ? 'Restarting…' : 'Restart run'}
+						<button role="menuitem" class="item" onclick={toggleArchive}>
+							<ArchiveIcon size={14} weight={run.archived ? 'fill' : 'regular'} />
+							{run.archived ? 'Unarchive' : 'Archive'}
 						</button>
-					{/if}
-					{#if canCancel}
+						<!-- Operational/destructive cluster. Delete is ALWAYS available (it's
+						     the escape hatch for corrupted/dead runs), so the divider always
+						     shows. -->
+						<div class="divider" role="separator"></div>
+						{#if canRestart}
+							<button
+								role="menuitem"
+								class="item recover"
+								onclick={restart}
+								disabled={restarting}
+								title="Revive this run's active spine (re-runs the crashed root)"
+							>
+								<ArrowClockwiseIcon size={14} weight="bold" />
+								{restarting ? 'Restarting…' : 'Restart run'}
+							</button>
+						{/if}
+						{#if canCancel}
+							<button
+								role="menuitem"
+								class="item danger"
+								class:armed={confirmCancel}
+								onclick={cancelClicked}
+								disabled={cancelling}
+								title={confirmCancel
+									? 'Click again to confirm cancellation'
+									: 'Cancel this run (cascades to all sessions)'}
+							>
+								<XIcon size={14} weight="bold" />
+								{cancelling ? 'Cancelling…' : confirmCancel ? 'Confirm cancel?' : 'Cancel run'}
+							</button>
+						{/if}
 						<button
+							role="menuitem"
 							class="item danger"
-							class:armed={confirmCancel}
-							onclick={cancelClicked}
-							disabled={cancelling}
-							title={confirmCancel
-								? 'Click again to confirm cancellation'
-								: 'Cancel this run (cascades to all sessions)'}
+							class:armed={confirmDelete}
+							onclick={deleteClicked}
+							disabled={deleting}
+							title={confirmDelete
+								? 'Click again to permanently delete this run and all its data'
+								: 'Delete this run permanently (DB rows + artifacts/blobs; mined lessons are kept)'}
 						>
-							<XIcon size={14} weight="bold" />
-							{cancelling ? 'Cancelling…' : confirmCancel ? 'Confirm cancel?' : 'Cancel run'}
+							<TrashIcon size={14} weight="bold" />
+							{deleting ? 'Deleting…' : confirmDelete ? 'Confirm delete?' : 'Delete run'}
 						</button>
-					{/if}
-					<button
-						class="item danger"
-						class:armed={confirmDelete}
-						onclick={deleteClicked}
-						disabled={deleting}
-						title={confirmDelete
-							? 'Click again to permanently delete this run and all its data'
-							: 'Delete this run permanently (DB rows + artifacts/blobs; mined lessons are kept)'}
-					>
-						<TrashIcon size={14} weight="bold" />
-						{deleting ? 'Deleting…' : confirmDelete ? 'Confirm delete?' : 'Delete run'}
-					</button>
-				</div>
+					</div>
+				</MenuSheet>
 			{/if}
 		</div>
 		</div>
@@ -631,6 +704,12 @@
 	.title-edit {
 		width: 100%;
 		font: inherit;
+	}
+	.edit {
+		display: contents;
+	}
+	.edit-btn {
+		display: none;
 	}
 	/* Task snippet — muted, single line, with a soft right-edge mask that
 	   fades the text into transparency so it flows naturally into the chips
@@ -772,7 +851,7 @@
 	.iconbtn:hover {
 		color: var(--text);
 	}
-	/* Overflow menu — small popover anchored to the ⋮ trigger. clickOutside
+	/* Overflow menu — small popover anchored to the ⋮ trigger. dismiss
 	   closes when the user clicks anywhere else. */
 	.menu-wrap {
 		position: relative;
@@ -842,17 +921,19 @@
 		color: var(--err);
 	}
 
-	/* Phone: the one-line row needs ~530px, so it wraps into two — identity,
-	   title and controls on top, metadata underneath. */
+	/* Phone row (ux/spec.md §2.2): identity, title and controls on line 1, the
+	   task on line 2, then status, steps and workspace on one nowrap line, all
+	   text lines starting at the title's x. 70px tall without a task, 90 with. */
 	@media (max-width: 640px) {
 		.card {
+			position: relative;
 			flex-wrap: wrap;
 			align-items: flex-start;
-			gap: 0.3rem;
-			padding: 0.5rem 0.7rem;
+			gap: var(--sp-1) var(--sp-3);
+			padding: var(--card-pad-y) var(--card-pad-x);
 		}
 		.lead {
-			padding-top: 0.1rem; /* sit on the title's first line, not its middle */
+			height: 20px;
 		}
 		.title-wrap {
 			flex: 1 1 0;
@@ -860,94 +941,250 @@
 		.titleblock {
 			flex-direction: column;
 			align-items: flex-start;
-			gap: 0.1rem;
+			gap: 0;
+			min-height: 0;
 		}
-		/* One line, ellipsised — same as desktop. Wrapping to two lines cost a
-		   row's worth of height per long title and made the list scan worse
-		   than the truncation does. */
 		.title {
 			width: 100%;
 			min-width: 0;
+			font-size: var(--fs-md);
+			line-height: 20px;
 		}
-		/* Owns its own line now (so the fade-into-the-chips mask goes), and keeps
-		   to one, for the same reason as the title. */
 		.task {
 			flex: 0 1 auto;
 			width: 100%;
-			overflow: hidden;
+			line-height: 20px;
 			text-overflow: ellipsis;
 			mask-image: none;
 			-webkit-mask-image: none;
 		}
-		/* Controls stay on the title line. `order` rather than moving the markup:
-		   the DOM sequence is the reading order the desktop row wants. */
+		/* The whole card opens the run (the title is the link; its overlay
+		   covers the card). Controls stack above it with z-index: 1. */
+		a.titleblock::after {
+			content: '';
+			position: absolute;
+			inset: 0;
+			border-radius: var(--radius-md);
+		}
+		a.titleblock:focus-visible {
+			outline: none;
+		}
+		a.titleblock:focus-visible::after {
+			outline: 2px solid var(--accent-dim);
+		}
+		a.titleblock:active {
+			background-image: none;
+		}
+		.card:has(a.titleblock:active) {
+			background-image: linear-gradient(var(--press), var(--press));
+		}
+		/* 44px of tap from invisible overlays, not from the box: app.css's 44px
+		   button floor would make the icons the tallest thing in the row. */
+		.identity-btn,
+		.iconbtn,
+		.actions :global(.grade-btn),
+		a.chip.editor {
+			position: relative;
+			z-index: 1;
+		}
+		.identity-btn,
+		.iconbtn,
+		.actions :global(.grade-btn) {
+			min-height: 0;
+			min-width: 0;
+		}
+		.identity-btn::after,
+		.iconbtn::after,
+		.actions :global(.grade-btn)::after,
+		a.chip.editor::after {
+			content: '';
+			position: absolute;
+		}
+		/* 20px box, overlay out to the card edge on the left and top. */
+		.identity-btn {
+			height: 20px;
+			padding: 1px;
+		}
+		.identity-btn::after {
+			inset: -13px -12px;
+		}
+		/* Abutting 44px-wide boxes; the overlays add height only. The cluster
+		   runs to the card's padding edge so ⋮ mirrors the identity icon's inset. */
 		.actions {
 			order: 1;
 			display: flex;
 			align-items: center;
-			gap: 0.2rem;
 			flex-shrink: 0;
-			margin-left: auto;
+			height: 20px;
+			margin-right: calc(-1 * var(--card-pad-x));
+		}
+		.iconbtn,
+		.actions :global(.grade-btn) {
+			justify-content: center;
+			width: var(--tap);
+			height: 20px;
+			padding: 0;
+		}
+		.iconbtn::after,
+		.actions :global(.grade-btn)::after {
+			inset: -13px 0;
 		}
 		.metastrip {
 			order: 2;
 			display: flex;
-			flex-wrap: wrap;
+			flex-wrap: nowrap;
 			align-items: center;
-			gap: 0.35rem;
+			gap: var(--sp-2);
 			flex-basis: 100%;
 			min-width: 0;
+			overflow: hidden;
+			padding-left: calc(20px + var(--sp-3));
 		}
+		/* Status first, then steps, then the workspace (which gives way). The
+		   model is on Overview, one tap away. */
+		.metastrip :global(.badge) {
+			flex-shrink: 0;
+			height: 22px;
+		}
+		.meta {
+			order: 1;
+			line-height: 22px;
+		}
+		/* The workspace keeps 6-12 characters; the steps count goes first
+		   (narrow phones), and the date is already compact ("3w"). */
 		.chip {
-			max-width: 100%;
-		}
-		/* 44px of TAP without 44px of BOX. app.css gives every phone button a
-		   44px min-height; in a list row that makes three icon buttons the
-		   tallest thing on the title line and inflates every row to 92px to
-		   hold 24px of text. Here the floor comes off and the hit area becomes
-		   an invisible overlay, so the target stays thumb-sized while the row
-		   collapses to its content. Horizontal reach stops at half the gap, or
-		   adjacent buttons would swallow each other's taps. */
-		.identity-btn,
-		.iconbtn,
-		.actions :global(.grade-btn) {
-			position: relative;
+			order: 2;
+			flex-shrink: 1;
 			min-width: 0;
-			min-height: 0;
-			padding-inline: 0.55rem;
+			max-width: none;
+			height: 22px;
+			padding: 0 var(--sp-2);
 		}
-		/* Vertical only: horizontal reach comes from real padding above, so the
-		   overlay never spills outside .actions and inflates its scroll width. */
-		.identity-btn::after,
-		.iconbtn::after,
-		.actions :global(.grade-btn)::after {
-			content: '';
-			position: absolute;
+		/* --len: a shorter name keeps its own width instead of padding to 6ch. */
+		.chip-text {
+			min-width: min(6ch, var(--len, 99) * 1ch);
+			max-width: 12ch;
+		}
+		.chip.model {
+			display: none;
+		}
+		a.chip.editor::after {
 			inset: -11px 0;
 		}
+		/* Inside MenuSheet's bottom sheet: a plain column of 48px rows. */
 		.menu {
-			max-width: calc(100vw - 1.4rem);
+			position: static;
+			min-width: 0;
+			padding: 0;
+			border: none;
+			border-radius: 0;
+			background: none;
+			box-shadow: none;
 		}
-		/* Run-header use (not a list row, so the titleblock is .plain): the card
-		   renders INSIDE RunTopBar and keeps only its controls. Title, status,
-		   workspace, model and steps are either in the bar already or on
-		   Overview one tap away; repeating them cost a second 73px row. */
-		.card:has(.titleblock.plain) {
+		.menu .item {
+			flex-shrink: 0;
+			min-height: 48px;
+			gap: var(--sp-3);
+			padding: 0 var(--sp-3);
+			font-size: var(--fs-body);
+			border-radius: var(--radius-sm);
+		}
+		.menu .item > :global(svg) {
+			flex-shrink: 0;
+			width: 18px;
+			height: 18px;
+		}
+		.menu .divider {
+			flex-shrink: 0;
+			margin: var(--sp-1) var(--sp-3);
+		}
+
+		/* Run bar (inBar): the card sits in RunTopBar's trailing slot with only
+		   grade and ⋮. Title, status, workspace, model and steps are in the bar
+		   or on Overview. 44x36 boxes + 4px overlays: 44x44 hit in a 48px bar. */
+		.card.in-bar {
+			position: static;
 			border: none;
 			background: none;
 			padding: 0;
 			gap: 0;
 			flex-wrap: nowrap;
 		}
-		.card:has(.titleblock.plain) .lead,
-		.card:has(.titleblock.plain) .title-wrap,
-		.card:has(.titleblock.plain) .metastrip {
+		.card.in-bar .lead,
+		.card.in-bar .title-wrap,
+		.card.in-bar .metastrip {
 			display: none;
 		}
-		.card:has(.titleblock.plain) .actions {
+		.card.in-bar .actions {
 			order: 0;
+			height: auto;
 			margin: 0;
 			gap: 0;
+		}
+		.card.in-bar .iconbtn,
+		.card.in-bar .actions :global(.grade-btn) {
+			width: 44px;
+			height: 36px;
+		}
+		.card.in-bar .iconbtn::after,
+		.card.in-bar .actions :global(.grade-btn)::after {
+			inset: -4px 0;
+		}
+		/* Rename: field plus 44px Cancel/Save. The row's grade/⋮ step aside so
+		   the field keeps the width. */
+		.edit {
+			display: flex;
+			align-items: center;
+			gap: var(--sp-1);
+			flex: 1;
+			min-width: 0;
+		}
+		.title-edit {
+			flex: 1;
+			min-width: 0;
+			padding: 0 var(--sp-3);
+		}
+		.edit-btn {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			flex-shrink: 0;
+			width: var(--tap);
+			height: var(--tap);
+			padding: 0;
+			background: none;
+			border: none;
+			color: var(--text-dim);
+		}
+		.edit-btn.save {
+			color: var(--accent);
+		}
+		.card:has(.title-edit) {
+			align-items: center;
+		}
+		.card:not(.in-bar):has(.title-edit) .actions {
+			display: none;
+		}
+		.card:has(.title-edit) .lead {
+			height: auto;
+		}
+		/* In the run bar the editor covers the bar. */
+		.card.in-bar .title-wrap:has(.title-edit) {
+			display: flex;
+			align-items: center;
+			position: fixed;
+			inset: 0 0 auto 0;
+			z-index: 50;
+			height: var(--bar-h);
+			padding: 0 var(--sp-1) 0 var(--sp-2);
+			background: var(--bg-elev);
+			border-bottom: 1px solid var(--border);
+		}
+
+		/* The page behind an open sheet does not scroll. */
+		:global(main:has(.card.row [role='menu'])),
+		:global(.shell:has(.card.row [role='menu']) .content) {
+			overflow: hidden;
 		}
 	}
 </style>

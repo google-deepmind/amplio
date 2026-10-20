@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-// Open state of the run drawer, shared by the two components that need it: the
-// run bar owns the button, RunNav owns the drawer. A module-level rune keeps
-// them in sync without threading a bind through the layout.
-export const runMenu = $state({ open: false });
+import type { ClientInit } from '@sveltejs/kit';
+import { auth } from '$lib/auth.svelte';
+
+// Runs once before the router reads the URL and before any page mounts.
+export const init: ClientInit = () => auth.consumeURLToken();

@@ -18,30 +18,39 @@
 // cookie (set once via the magic-link exchange) or a Bearer header (CLI). Reads
 // are open, so a token-less shared URL resolves to a readonly view.
 //
-// init() runs once on app mount: if the URL carries ?token= (the link the owner
-// opened from their terminal), it POSTs it to /api/auth/login so the server sets
-// the cookie, then strips the token from the URL — after which the cookie alone
-// authorizes this browser, and a copied (token-less) URL shared with a teammate
-// lands them in readonly. `authed` drives the UI (hide write controls); the
-// server enforces it regardless.
+// consumeURLToken() runs from the client `init` hook (hooks.client.ts), before
+// the router starts: if the URL carries ?token= (the link the owner opened from
+// their terminal), it strips the token from the address bar and POSTs it to
+// /api/auth/login so the server sets the cookie. The router therefore never sees
+// the token (it cannot resurface on a later goto), and no page's first API call
+// can race the cookie. A copied (token-less) URL shared with a teammate lands
+// them in readonly. `authed` drives the UI (hide write controls); the server
+// enforces it regardless.
 class Auth {
 	authed = $state(false);
 	user = $state(''); // server owner's username, for the readonly banner
 	ready = $state(false); // false until /api/auth has answered (avoid UI flash)
 
-	async init() {
-		if (typeof window === 'undefined') return;
+	async consumeURLToken() {
 		const url = new URL(window.location.href);
 		const token = url.searchParams.get('token');
-		if (token) {
-			try {
-				await fetch(`/api/auth/login?token=${encodeURIComponent(token)}`, { method: 'POST' });
-			} catch {
-				// network error — fall through; we'll just resolve to readonly
-			}
-			url.searchParams.delete('token');
-			history.replaceState({}, '', url.toString());
+		if (!token) return;
+		url.searchParams.delete('token');
+		// The router has not started, so nothing to conflict with; the prototype
+		// call skips SvelteKit's dev-only warning wrapper on history.replaceState.
+		History.prototype.replaceState.call(history, history.state, '', url);
+		try {
+			await fetch(`/api/auth/login?token=${encodeURIComponent(token)}`, {
+				method: 'POST',
+				signal: AbortSignal.timeout(3000),
+			});
+		} catch {
+			// network error or timeout — start anyway; we'll resolve to readonly
 		}
+	}
+
+	async init() {
+		if (typeof window === 'undefined') return;
 		await this.refresh();
 	}
 

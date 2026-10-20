@@ -26,6 +26,8 @@
 	import { getRunStore } from '$lib/runContext.svelte';
 	import { LogViewStore, setLogView, logHref, rememberSession } from '$lib/logView.svelte';
 	import SessionTree from '$lib/components/SessionTree.svelte';
+	import { CaretDownIcon } from 'phosphor-svelte';
+	import { viewport } from '$lib/viewport.svelte';
 	import { pageTitle } from '$lib/title';
 	import type { SessionDTO } from '$lib/types';
 
@@ -62,6 +64,25 @@
 	// session means nothing in another (the store then falls back to "newest").
 	const sessionHref = (s: SessionDTO) => logHref(runId, s.session_id, log.mode);
 
+	// Phone only (on desktop both lists scroll in place): past a handful of
+	// entries the session tree collapses to the open session, and the phase index
+	// to the selected phase and its neighbours. Picking an entry collapses again.
+	const sessionsCollapsible = $derived(viewport.isPhone && sessions.length > 4);
+	let showAllSessions = $state(false);
+	$effect(() => {
+		void sid;
+		showAllSessions = false;
+	});
+	const phasesCollapsible = $derived(viewport.isPhone && log.groups.length > 5);
+	let showAllPhases = $state(false);
+	const selectedKey = $derived(log.selected?.key);
+	const selectedIdx = $derived(log.groups.findIndex((g) => g.key === selectedKey));
+	$effect(() => {
+		void sid;
+		void selectedKey;
+		showAllPhases = false;
+	});
+
 	const runLabel = $derived(runStore.detail?.title || runStore.detail?.task || runId);
 	const modeLabel = $derived(log.mode === 'chat' ? 'chat log' : 'trajectory');
 </script>
@@ -86,11 +107,22 @@
 	<!-- Selector: the same session tree as the Overview, at picker density. Height
 	     is capped so a run with many sub-agents scrolls here instead of pushing
 	     the content out of view. -->
-	<div class="selector">
+	<div class="selector" class:collapsed={sessionsCollapsible && !showAllSessions}>
 		{#if sessions.length}
 			<SessionTree {runId} {sessions} variant="selector" selectedId={sid} hrefFor={sessionHref} />
 		{:else}
 			<p class="dim small nopad">Loading sessions…</p>
+		{/if}
+		{#if sessionsCollapsible}
+			<button
+				type="button"
+				class="more"
+				aria-expanded={showAllSessions}
+				onclick={() => (showAllSessions = !showAllSessions)}
+			>
+				{showAllSessions ? 'Only this session' : `All ${sessions.length} sessions`}
+				<CaretDownIcon size={12} weight="bold" />
+			</button>
 		{/if}
 	</div>
 
@@ -99,12 +131,17 @@
 	<div class="lv-body">
 		<!-- Phase index: the selectable step ranges. One column, always the same
 		     entries in both modes — only the right pane's renderer differs. -->
-		<aside class="groups">
+		<aside class="groups" class:collapsed={phasesCollapsible && !showAllPhases}>
 			{#if !log.traj}
 				<p class="dim small">Loading…</p>
 			{:else}
-				{#each log.groups as g (g.key)}
-					<a class="group" class:on={g.key === log.selected?.key} href={log.hrefFor(g)}>
+				{#each log.groups as g, i (g.key)}
+					<a
+						class="group"
+						class:on={g.key === selectedKey}
+						class:near={Math.abs(i - selectedIdx) <= 1}
+						href={log.hrefFor(g)}
+					>
 						<span class="grange mono dim">
 							{g.kind === 'bootstrap' ? 'step 0' : `steps ${g.start}–${g.end}`}
 						</span>
@@ -112,6 +149,17 @@
 						{#if g.summary}<span class="gsum dim small">{g.summary}</span>{/if}
 					</a>
 				{/each}
+				{#if phasesCollapsible}
+					<button
+						type="button"
+						class="more"
+						aria-expanded={showAllPhases}
+						onclick={() => (showAllPhases = !showAllPhases)}
+					>
+						{showAllPhases ? 'Fewer phases' : `All ${log.groups.length} phases`}
+						<CaretDownIcon size={12} weight="bold" />
+					</button>
+				{/if}
 			{/if}
 		</aside>
 		<div class="pane">{@render children()}</div>
@@ -235,5 +283,105 @@
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
+	}
+
+	/* Phone: one column in normal flow. The run shell's .content is the only
+	   scroller, so the tabs, the session tree and the phase index scroll away
+	   with the trajectory instead of nesting capped scrollers inside it. */
+	@media (max-width: 640px) {
+		.logview {
+			flex: none;
+			gap: var(--sp-2);
+		}
+		.lv-head {
+			min-height: var(--tap);
+		}
+		.mode {
+			position: relative;
+			display: inline-flex;
+			align-items: center;
+			height: 30px;
+			padding: 0 var(--sp-3);
+		}
+		.mode::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
+		.selector {
+			max-height: none;
+			overflow: visible;
+			padding-bottom: var(--sp-2);
+		}
+		/* A deep tree would push the trajectory a screen down: show the open
+		   session and let "All N sessions" expand the rest in place. */
+		.selector.collapsed :global(.sess:not(.selected)) {
+			display: none;
+		}
+		.selector.collapsed :global(.child) {
+			margin: 0;
+			padding: 0;
+			border: 0;
+		}
+		.more {
+			display: inline-flex;
+			align-items: center;
+			gap: var(--sp-1);
+			position: relative;
+			height: 30px;
+			min-height: 0;
+			margin-top: var(--sp-1);
+			padding: 0 var(--sp-3);
+			border: 0;
+			background: none;
+			color: var(--text-dim);
+			font-size: var(--fs-sm);
+		}
+		.more[aria-expanded='true'] > :global(svg) {
+			transform: rotate(180deg);
+		}
+		.more::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
+		.lv-body {
+			flex: none;
+			flex-direction: column;
+			gap: var(--sp-3);
+		}
+		.groups {
+			flex: none;
+			overflow: visible;
+			gap: 0;
+			padding: 0 0 var(--sp-2);
+			border-bottom: 1px solid var(--border);
+		}
+		/* One-line rows; the selected phase's summary is the pane's first block. */
+		.group {
+			flex-direction: row;
+			align-items: center;
+			gap: var(--sp-2);
+			height: var(--row-h);
+			padding: 0 var(--sp-3);
+		}
+		.grange {
+			flex-shrink: 0;
+		}
+		.gtitle {
+			min-width: 0;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.gsum {
+			display: none;
+		}
+		.groups.collapsed .group:not(.near) {
+			display: none;
+		}
+		.groups .more {
+			align-self: flex-start;
+		}
 	}
 </style>

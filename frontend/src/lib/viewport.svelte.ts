@@ -49,7 +49,7 @@ const tablet = query(
 );
 
 export const viewport = {
-	/** Phone-sized: bottom tab bar, single column, no side panels. */
+	/** Phone-sized: run drawer, single column, no side panels. */
 	get isPhone() {
 		return phone.current;
 	},

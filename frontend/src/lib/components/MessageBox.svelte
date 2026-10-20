@@ -17,10 +17,11 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { PaperPlaneTiltIcon } from 'phosphor-svelte';
+	import { viewport } from '$lib/viewport.svelte';
 
 	let {
 		onSend,
-		placeholder = 'Send a message — Enter to send, Shift+Enter for newline',
+		placeholder = 'Send a message',
 		draftKey,
 		element = $bindable()
 	}: {
@@ -29,6 +30,11 @@
 		draftKey?: string; // when set, persist the unsent draft in localStorage
 		element?: HTMLTextAreaElement; // bound out so callers can focus the input
 	} = $props();
+
+	// A soft keyboard has no Shift, so on phone Return is a newline and only the
+	// button sends; the shortcut hint is only true where Enter sends.
+	const enterSends = $derived(!viewport.isPhone);
+	const hint = $derived(enterSends ? `${placeholder} — Enter to send, Shift+Enter for newline` : placeholder);
 
 	let content = $state('');
 	let busy = $state(false);
@@ -78,7 +84,7 @@
 
 	function onKey(e: KeyboardEvent) {
 		// Enter sends; Shift+Enter is a newline. IME-safe.
-		if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+		if (enterSends && e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
 			e.preventDefault();
 			void send();
 		}
@@ -96,13 +102,15 @@
 		class="input"
 		bind:this={element}
 		bind:value={content}
-		{placeholder}
+		placeholder={hint}
+		enterkeyhint={enterSends ? 'send' : 'enter'}
 		rows="1"
 		oninput={onInput}
 		onkeydown={onKey}
 	></textarea>
-	<button class="primary send" disabled={busy || !content.trim()}>
-		Send
+	<button class="primary send" aria-label="Send" disabled={busy || !content.trim()}>
+		<!-- Wrapped so the phone rule below can drop the word and keep the glyph. -->
+		<span class="send-label">Send</span>
 		<PaperPlaneTiltIcon size={14} weight="fill" />
 	</button>
 </form>
@@ -124,5 +132,22 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
+	}
+
+	@media (max-width: 640px) {
+		/* Keep the transcript in view while a long draft grows (keyboard open). */
+		.input {
+			max-height: min(200px, 30dvh);
+		}
+		/* The word cost 45px of a 390px row; the paper plane is the same button. */
+		.send-label {
+			display: none;
+		}
+		.send {
+			min-width: var(--tap);
+			justify-content: center;
+			padding-inline: 0;
+			gap: 0;
+		}
 	}
 </style>

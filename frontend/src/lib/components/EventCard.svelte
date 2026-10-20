@@ -154,7 +154,7 @@
 		margin-top: 0.4rem;
 	}
 	.att-img img {
-		max-width: 16rem;
+		max-width: min(16rem, 100%);
 		max-height: 16rem;
 		border: 1px solid var(--border);
 		border-radius: var(--radius-sm);
@@ -191,5 +191,19 @@
 	}
 	summary:hover .caret {
 		color: var(--text);
+	}
+
+	@media (max-width: 640px) {
+		.evt {
+			padding: var(--sp-2) var(--sp-3);
+		}
+		summary {
+			position: relative;
+		}
+		summary::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
 	}
 </style>

@@ -15,27 +15,20 @@
 -->
 
 <script lang="ts">
-	import {
-		RowsIcon,
-		PulseIcon,
-		BellIcon,
-		BookOpenIcon,
-		EyeIcon,
-		InfoIcon,
-		ListIcon,
-		XIcon
-	} from 'phosphor-svelte';
-	import { fly } from 'svelte/transition';
+	import { EyeIcon } from 'phosphor-svelte';
 	import { page } from '$app/state';
 	import { runsStore } from '$lib/runsStore.svelte';
 	import { updates } from '$lib/updates.svelte';
 	import { auth } from '$lib/auth.svelte';
 	import { sysstat } from '$lib/sysstat.svelte';
 	import { viewport } from '$lib/viewport.svelte';
+	import { globalDestinations, isRunPath } from '$lib/route';
 	import { GcertChip, INTERNAL } from './internal';
 	import CpuChip from './CpuChip.svelte';
 	import MemChip from './MemChip.svelte';
 	import SwapChip from './SwapChip.svelte';
+	import Drawer from './Drawer.svelte';
+	import MenuButton from './MenuButton.svelte';
 
 	// Global, app-wide banner. Holds branding + global navigation on the left
 	// (three discoverable filter targets), and the global status cluster on
@@ -44,28 +37,11 @@
 	//
 	// Nav items are stable (always present) so layout never shifts as runs
 	// come and go; only the (N) suffix appears/disappears with the count.
-
-	// The row holds the brand OR the nav, not both. Chips stay (they are the
-	// reason to glance here); the nav entries move into a drawer.
-	const activeCount = $derived(runsStore.activeCount);
-	const unreadCount = $derived(updates.count);
-	// Inside a run on a phone the run shell shows its own compact bar (back,
-	// title, status), so this one would be 57px of duplicate chrome.
-	const inRun = $derived(page.url.pathname.startsWith('/runs/'));
-	let drawerOpen = $state(false);
-	// Phone-only; drop it on the way out so rotating back doesn't restore it.
-	$effect(() => {
-		if (!viewport.isPhone) drawerOpen = false;
-	});
-	// Wired only while open, so desktop carries no extra global key listener.
-	$effect(() => {
-		if (!drawerOpen) return;
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === 'Escape') drawerOpen = false;
-		};
-		window.addEventListener('keydown', onKey);
-		return () => window.removeEventListener('keydown', onKey);
-	});
+	// On a phone the row holds the brand and the chips; the nav is in the drawer.
+	const destinations = $derived(globalDestinations(runsStore.activeCount, updates.count));
+	// Inside a run on a phone the run shell shows its own compact bar (menu,
+	// title, status) and drawer, so this bar and its drawer stay out.
+	const inRun = $derived(isRunPath(page.url.pathname));
 </script>
 
 <header class="bar" class:hide-on-phone={inRun}>
@@ -74,63 +50,21 @@
 	     brand + status chips stay aligned with the content column instead of
 	     drifting to the screen corners; on narrower screens both layers
 	     collapse to the same width so the seam is invisible. -->
-	<!-- One definition of the nav entries, rendered either inline (desktop) or
-	     inside the phone drawer. Two copies would drift the moment someone adds
-	     a destination. -->
+	<!-- The entries come from $lib/route, which the phone drawer reads too. -->
 	{#snippet navItems()}
-		<a href="/" class="nav-item" onclick={() => (drawerOpen = false)}>
-			<RowsIcon size={14} weight="bold" />
-			<span>All Runs</span>
-		</a>
-		<a
-			href="/?filter=active"
-			class="nav-item"
-			title="{activeCount} run(s) not yet terminal"
-			onclick={() => (drawerOpen = false)}
-		>
-			<PulseIcon size={14} weight="bold" />
-			<span>Active Runs</span>
-			{#if activeCount > 0}
-				<span class="count count-active">({activeCount})</span>
-			{/if}
-		</a>
-		<a
-			href="/?filter=updates"
-			class="nav-item"
-			title="{unreadCount} run(s) with unseen updates"
-			onclick={() => (drawerOpen = false)}
-		>
-			<BellIcon size={14} weight="bold" />
-			<span>Recent Updates</span>
-			{#if unreadCount > 0}
-				<span class="count count-unread">({unreadCount})</span>
-			{/if}
-		</a>
-		<a href="/recall" class="nav-item" onclick={() => (drawerOpen = false)}>
-			<BookOpenIcon size={14} weight="bold" />
-			<span>Recall</span>
-		</a>
-		<a href="/about" class="nav-item" onclick={() => (drawerOpen = false)}>
-			<InfoIcon size={14} weight="bold" />
-			<span>About</span>
-		</a>
+		{#each destinations as d (d.href)}
+			<a href={d.href} class="nav-item" title={d.title}>
+				<d.icon size={14} weight="bold" />
+				<span>{d.label}</span>
+				{#if d.count}
+					<span class="count count-{d.tone}">({d.count})</span>
+				{/if}
+			</a>
+		{/each}
 	{/snippet}
 	<div class="inner">
 		<div class="left">
-			{#if viewport.isPhone}
-				<button
-					class="menu-toggle"
-					aria-label={drawerOpen ? 'Close menu' : 'Open menu'}
-					aria-expanded={drawerOpen}
-					onclick={() => (drawerOpen = !drawerOpen)}
-				>
-					{#if drawerOpen}
-						<XIcon size={20} weight="bold" />
-					{:else}
-						<ListIcon size={20} weight="bold" />
-					{/if}
-				</button>
-			{/if}
+			{#if viewport.isPhone && !inRun}<MenuButton />{/if}
 			<a href="/" class="brand">amplio</a>
 			{#if !viewport.isPhone}
 				<nav class="nav">{@render navItems()}</nav>
@@ -157,14 +91,8 @@
 			{/if}
 		</div>
 	</div>
-	{#if viewport.isPhone && drawerOpen}
-		<!-- Both live INSIDE the sticky bar so they hang off its bottom edge
-		     whatever height it happens to be, and inherit its stacking context (no
-		     second z-index scale to keep straight against the run views). -->
-		<button class="scrim" aria-label="Close menu" onclick={() => (drawerOpen = false)}></button>
-		<nav class="drawer" transition:fly={{ y: -8, duration: 150 }}>{@render navItems()}</nav>
-	{/if}
 </header>
+{#if viewport.isPhone && !inRun}<Drawer />{/if}
 
 <style>
 	.bar {
@@ -254,68 +182,35 @@
 		color: var(--accent);
 	}
 
-	/* Phone additions. The desktop rules above are untouched; everything here is
-	   either a phone-only element (.menu-toggle, .drawer, .scrim) or lives in the
-	   media query below. */
-	.menu-toggle {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-width: 44px;
-		padding: 0 0.5rem;
-		color: var(--text-dim);
-		background: none;
-		border: none;
-	}
-	.scrim {
-		position: absolute;
-		inset: 100% 0 auto 0;
-		height: 100dvh;
-		background: color-mix(in srgb, var(--bg) 65%, transparent);
-		border: none;
-		border-radius: 0;
-		padding: 0;
-	}
-	.drawer {
-		position: absolute;
-		inset: 100% 0 auto 0;
-		display: flex;
-		flex-direction: column;
-		background: var(--bg-elev);
-		border-bottom: 1px solid var(--border);
-		padding: 0.3rem 0;
-	}
-	.drawer .nav-item {
-		/* Full-width rows, not the inline chips of the desktop nav: a drawer entry
-		   is a tap target, so the whole line is hit area. */
-		gap: 0.6rem;
-		min-height: 44px;
-		padding: 0 clamp(1.2rem, 3vw, 2.5rem);
-		color: var(--text);
-	}
-
 	@media (max-width: 640px) {
+		.bar {
+			height: var(--bar-h);
+		}
 		.bar.hide-on-phone {
 			display: none;
 		}
+		/* ☰ and title land where the run bar puts them (spec §2.2). */
 		.inner {
-			/* Tighter gutter than the desktop clamp, and a smaller gap: the status
-			   chips need every pixel to stay on one line at 360px. */
-			gap: 0.5rem;
-			padding: 0.4rem 0.6rem;
+			height: 100%;
+			gap: var(--sp-2);
+			padding: 0 var(--sp-2) 0 var(--sp-1);
 		}
 		.left {
-			gap: 0.4rem;
+			gap: var(--sp-1);
 			/* Rigid: squeezed to 100px against 113px of content, the wordmark spilled
 			   into the first chip. The chips are the scrollable half, not this. */
 			flex: 0 0 auto;
 		}
 		.brand {
+			display: inline-flex;
+			align-items: center;
+			height: var(--tap);
 			font-size: var(--fs-lg);
+			font-weight: 600;
 			flex-shrink: 0;
 		}
 		.right {
-			gap: 0.3rem;
+			gap: var(--sp-1);
 			flex: 1 1 0;
 			justify-content: flex-end;
 			min-width: 0;

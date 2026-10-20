@@ -26,7 +26,9 @@
 	// bar, the composer — stays with the caller, as does ownership of `preview`
 	// and `optimistic` (the live page produces them; the log viewer passes none).
 	import { tick } from 'svelte';
+	import { beforeNavigate, pushState } from '$app/navigation';
 	import { api } from '$lib/api';
+	import { viewport } from '$lib/viewport.svelte';
 	import type { ChatBubble, ChatToolCall, AgentEvent, Refusal, StopNotice } from '$lib/types';
 	import CopyButton from './CopyButton.svelte';
 	import ChatNavigator from './ChatNavigator.svelte';
@@ -184,7 +186,20 @@
 		else if (!toolDetail && toolDialog.open) toolDialog.close();
 	});
 
-	async function openToolDetail(step: number, callId: string, name: string, errored: boolean) {
+	// Focus goes back to the pill on close; a tap does not focus a button on
+	// every browser, so the dialog's own restore can land on <body>.
+	let toolOpener: HTMLElement | null = null;
+	// On phone the sheet owns a shallow history entry, so the system Back closes
+	// it instead of leaving the page (as the nav drawer does). x / Escape /
+	// backdrop pop the entry again, so the next Back is a normal one.
+	let toolEntry = false;
+
+	async function openToolDetail(step: number, callId: string, name: string, errored: boolean, opener: HTMLElement) {
+		toolOpener = opener;
+		if (viewport.isPhone && !toolEntry) {
+			pushState('', {});
+			toolEntry = true;
+		}
 		toolDetail = { name, args: '', isError: errored, attachments: [] };
 		toolDetailLoading = true;
 		toolDetailErr = '';
@@ -211,8 +226,27 @@
 	}
 
 	function closeToolDetail() {
+		if (toolEntry) {
+			toolEntry = false;
+			history.back();
+		}
+		if (!toolDetail) return;
 		toolDetail = null;
+		toolOpener?.focus({ preventScroll: true });
+		toolOpener = null;
 	}
+
+	function onPopState() {
+		if (!toolEntry) return;
+		toolEntry = false; // Back already popped it
+		closeToolDetail();
+	}
+	beforeNavigate((nav) => {
+		if (nav.type !== 'popstate' && toolEntry) {
+			toolEntry = false;
+			closeToolDetail();
+		}
+	});
 
 	// Full local timestamp with timezone, e.g. "2026-06-05 22:24:44 PDT".
 	function formatTime(t: string | number): string {
@@ -296,7 +330,7 @@
 									class="pill done"
 									class:error={tc.errored}
 									title="Show tool call detail"
-									onclick={() => openToolDetail(step, tc.id, tc.name, tc.errored ?? false)}
+									onclick={(e) => openToolDetail(step, tc.id, tc.name, tc.errored ?? false, e.currentTarget)}
 								>
 									<Icon size={12} />
 									{tc.verb || tc.name}{#if tc.detail}<span class="pill-detail">{tc.detail}</span>{/if}
@@ -438,6 +472,7 @@
      ambient/artifacts aside. Native <dialog> gives ESC-to-close, a focus trap,
      and a styleable ::backdrop; a click on the dialog itself (the backdrop)
      dismisses. onclose clears toolDetail, which the $effect above syncs from. -->
+<svelte:window onpopstate={onPopState} />
 <dialog
 	bind:this={toolDialog}
 	onclose={closeToolDetail}
@@ -812,5 +847,153 @@
 	}
 	.modal-x:hover {
 		color: var(--text);
+	}
+
+	@media (max-width: 640px) {
+		.bubble {
+			max-width: 92%; /* 80% left an operator message 242px of text at 390 */
+			font-size: var(--fs-body);
+		}
+		/* The page gutter is the prose edge; the desktop 0.2rem inset put it 3px in. */
+		.asst-inline {
+			padding-inline: 0;
+		}
+		.rw-box.rwbubble {
+			margin: 0;
+		}
+		.sep {
+			margin-left: 0;
+		}
+
+		/* Copy: no hover on touch, so it is always shown, 28px, at the end of the
+		   timestamp line (bubbles) or of the block (assistant), with a 44px overlay. */
+		.bubble-copy,
+		.asst-copy {
+			display: flex;
+			opacity: 1;
+			padding: 0;
+			top: auto;
+			/* keeps the overlay inside the message box */
+			right: calc((var(--tap) - 28px) / 2);
+			bottom: 0;
+		}
+		.bubble-copy :global(.copy),
+		.asst-copy :global(.copy) {
+			position: relative;
+			width: 28px;
+			height: 28px;
+			min-height: 0;
+			justify-content: center;
+		}
+		.bubble-copy :global(.copy svg),
+		.asst-copy :global(.copy svg) {
+			width: 16px;
+			height: 16px;
+		}
+		.bubble-copy :global(.copy)::after,
+		.asst-copy :global(.copy)::after {
+			content: '';
+			position: absolute;
+			inset: calc((28px - var(--tap)) / 2);
+		}
+		.bubble-copy {
+			bottom: var(--sp-1); /* centred on the timestamp line */
+		}
+		.bubble:has(> .bubble-copy) > .time {
+			padding-right: 28px;
+		}
+		/* Assistant: the copy shares the pill row when there is one; otherwise it
+		   gets its own 28px line, which the end-of-turn timestamp moves up into
+		   (hosts stack the transcript with a --sp-2 gap). */
+		.asst-inline:has(> .asst-copy) > .tools {
+			padding-right: var(--tap);
+		}
+		.asst-inline:has(> .asst-copy):not(:has(> .tools)) {
+			padding-bottom: 28px;
+		}
+		.asst-inline:has(> .asst-copy):not(:has(> .tools)) + .sep {
+			margin-top: calc(-28px - var(--sp-2));
+			min-height: 28px;
+			display: flex;
+			align-items: center;
+		}
+
+		/* Tool pills and folds: 28px visible, 44px by overlay. 16px between pill
+		   rows keeps neighbouring overlays from overlapping. */
+		.tools {
+			gap: var(--sp-4) var(--sp-2);
+			margin-top: var(--sp-2);
+		}
+		.pill {
+			position: relative;
+			min-height: 28px;
+		}
+		.compaction-head,
+		.ihead a {
+			position: relative;
+		}
+		.pill::after,
+		.compaction-head::after,
+		.ihead a::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
+
+		/* Tool detail: a bottom sheet (spec 2.2) with one scroller, the sheet itself. */
+		.tool-modal {
+			width: 100%;
+			max-width: 100%;
+			max-height: 88dvh;
+			margin: auto 0 0;
+			border-bottom: 0;
+			border-radius: var(--sheet-radius) var(--sheet-radius) 0 0;
+			overscroll-behavior: contain;
+		}
+		.tool-modal-inner {
+			padding: 0 var(--gutter) var(--sp-4);
+		}
+		.modal-head {
+			position: sticky;
+			top: 0;
+			z-index: 1;
+			min-height: var(--bar-h);
+			margin: 0 0 var(--sp-2);
+			background: var(--bg-elev);
+			font-size: var(--fs-md);
+		}
+		.modal-head::before {
+			content: '';
+			position: absolute;
+			top: 6px;
+			left: 50%;
+			width: 32px;
+			height: 4px;
+			margin-left: -16px;
+			border-radius: 2px;
+			background: var(--border);
+		}
+		.modal-x {
+			width: var(--tap);
+			height: var(--tap);
+			margin-right: calc(-1 * var(--sp-3));
+			padding: 0;
+		}
+		.modal-x:focus-visible {
+			outline: 2px solid var(--accent-dim);
+			outline-offset: -6px;
+			border-radius: var(--radius-md);
+		}
+		/* The sheet already scrolls; a capped scroller inside it would eat the drag. */
+		.tool-modal :global(.tc .block),
+		.tool-modal :global(.tc .args) {
+			max-height: none;
+		}
+		.tool-modal :global(.tc) {
+			padding: var(--sp-2);
+		}
+		.tool-modal :global(.tc .block) {
+			padding: var(--sp-1) var(--sp-2);
+		}
 	}
 </style>

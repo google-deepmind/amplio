@@ -23,7 +23,6 @@
 	import RunHeader from '$lib/components/RunHeader.svelte';
 	import RunTopBar from '$lib/components/RunTopBar.svelte';
 	import { viewport } from '$lib/viewport.svelte';
-	import { swipeMenu } from '$lib/swipeMenu';
 
 	let { children } = $props();
 	const runId = $derived(page.params.id ?? '');
@@ -36,10 +35,11 @@
 		store.switchTo(runId); // re-points (and re-subscribes) when the [id] changes
 	});
 	$effect(() => () => store.destroy());
-	// The run's own status for the phone bar: the root session is the one
-	// without a parent (the spine), matching how the dashboard reports it.
+	// The run's status for the phone bar: the server's root_session_id, the
+	// same session the dashboard and RunHeader report.
 	const rootStatus = $derived(
-		store.detail?.sessions?.find((x) => !x.parent_id)?.status ?? ''
+		store.detail?.sessions?.find((x) => x.session_id === store.detail?.root_session_id)
+			?.status ?? ''
 	);
 
 	// Seen-state integration (server-authoritative), driven by detail.has_updates
@@ -77,7 +77,7 @@
 	});
 </script>
 
-<div class="shell" use:swipeMenu>
+<div class="shell">
 	<RunNav {runId} sessions={store.detail?.sessions ?? []} />
 	<div class="main">
 		{#if viewport.isPhone}
@@ -98,16 +98,6 @@
 </div>
 
 <style>
-	/* No fixed bottom chrome in a run (the nav is a drawer now), so the gutter
-	   app.css reserves for the dashboard's tabs is dead space here. It has to
-	   be cancelled on <main> itself: that is where the padding is applied, and
-	   it is this shell's ANCESTOR, so a variable set here would never reach it. */
-	@media (max-width: 640px) {
-		:global(main:has(.shell)) {
-			padding-bottom: 0.4rem;
-		}
-	}
-
 	/* App-shell: the run nav + header stay put; .content is the scroll pane, so
 	   sub-views (overview/trajectory/chat) scroll within a persistent frame. */
 	.shell {
@@ -131,5 +121,17 @@
 		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
+	}
+
+	@media (max-width: 640px) {
+		.main {
+			gap: 0;
+		}
+		.content {
+			padding: var(--sp-3) var(--gutter) var(--sp-4);
+		}
+		.err {
+			margin: var(--sp-3) var(--gutter) 0;
+		}
 	}
 </style>

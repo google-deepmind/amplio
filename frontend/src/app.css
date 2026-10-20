@@ -27,20 +27,14 @@
 	--gauge-critical: #ff6b6b;
 	--mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 
-	/* Type scale (rem, relative to the 14px root). Rendered markdown (.md) keeps
-	   its own em-based sizes so it scales with its container. */
+	/* Type scale. rem is the 16px html default (only body is 14px), so 0.78rem
+	   is 12.48px. Rendered markdown (.md) keeps its own em-based sizes so it
+	   scales with its container. */
 	--fs-xs: 0.7rem;
 	--fs-sm: 0.78rem;
 	--fs-md: 0.85rem;
 	--fs-lg: 1rem;
 	--fs-xl: 1.1rem;
-
-	/* Footprint of the fixed phone chrome: the RunNav tab bar plus the
-	   home-indicator inset. Zero on wider screens, where the nav is in flow.
-	   Declared here, not in
-	   RunNav, because the layout has to reserve the space and the sheet has to
-	   stack on top of it — three places that must agree on one number. */
-	--bottom-nav-h: 0px;
 
 	/* Corner radii. --radius-pill for fully-rounded chips/badges. */
 	--radius-xs: 4px;
@@ -52,12 +46,43 @@
 	color-scheme: dark;
 }
 
-/* Phone. In sync with PHONE_MAX in $lib/viewport.svelte.ts. */
+/* Phone. In sync with PHONE_MAX in $lib/viewport.svelte.ts. Global phone
+   behaviour that must beat the base rules sits in the block at the end. */
 @media (max-width: 640px) {
 	:root {
-		/* Reserved for the dashboard's bottom tabs. Run views have no bottom
-		   chrome any more (their nav is a drawer), and override this to 0. */
-		--bottom-nav-h: calc(3.5rem + 1px + env(safe-area-inset-bottom, 0px));
+		/* 4px grid */
+		--sp-1: 4px;
+		--sp-2: 8px;
+		--sp-3: 12px;
+		--sp-4: 16px;
+		--sp-5: 24px;
+		--sp-6: 32px;
+
+		--gutter: 16px; /* the one page margin; no component adds its own */
+		--card-pad-y: 12px;
+		--card-pad-x: 12px;
+		--stack-gap: 8px;
+		--section-gap: 24px;
+		--bar-h: 48px;
+		--tap: 44px;
+		--row-h: 44px;
+
+		/* px, not rem: these are the rendered sizes */
+		--fs-xs: 12px;
+		--fs-sm: 13px;
+		--fs-md: 14px;
+		--fs-body: 15px;
+		--fs-input: 16px; /* below 16px iOS zooms on focus and stays zoomed */
+		--fs-lg: 17px;
+		--fs-xl: 20px;
+
+		--press: color-mix(in srgb, var(--text) 10%, transparent);
+		--scrim: rgb(0 0 0 / 0.55);
+		--sheet-radius: 12px;
+		--drawer-w: min(304px, calc(100vw - 56px));
+		/* Phone only: RunCard and GradePicker use --radius, which desktop never
+		   defined; defining it there would round the desktop menus. */
+		--radius: var(--radius-md);
 	}
 
 	/* 44px is where both vendors' touch guidelines land; desktop controls are
@@ -77,6 +102,11 @@
 		min-height: 44px;
 	}
 }
+@media (max-width: 375px) {
+	:root {
+		--gutter: 12px;
+	}
+}
 
 * {
 	box-sizing: border-box;
@@ -91,7 +121,7 @@ body {
 	   app-shell (header/nav fixed, content scrolls internally) and the dashboard
 	   scrolls inside <main>. Without a fixed height nothing bounds the content
 	   and the whole page scrolls, dragging the chrome out of view. */
-	height: 100dvh;
+	height: var(--app-h, 100dvh); /* --app-h: visual-viewport height while a keyboard is open */
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;
@@ -173,6 +203,17 @@ textarea {
 }
 .mono {
 	font-family: var(--mono);
+}
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
 }
 .pre {
 	white-space: pre-wrap;
@@ -429,5 +470,102 @@ textarea {
 @keyframes spin {
 	to {
 		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* Phone, after every base rule it overrides. */
+@media (max-width: 640px) {
+	html {
+		-webkit-text-size-adjust: 100%;
+		text-size-adjust: 100%;
+		-webkit-tap-highlight-color: transparent;
+	}
+	button,
+	a,
+	summary,
+	select,
+	label,
+	[role='button'],
+	[role='tab'] {
+		touch-action: manipulation;
+	}
+	/* Pressed state: an overlay, so it shows on any fill (gold .primary too).
+	   The artifact pill draws its glyph with background-image. */
+	button:not(:disabled):not(.artifact-pill):active,
+	a:active,
+	summary:active,
+	[role='button']:active,
+	[role='tab']:active {
+		background-image: linear-gradient(var(--press), var(--press));
+	}
+	/* Touch browsers emulate :hover on tap; keep it from sticking. */
+	@media (hover: none) {
+		button:hover:not(:disabled) {
+			border-color: var(--border);
+		}
+		button.danger:hover {
+			border-color: color-mix(in srgb, var(--err) 45%, var(--border));
+		}
+		button.primary:hover:not(:disabled) {
+			border-color: var(--accent);
+		}
+		a:hover {
+			text-decoration: none;
+		}
+	}
+	/* !important: a floor, not a style; scoped field rules (.filters .search)
+	   outrank any plain global selector. */
+	input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='file'], [type='submit'], [type='button'], [type='reset'], [type='image']),
+	textarea,
+	select {
+		font-size: var(--fs-input) !important;
+		/* A field scrolled into view above the keyboard keeps a gap. */
+		scroll-margin-block: var(--sp-3);
+	}
+	input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='file'], [type='submit'], [type='button'], [type='reset'], [type='image']):focus-visible,
+	textarea:focus-visible,
+	select:focus-visible {
+		outline: none;
+		border-color: var(--accent-dim);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+	}
+	.card {
+		padding: var(--card-pad-y) var(--card-pad-x);
+	}
+	.md {
+		font-size: var(--fs-body);
+		line-height: 1.55;
+	}
+	.md pre {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+	/* Words stay whole; a table that still can't fit scrolls (.md table). */
+	.md th,
+	.md td {
+		padding: 0.25rem;
+		overflow-wrap: break-word;
+	}
+	.md td code {
+		overflow-wrap: anywhere;
+	}
+	/* em-sized code landed between steps of the type scale (12.1-13.8px). */
+	.md code,
+	.md pre {
+		font-size: var(--fs-sm);
+	}
+	.md td code {
+		font-size: var(--fs-xs);
 	}
 }

@@ -194,11 +194,8 @@
 
 	// Fit inside the scrollport instead of scrolling: a navigator you have to
 	// navigate is a failed navigator.
-	const pitch = $derived(
-		segments.length
-			? Math.max(MIN_PITCH, Math.min(MAX_PITCH, (viewportH - RAIL_PAD) / segments.length))
-			: MAX_PITCH
-	);
+	const fit = $derived(segments.length ? (viewportH - RAIL_PAD) / segments.length : MAX_PITCH);
+	const pitch = $derived(Math.max(MIN_PITCH, Math.min(MAX_PITCH, fit)));
 
 	function jump(eid: string) {
 		nodeFor(eid)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -336,6 +333,7 @@
 			class="rail"
 			bind:this={railEl}
 			style:--pitch="{pitch}px"
+			style:--fit="{fit}px"
 			onmouseenter={cacheCentres}
 			onmousemove={onRailMove}
 			onmouseleave={(e) => scheduleClose(e)}
@@ -604,5 +602,26 @@
 	}
 	.row.muted:hover {
 		background: none;
+	}
+
+	@media (max-width: 640px) {
+		/* Opt-in: the host sets --nav-phone: block once it reserves a --tap-wide
+		   lane (--nav-offset: var(--tap)); without one the rail would be off-screen
+		   or over the prose. */
+		.anchor {
+			display: var(--nav-phone, none);
+		}
+		/* Each dot is a 44x44 box filling the lane while they fit; denser rails
+		   shrink the pitch as on desktop. */
+		.dot {
+			width: var(--tap);
+			min-height: 0;
+			height: clamp(7px, var(--fit), var(--tap));
+		}
+		/* No hover on touch: a tap jumps straight to the segment (the card would
+		   open past the right edge). */
+		.card {
+			display: none;
+		}
 	}
 </style>

@@ -15,9 +15,14 @@
 -->
 
 <script lang="ts">
+	import { tick } from 'svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { api } from '$lib/api';
+	import { viewport } from '$lib/viewport.svelte';
 	import { renderMarkdown } from '$lib/markdown';
 	import { pageTitle } from '$lib/title';
+	import { CaretLeftIcon } from 'phosphor-svelte';
 	import type { RecallResults, RecallItem, LessonSummary } from '$lib/types';
 
 	let query = $state('');
@@ -27,7 +32,11 @@
 
 	let lessons = $state<LessonSummary[]>([]);
 
-	let selected = $state('');
+	// ?entry=<handle> is what's open, as ?file= is on the artifacts page: deep
+	// links work, and on phone (where the reader replaces the list) opening is a
+	// real history entry, so Back closes the reader whatever overlays came and
+	// went above it.
+	const selected = $derived(page.url.searchParams.get('entry') ?? '');
 	let item = $state<RecallItem | null>(null);
 	let loadingItem = $state(false);
 
@@ -70,8 +79,51 @@
 		}
 	}
 
-	async function select(handle: string) {
-		selected = handle;
+	const reading = $derived(viewport.isPhone && !!selected);
+	let recallEl = $state<HTMLElement>();
+	let listScroll = 0;
+	const scroller = () => recallEl?.closest('main');
+	$effect(() => {
+		const r = reading;
+		void tick().then(() => {
+			const m = scroller();
+			if (m) m.scrollTop = r ? 0 : listScroll;
+		});
+	});
+
+	// Built from location, not page.url: auth strips ?token= behind the router.
+	function entryUrl(handle: string): URL {
+		const url = new URL(location.href);
+		if (handle) url.searchParams.set('entry', handle);
+		else url.searchParams.delete('entry');
+		return url;
+	}
+	let pushed = ''; // the entry this page pushed (Back returns to the list)
+
+	function select(handle: string) {
+		if (viewport.isPhone) listScroll = scroller()?.scrollTop ?? 0;
+		// Desktop shows list and reader side by side: picking replaces the entry.
+		const push = viewport.isPhone && !selected;
+		if (push) pushed = handle;
+		void goto(entryUrl(handle), { replaceState: !push, noScroll: true, keepFocus: true });
+	}
+
+	function closeReader() {
+		if (pushed && pushed === selected) history.back();
+		else void goto(entryUrl(''), { replaceState: true, noScroll: true, keepFocus: true });
+	}
+
+	$effect(() => {
+		const handle = selected;
+		if (!handle) {
+			pushed = '';
+			item = null;
+			return;
+		}
+		void loadItem(handle);
+	});
+
+	async function loadItem(handle: string) {
 		loadingItem = true;
 		item = null;
 		try {
@@ -108,7 +160,7 @@
 <h2>Recall</h2>
 <p class="dim sub">The skill + lesson corpus agents search via recall. Type to rank like an agent; click any entry to read its full body.</p>
 
-<div class="recall">
+<div class="recall" class:reading bind:this={recallEl}>
 	<div class="left card">
 		<input
 			class="search"
@@ -160,6 +212,9 @@
 	</div>
 
 	<div class="right card">
+		{#if reading}
+			<button class="back" onclick={closeReader}><CaretLeftIcon size={16} />All entries</button>
+		{/if}
 		{#if loadingItem}
 			<p class="dim">Loading…</p>
 		{:else if item}
@@ -264,5 +319,59 @@
 		margin: 0 0 0.8rem;
 		font-style: italic;
 		color: var(--text-dim);
+	}
+
+	@media (max-width: 640px) {
+		h2 {
+			font-size: var(--fs-xl);
+		}
+		h2:has(~ .recall.reading),
+		.sub:has(~ .recall.reading) {
+			display: none;
+		}
+		/* Side by side at 390px left the list 162px wide. */
+		.recall {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.right {
+			position: static;
+		}
+		.recall:not(.reading) .right,
+		.recall.reading .left {
+			display: none;
+		}
+		.back {
+			display: inline-flex;
+			align-items: center;
+			gap: var(--sp-1);
+			margin: calc(-1 * var(--sp-3)) 0 var(--sp-1) calc(-1 * var(--sp-3));
+			padding: 0 var(--sp-3);
+			background: none;
+			border: none;
+			color: var(--accent);
+			font-size: var(--fs-md);
+		}
+		/* Rows keep a pressed/active inset, and their text still lines up with
+		   the search box and section headings. */
+		.left {
+			padding-inline: var(--sp-1);
+		}
+		.left .search {
+			width: calc(100% - 2 * var(--sp-2));
+			margin-inline: var(--sp-2);
+		}
+		.section h3,
+		.empty {
+			padding-inline: var(--sp-2);
+		}
+		.row {
+			padding: var(--sp-1) var(--sp-2);
+			justify-content: center;
+		}
+		.name {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
 	}
 </style>

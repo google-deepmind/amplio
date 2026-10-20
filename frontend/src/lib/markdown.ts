@@ -109,6 +109,24 @@ marked.use({
 // matters if a raw source ever contained the attribute — belt-and-suspenders.)
 const PURIFY_OPTS = { ADD_ATTR: ['data-artifact-path'] };
 
+// Links to other sites open in a new tab: following one in place leaves the app,
+// which on a phone (no tabs in view, no hover preview) loses the run you were
+// reading. Same-origin and relative links keep normal navigation.
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+	if (node.tagName !== 'A' || typeof location === 'undefined') return;
+	const href = node.getAttribute('href');
+	if (!href) return;
+	let url: URL;
+	try {
+		url = new URL(href, location.href); // also resolves protocol-relative //host links
+	} catch {
+		return;
+	}
+	if (!/^https?:$/.test(url.protocol) || url.origin === location.origin) return;
+	node.setAttribute('target', '_blank');
+	node.setAttribute('rel', 'noopener noreferrer');
+});
+
 // linkifyArtifactPaths rewrites `$AMPLIO_ARTIFACT_DIR/<relpath>` mentions into a
 // clickable pill. The agent is prompted to reference artifact files with this
 // exact prefix; it often wraps them in inline code (`$AMPLIO_ARTIFACT_DIR/x`).

@@ -38,8 +38,10 @@
 		ArrowSquareOutIcon,
 		ArrowsOutSimpleIcon,
 		MagnifyingGlassIcon,
-		XIcon
+		XIcon,
+		CaretLeftIcon
 	} from 'phosphor-svelte';
+	import { viewport } from '$lib/viewport.svelte';
 
 	let {
 		runId,
@@ -130,7 +132,9 @@
 		allFilesLoading = true;
 		try {
 			const res = await api.listArtifactsAll(runId);
-			allFiles = res.files;
+			// The server answers {root, files: []} for a run with no artifact dir;
+			// the fallback only guards against a malformed answer.
+			allFiles = res?.files ?? [];
 			allFilesLoaded = true;
 		} catch {
 			// Non-fatal: search just stays empty; the dir listing still works.
@@ -177,6 +181,16 @@
 	}
 
 	const crumbs = $derived(path ? path.split('/').filter(Boolean) : []);
+	// Where the crumbs scroll sideways (phone), keep the current folder in view.
+	let crumbsEl = $state<HTMLElement>();
+	let crumbsScrolled = $state(false); // leading crumbs are scrolled out of view
+	const onCrumbsScroll = () => (crumbsScrolled = (crumbsEl?.scrollLeft ?? 0) > 0);
+	$effect(() => {
+		void crumbs;
+		if (!crumbsEl) return;
+		crumbsEl.scrollLeft = crumbsEl.scrollWidth;
+		onCrumbsScroll();
+	});
 	// reloadTick cache-busts the raw URL on an explicit preview refresh (so an
 	// updated file / image re-fetches instead of serving the browser cache).
 	let reloadTick = $state(0);
@@ -583,7 +597,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="files" class:compact tabindex="-1" role="group" onkeydown={onKeydown}>
 	<div class="bar">
-		<nav class="crumbs">
+		<nav class="crumbs" class:scrolled={crumbsScrolled} bind:this={crumbsEl} onscroll={onCrumbsScroll}>
 			<button class="crumb" class:on={path === ''} onclick={() => goCrumb(-1)}>Artifacts</button>
 			{#each crumbs as c, i (i)}
 				<span class="sep">/</span>
@@ -683,7 +697,7 @@
 					</span>
 					<span class="name">{e.name}{e.is_dir ? '/' : ''}</span>
 					<span class="meta dim small">{e.is_dir ? '' : fmtSize(e.size)}</span>
-					{#if !compact}<span class="meta dim small">{fmtTime(e.mtime)}</span>{/if}
+					{#if !compact}<span class="meta mtime dim small">{fmtTime(e.mtime)}</span>{/if}
 				</button>
 			{/each}
 		{/if}
@@ -712,6 +726,12 @@
 	{#if selected}
 		<div class="preview card">
 			<div class="phead">
+				{#if viewport.isPhone && !compact}
+					<!-- Phone: the preview replaces the list (see the phone styles). -->
+					<button type="button" class="pback" onclick={() => clearSelection('browse')}>
+						<CaretLeftIcon size={16} /><span>{crumbs.at(-1) ?? 'Artifacts'}</span>
+					</button>
+				{/if}
 				<span class="mono small fname">{selected}</span>
 				<div class="actions">
 					<button type="button" title="Reload file content" onclick={reloadPreview}>
@@ -1185,6 +1205,132 @@
 		}
 		.files:not(.compact) .gutter:focus-visible {
 			outline: none;
+		}
+	}
+
+	/* --- Phone ---
+	   Only the full-page instance; the chat aside (.compact) sizes itself. */
+	@media (max-width: 640px) {
+		/* Toolbar: search + Refresh on one row, the breadcrumbs under it on one
+		   line that scrolls sideways (deep paths used to push both off-screen). */
+		.files:not(.compact) .bar {
+			flex-wrap: wrap;
+			gap: var(--sp-2);
+		}
+		.files:not(.compact) .crumbs {
+			order: 1;
+			flex: 1 1 100%;
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			scrollbar-width: none;
+			overscroll-behavior-x: contain;
+			gap: 0;
+			margin-block: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-1));
+		}
+		.files:not(.compact) .crumbs.scrolled {
+			mask-image: linear-gradient(to right, transparent, #000 var(--sp-6));
+			-webkit-mask-image: linear-gradient(to right, transparent, #000 var(--sp-6));
+		}
+		.files:not(.compact) .crumb {
+			flex-shrink: 0;
+			min-width: var(--tap);
+			padding-inline: var(--sp-2);
+			white-space: nowrap;
+		}
+		.files:not(.compact) .crumb:first-child {
+			padding-left: 0;
+			text-align: left;
+		}
+		.files:not(.compact) .sep {
+			flex-shrink: 0;
+		}
+		.files:not(.compact) .search,
+		.files:not(.compact) .tbtn {
+			height: var(--tap);
+		}
+		.files:not(.compact) .search {
+			padding-inline: var(--sp-3) var(--sp-1);
+			gap: var(--sp-2);
+		}
+		.files:not(.compact) .tbtn {
+			width: var(--tap);
+		}
+		.files:not(.compact) .search button.x-clear {
+			position: relative;
+			width: 36px;
+			height: 36px;
+			min-height: 36px;
+		}
+		.files:not(.compact) .search button.x-clear::after {
+			content: '';
+			position: absolute;
+			inset: -4px;
+		}
+		/* The list fills the screen below the toolbar instead of a 250px window
+		   with empty page under it. */
+		.files:not(.compact) .list {
+			max-height: none;
+			overscroll-behavior: contain;
+		}
+		/* The mtime column ate 148px of a 390px row; it drops under the name. */
+		.files:not(.compact) .row {
+			row-gap: 0;
+		}
+		.files:not(.compact) .row > .mtime {
+			grid-column: 2 / -1;
+			grid-row: 2;
+		}
+		/* An open file replaces the list; .pback (or Back) returns to it. */
+		.files:not(.compact) .body:has(.preview) .list {
+			display: none;
+		}
+		.files:not(.compact) .preview .pre {
+			max-height: none;
+		}
+		.files:not(.compact) .phead {
+			flex-wrap: wrap;
+			gap: var(--sp-2);
+			padding: var(--sp-1) var(--sp-3) var(--sp-2);
+		}
+		.files:not(.compact) .fname {
+			flex: 1 1 0;
+			min-width: 0;
+		}
+		.pback {
+			display: inline-flex;
+			align-items: center;
+			gap: var(--sp-1);
+			max-width: 50%;
+			margin-left: calc(-1 * var(--sp-3));
+			padding: 0 var(--sp-3);
+			background: none;
+			border: none;
+			color: var(--accent);
+			font-size: var(--fs-md);
+		}
+		.pback span {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.files:not(.compact) .actions {
+			flex-basis: 100%;
+			flex-wrap: wrap;
+			gap: var(--sp-1);
+		}
+		.files:not(.compact) .actions button,
+		.files:not(.compact) .actions .btn {
+			position: relative;
+			flex: 1 1 auto;
+			justify-content: center;
+			min-height: 32px;
+			padding-inline: var(--sp-2);
+		}
+		.files:not(.compact) .actions button::after,
+		.files:not(.compact) .actions .btn::after {
+			content: '';
+			position: absolute;
+			inset: -7px 0;
 		}
 	}
 </style>

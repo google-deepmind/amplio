@@ -112,10 +112,7 @@ func TestServer_Artifacts(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("all status = %d", status)
 	}
-	var all struct {
-		Root  string         `json:"root"`
-		Files []artifactFile `json:"files"`
-	}
+	var all artifactAllListing
 	if err := json.Unmarshal(body, &all); err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +123,67 @@ func TestServer_Artifacts(t *testing.T) {
 	want := []string{"plan.md", "sub/note.txt"}
 	if len(gotPaths) != len(want) || gotPaths[0] != want[0] || gotPaths[1] != want[1] {
 		t.Errorf("recursive files = %v, want %v", gotPaths, want)
+	}
+}
+
+// A run that has not written any artifact yet has no artifact dir. Both listings
+// still answer 200 with their usual object shape and an empty (not null) list:
+// /artifacts/all used to answer a bare [], which the browser's file search read
+// as {files: undefined} and left on "Loading…".
+//
+// Not parallel: config.SetDataDir pins the data dir for the whole process.
+func TestServer_Artifacts_NoArtifactDir(t *testing.T) {
+	config.SetDataDir(t.TempDir())
+	t.Cleanup(func() { config.SetDataDir("") })
+	srv, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	if _, err := os.Stat(config.ArtifactDir(testRun)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("artifact dir exists before the test (stat err = %v)", err)
+	}
+
+	get := func(path string) []byte {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close() //nolint:errcheck
+		b, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: status %d, body %s", path, resp.StatusCode, b)
+		}
+		return b
+	}
+	// Decode into a generic map first: a bare [] (the old answer) must fail here,
+	// and a null list must be told apart from an empty one.
+	object := func(body []byte) map[string]json.RawMessage {
+		t.Helper()
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatalf("want a JSON object, got %s (%v)", body, err)
+		}
+		return m
+	}
+
+	all := object(get("/api/runs/" + testRun + "/artifacts/all?token=secret"))
+	if got := string(all["files"]); got != "[]" {
+		t.Errorf("/artifacts/all files = %s, want []", got)
+	}
+	var root string
+	if err := json.Unmarshal(all["root"], &root); err != nil || root != config.ArtifactDir(testRun) {
+		t.Errorf("/artifacts/all root = %s, want %q", all["root"], config.ArtifactDir(testRun))
+	}
+
+	listing := object(get("/api/runs/" + testRun + "/artifacts?token=secret"))
+	if got := string(listing["entries"]); got != "[]" {
+		t.Errorf("/artifacts entries = %s, want []", got)
+	}
+
+	// Reads never create the dir.
+	if _, err := os.Stat(config.ArtifactDir(testRun)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("listing created the artifact dir (stat err = %v)", err)
 	}
 }
 

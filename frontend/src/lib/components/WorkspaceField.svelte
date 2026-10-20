@@ -18,6 +18,8 @@
 	import { onMount } from 'svelte';
 	import { cachedWorkspaceInfo, loadWorkspaceInfo, refreshWorkspaceInfo } from '$lib/workspaceInfo';
 	import { INTERNAL, ExtraWorkspacePicker, resolveExtraWorkspace, NO_SELECTION } from './internal';
+	import { viewport } from '$lib/viewport.svelte';
+	import { closeOnBack } from '$lib/pickerSheet.svelte';
 	import { FolderIcon, CaretDownIcon } from 'phosphor-svelte';
 	import type { Component } from 'svelte';
 
@@ -120,6 +122,30 @@
 		ondirty?.();
 	}
 
+	closeOnBack(
+		() => open,
+		() => done()
+	);
+
+	// Close and hand focus back to the trigger: the menu's focused control is
+	// about to unmount, and losing focus would fold the host form.
+	let triggerEl = $state<HTMLButtonElement>();
+	function done() {
+		triggerEl?.focus();
+		open = false;
+	}
+
+	// Escape closes the menu, and only the menu (not a host sheet around it).
+	// On phone, Enter in a field closes the sheet too (desktop keeps the form's
+	// implicit submit).
+	function onWrapKey(e: KeyboardEvent) {
+		if (!open) return;
+		const enter = e.key === 'Enter' && viewport.isPhone && e.target instanceof HTMLInputElement;
+		if (e.key !== 'Escape' && !enter) return;
+		e.preventDefault();
+		done();
+	}
+
 	// Close the popover on any click outside it (mirrors ModelSelect).
 	function clickOutside(node: HTMLElement, cb: () => void) {
 		function handle(e: MouseEvent) {
@@ -133,13 +159,14 @@
 		};
 	}
 	// Autofocus the active text input when the popover (re)renders it.
+	// Phone: the keyboard opens only when the field itself is tapped.
 	function focusEl(node: HTMLInputElement) {
-		node.focus();
+		if (!viewport.isPhone) node.focus();
 	}
 </script>
 
-<div class="wrap" use:clickOutside={() => (open = false)}>
-	<button type="button" class="trigger" title={title} onclick={() => (open = !open)}>
+<div class="wrap" use:clickOutside={() => (open = false)} onkeydown={onWrapKey} role="presentation">
+	<button type="button" bind:this={triggerEl} class="trigger" title={title} onclick={() => (open = !open)}>
 		<TriggerIcon size={15} />
 		<span class="label">{summary}</span>
 		<span class="caret"><CaretDownIcon size={12} /></span>
@@ -147,6 +174,10 @@
 
 	{#if open}
 		<div class="menu">
+			{#if viewport.isPhone}
+				<!-- Phone: the menu is a bottom sheet (StartRunForm); this is its header. -->
+				<div class="sheet-head"><span>Workspace</span><button type="button" class="done" onclick={done}>Done</button></div>
+			{/if}
 			{#if extras}
 				<ExtraWorkspacePicker
 					bind:persisted={extraState}
@@ -216,5 +247,24 @@
 	.field {
 		width: 100%;
 		font: inherit;
+	}
+
+
+	@media (max-width: 640px) {
+		/* StartRunForm's sheet: this menu holds fields, not padded rows. */
+		.menu {
+			--sheet-pad-x: var(--gutter);
+		}
+		/* With source tabs, one height for all of them (the recents list scrolls
+		   inside), so switching tabs does not move the sheet's top. */
+		.menu:has(:global(.modes)) {
+			height: min(22rem, calc(var(--app-h, 100dvh) * 0.7));
+		}
+		.label {
+			flex: 1;
+			width: auto;
+			min-width: 0;
+			text-align: left;
+		}
 	}
 </style>

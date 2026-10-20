@@ -326,10 +326,86 @@
 		border-color: currentColor;
 	}
 	.tag.warn {
-		color: var(--danger, #e06c6c);
+		color: var(--err);
 		border-color: currentColor;
 	}
 	.err {
-		color: var(--danger, #e06c6c);
+		color: var(--err);
+	}
+
+	@media (max-width: 640px) {
+		/* Title and Refresh on one row, the sample line under them. */
+		.head {
+			flex-wrap: wrap;
+			align-items: center;
+			row-gap: 0;
+			margin-bottom: var(--sp-4);
+		}
+		.head > .small {
+			order: 1;
+			flex-basis: 100%;
+		}
+		/* A 30px pill with a 44px hit area, like the other secondary buttons. */
+		.refresh {
+			position: relative;
+			z-index: 1; /* its overlay reaches over the sample line below */
+			min-height: 30px;
+			flex-shrink: 0;
+		}
+		.refresh::after {
+			content: '';
+			position: absolute;
+			inset: -8px 0;
+		}
+		.grp {
+			margin-bottom: var(--section-gap);
+		}
+		.grp-head {
+			align-items: center;
+			font-size: var(--fs-md);
+			font-weight: 600;
+			margin-bottom: var(--sp-2);
+		}
+		.grp-head .small {
+			font-family: system-ui, sans-serif;
+			font-size: var(--fs-xs);
+			font-weight: 400;
+			padding: 0 var(--sp-2);
+			border: 1px solid var(--border);
+			border-radius: var(--radius-pill);
+		}
+		/* The command line is what this page is for; on one 390px row it got 43px.
+		   It takes the second line, full width, clamped to three lines (the one
+		   list where wrapping beats ellipsis: the command is the content). */
+		.proc {
+			flex-wrap: wrap;
+			row-gap: 2px;
+			padding: var(--sp-2);
+		}
+		.proc + .proc {
+			border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+		}
+		.cmd {
+			order: 1;
+			flex-basis: 100%;
+			white-space: normal;
+			overflow-wrap: anywhere;
+			display: -webkit-box;
+			-webkit-line-clamp: 3;
+			line-clamp: 3;
+			-webkit-box-orient: vertical;
+			mask-image: none;
+			-webkit-mask-image: none;
+		}
+		/* Desktop's aligned columns cost 150px of a 390px row; on phone the
+		   metrics share line one with the pid and ride its right edge. */
+		.pid,
+		.metric {
+			min-width: 0;
+		}
+		.metrics {
+			margin-left: auto;
+			gap: var(--sp-2);
+		}
 	}
 </style>

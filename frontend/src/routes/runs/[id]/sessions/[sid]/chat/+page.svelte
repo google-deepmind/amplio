@@ -156,4 +156,29 @@
 	.scroll::-webkit-scrollbar {
 		display: none;
 	}
+
+	@media (max-width: 640px) {
+		.phead {
+			min-height: var(--tap);
+			padding-bottom: 0;
+		}
+		/* The selected row of the phase index right above already names it. */
+		.ptitle {
+			display: none;
+		}
+		/* In the page's flow (see the layout). No right gutter for the segment
+		   navigator: it is hidden on phone, and clip keeps its rail from scrolling
+		   the run shell sideways wherever it is not. */
+		.scroll {
+			flex: none;
+			overflow: visible;
+			overflow-x: clip;
+			padding: var(--sp-3) 0 0;
+		}
+		/* ChatMessages lines the end-of-turn timestamp up with the copy button
+		   assuming this row gap. */
+		.column {
+			gap: var(--sp-2);
+		}
+	}
 </style>

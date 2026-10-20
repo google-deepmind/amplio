@@ -270,4 +270,36 @@
 	.result.bad {
 		color: var(--err);
 	}
+
+	@media (max-width: 640px) {
+		.about {
+			padding: 0;
+			gap: var(--sp-4);
+		}
+		h3 {
+			margin-bottom: var(--sp-2);
+			font-size: var(--fs-md);
+			font-weight: 600;
+		}
+		.kv {
+			gap: var(--sp-2) var(--sp-3);
+		}
+		/* Copy: 28px visible, 44px hit area (the padding holds the overlay). */
+		.path {
+			padding-right: var(--sp-2);
+		}
+		.path :global(.copy) {
+			position: relative;
+			justify-content: center;
+			flex-shrink: 0;
+			width: 28px;
+			min-height: 28px;
+			margin-block: -4px;
+		}
+		.path :global(.copy)::after {
+			content: '';
+			position: absolute;
+			inset: -8px;
+		}
+	}
 </style>

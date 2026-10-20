@@ -563,10 +563,28 @@
 		return () => off();
 	});
 
+	// Scrollport height as the ResizeObserver last saw it. Measured against it, a
+	// scroll event that lands after a resize but before the observer (a re-pin
+	// queued just before the keyboard opened) still reads as "at the bottom".
+	let seenH = 0;
 	function onScroll() {
 		if (!scrollEl) return;
-		pinned = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 80;
+		const h = seenH || scrollEl.clientHeight;
+		pinned = scrollEl.scrollHeight - scrollEl.scrollTop - h < 80;
 	}
+
+	// A shrinking scrollport (keyboard opening, composer growing) fires no scroll
+	// event; re-pin so the latest message stays above the composer.
+	$effect(() => {
+		const el = scrollEl;
+		if (!el) return;
+		const ro = new ResizeObserver(() => {
+			seenH = el.clientHeight;
+			maybeScroll();
+		});
+		ro.observe(el);
+		return () => ro.disconnect();
+	});
 
 	// (Chat-tab title "●" indicator removed — superseded by the run-level
 	// unread system: a settled-state transition while the tab is hidden flips
@@ -813,7 +831,7 @@
 				bind:element={composer}
 				onSend={sendMessage}
 				draftKey={`amplio-chat-draft:${store.runId}:${chatbotSid}`}
-				placeholder="Message the chatbot — Enter to send, Shift+Enter for newline"
+				placeholder="Message the chatbot"
 			/>
 		{/if}
 	</div>
@@ -1308,5 +1326,51 @@
 	}
 	.scroll::-webkit-scrollbar {
 		display: none;
+	}
+
+	@media (max-width: 640px) {
+		/* The page gutter is the left edge. On the right, the scroller runs on to
+		   the glass and keeps a --tap-wide lane for the segment navigator's dots;
+		   the column takes the gutter back as padding for the bar and composer. */
+		.chat-layout {
+			margin-right: calc(-1 * var(--gutter));
+		}
+		.chat {
+			padding-right: var(--gutter);
+		}
+		.scroll {
+			padding-left: 0;
+			padding-right: var(--tap);
+			margin-right: calc(-1 * var(--gutter));
+			gap: var(--sp-2);
+			--nav-offset: var(--tap);
+			--nav-phone: block;
+		}
+		/* One line at 360: the status text ellipsises before anything wraps. */
+		.statusbar {
+			min-height: var(--tap);
+			padding-block: 0;
+			padding-inline: 0;
+			gap: var(--sp-3);
+		}
+		.sb-lhs {
+			flex-wrap: nowrap;
+			overflow: hidden;
+		}
+		.sb-lhs > span:last-child,
+		.sa-compact > span:last-child {
+			min-width: 0;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.sb-rhs a {
+			position: relative;
+		}
+		.sb-rhs a::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
 	}
 </style>

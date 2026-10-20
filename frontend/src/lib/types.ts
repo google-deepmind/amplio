@@ -243,6 +243,9 @@ export interface RunDetail {
   agents_md: string; // raw markdown supplied at run creation; can be long
   created_at: string;
   updated_at: string; // last metadata edit (title/note/star/archive); equals created_at when untouched
+  // The session that represents the run: the autonomous root if there is one,
+  // else the chatbot root. Same rule as RunSummary.root_session_id.
+  root_session_id: string;
   sessions: SessionDTO[];
   // In-flight non-session workers for this run (today: the critic generating
   // a report). Empty array when nothing's running. Backend fires the

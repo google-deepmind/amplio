@@ -31,6 +31,7 @@
 	import { prefetchBriefings } from '$lib/briefingLibrary';
 	import { clearRunPrefill } from '$lib/runPrefill.svelte';
 	import { pageTitle } from '$lib/title';
+	import { viewport } from '$lib/viewport.svelte';
 
 	// Page size for the runs list. Modest so the front page stays responsive;
 	// "Load more" pages backwards in time via the server cursor. 25 is the
@@ -47,6 +48,8 @@
 	let nextCursor = $state('');
 	let loadingMore = $state(false);
 	let error = $state('');
+	// False until the first list arrives, so "No runs." does not flash while loading.
+	let loaded = $state(false);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 
 	// Filters are ALL server-side now (search/starred/grade join the existing
@@ -104,6 +107,10 @@
 		search.trim() !== '' || starredOnly || gradeFilter !== 'all' || statusFilter !== 'all'
 	);
 
+	const searchOnly = $derived(
+		search.trim() !== '' && !starredOnly && gradeFilter === 'all' && statusFilter === 'all'
+	);
+
 	// updateURL writes a filter param (empty/'all'/false clears it) via replaceState:
 	// it OVERWRITES the current history entry rather than pushing, so live typing /
 	// toggling never grows history depth and the back button stays anchored to the
@@ -126,6 +133,42 @@
 	function onSearchInput() {
 		clearTimeout(searchTimer);
 		searchTimer = setTimeout(() => updateURL('q', searchInput.trim()), 250);
+	}
+	// Enter (the keyboard's Search key) applies the query now and, on phone,
+	// dismisses the keyboard so the results are visible.
+	function onSearchKey(e: KeyboardEvent) {
+		if (e.key !== 'Enter') return;
+		clearTimeout(searchTimer);
+		updateURL('q', searchInput.trim());
+		if (viewport.isPhone) (e.currentTarget as HTMLInputElement).blur();
+	}
+	// Phone: size a filter select to its selected label, as `field-sizing:
+	// content` does where supported (not Safari), so the chip row fits 360px.
+	const FIELD_SIZING = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
+	let measureCtx: CanvasRenderingContext2D | null = null;
+	function fitToLabel(value: string) {
+		return (el: HTMLSelectElement) => {
+			if (FIELD_SIZING || !viewport.isPhone) return;
+			const cs = getComputedStyle(el);
+			measureCtx ??= document.createElement('canvas').getContext('2d');
+			if (!measureCtx) return;
+			measureCtx.font = cs.font;
+			const label = el.querySelector<HTMLOptionElement>(`option[value="${value}"]`)?.text ?? '';
+			const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+			el.style.width = `${Math.ceil(measureCtx.measureText(label).width + pad)}px`;
+			return () => el.style.removeProperty('width');
+		};
+	}
+	function clearFilters() {
+		clearTimeout(searchTimer);
+		searchInput = '';
+		const url = new URL(page.url);
+		for (const k of ['q', 'filter', 'grade', 'starred']) url.searchParams.delete(k);
+		showArchived = false;
+		// Archived is not in the URL: when it was the only filter, nothing
+		// navigates, so reload the list here.
+		if (url.search === page.url.search) refresh();
+		else goto(url.pathname + url.search, { replaceState: true, noScroll: true, keepFocus: true });
 	}
 
 	// refresh reloads from the TOP. A mount/filter refresh loads page 1; a live
@@ -153,6 +196,7 @@
 			// reflect the server's has_updates for the loaded runs.
 			updates.seedFromRuns(runs);
 			error = '';
+			loaded = true;
 		} catch (e) {
 			error = errorText(e); // '' when unreachable (global banner covers it)
 		}
@@ -234,30 +278,37 @@
 </svelte:head>
 
 <div class="dash">
-	<div class="toolbar">
+	<div class="toolbar" class:filtered={anyFilterActive && runs.length > 0}>
 		<h2>{heading} <span class="count dim">{runs.length}{hasMore ? '+' : ''}</span></h2>
 		<div class="filters">
 			<input
 				class="search"
 				type="search"
-				placeholder="Search title, task, run id, or workspace…"
+				enterkeyhint="search"
+				placeholder={viewport.isPhone ? 'Search runs' : 'Search title, task, run id, or workspace…'}
 				aria-label="Search runs by title, task, run id, or workspace"
 				bind:value={searchInput}
 				oninput={onSearchInput}
+				onkeydown={onSearchKey}
 			/>
 			<button
 				class="filters-toggle"
 				aria-expanded={filtersOpen}
+				aria-controls="dash-filters"
+				aria-label={filtersActive ? 'Filters (some active)' : 'Filters'}
 				onclick={() => (filtersOpen = !filtersOpen)}
 			>
-				<FunnelIcon size={16} weight={filtersActive ? 'fill' : 'regular'} />
-				<span class="sr-only">Filters</span>
+				<FunnelIcon size={18} weight={filtersActive ? 'fill' : 'regular'} />
 				{#if filtersActive}<span class="filters-dot"></span>{/if}
 			</button>
-			<div class="secondary" class:open={filtersOpen}>
+			<div id="dash-filters" class="secondary" class:open={filtersOpen}>
+			<!-- .pick is display: contents on desktop; on phone it draws the chip
+			     around a full-height (44px) transparent select. -->
+			<span class="pick" class:on={statusFilter !== 'all'}>
 			<select
 				value={statusFilter}
 				onchange={(e) => setFilter(e.currentTarget.value)}
+				{@attach fitToLabel(statusFilter)}
 				aria-label="Filter by status"
 			>
 				<option value="all">All</option>
@@ -266,11 +317,14 @@
 				<option value="failed">Failed</option>
 				<option value="updates">Updates</option>
 			</select>
+			</span>
 			<!-- Exact-match grade filter, kept alongside the star toggle. Effective
 			     grade = human grade ?? critic grade; "Ungraded" = neither set. -->
+			<span class="pick" class:on={gradeFilter !== 'all'}>
 			<select
 				value={gradeFilter}
 				onchange={(e) => updateURL('grade', e.currentTarget.value)}
+				{@attach fitToLabel(gradeFilter)}
 				aria-label="Filter by grade"
 			>
 				<option value="all">All grades</option>
@@ -281,13 +335,15 @@
 				<option value="garbage">Garbage</option>
 				<option value="ungraded">Ungraded</option>
 			</select>
+			</span>
 			<button
-				class="chip"
+				class="chip star"
 				class:on={starredOnly}
 				aria-pressed={starredOnly}
+				aria-label="Starred"
 				onclick={() => updateURL('starred', starredOnly ? null : '1')}>★ Starred</button
 			>
-			<label class="chip">
+			<label class="chip" class:on={showArchived}>
 				<input type="checkbox" bind:checked={showArchived} onchange={() => refresh()} /> Archived
 			</label>
 			</div>
@@ -299,9 +355,15 @@
 	     composer. -->
 	<div class="runs-wrap">
 		<section class="runs">
-		<RunList {runs} onmutated={refresh} />
-		{#if runs.length === 0 && anyFilterActive}
-			<p class="more-hint dim small">No runs match the current filters.</p>
+		{#if loaded && runs.length === 0 && anyFilterActive}
+			<div class="no-match">
+				<p class="dim small">
+					{searchOnly ? `No runs match “${search.trim()}”.` : 'No runs match the current filters.'}
+				</p>
+				<button class="clear" onclick={clearFilters}>{searchOnly ? 'Clear search' : 'Clear filters'}</button>
+			</div>
+		{:else if loaded}
+			<RunList {runs} onmutated={refresh} />
 		{/if}
 		<!-- Pagination affordance at the scroll-tail. Every filter is server-side, so
 		     "Load more" paginates the true (filtered) match set — always valid. -->
@@ -329,6 +391,16 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.8rem;
+	}
+	/* Homepage only, desktop too: scrolling is unchanged, the scrollbars are
+	   hidden (run list, composer textarea and menus). */
+	.dash,
+	.dash :global(*) {
+		scrollbar-width: none;
+	}
+	.dash::-webkit-scrollbar,
+	.dash :global(*::-webkit-scrollbar) {
+		display: none;
 	}
 	.runs-wrap {
 		position: relative;
@@ -377,10 +449,6 @@
 	.load-more:disabled {
 		opacity: 0.6;
 		cursor: default;
-	}
-	.more-hint {
-		text-align: center;
-		margin: 0.8rem auto 0.4rem;
 	}
 	/* Centered composer, like a search/chat input. Grows upward on focus. */
 	.compose {
@@ -444,44 +512,104 @@
 	.secondary {
 		display: contents;
 	}
-	.sr-only {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		overflow: hidden;
-		clip-path: inset(50%);
-		white-space: nowrap;
+	.pick {
+		display: contents;
+	}
+	.no-match {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.4rem;
+		margin: 0.8rem auto 0.4rem;
+	}
+	.no-match p {
+		margin: 0;
+	}
+	.clear {
+		border: 0;
+		background: none;
+		color: var(--accent);
+		font-size: var(--fs-sm);
 	}
 
-	/* <main> is full-bleed on phone (the rows are boxed); the page's own
-	   furniture is not, so it still needs a gutter. */
 	@media (max-width: 640px) {
-		.toolbar,
-		.compose {
-			padding-inline: 0.6rem;
+		.dash {
+			gap: var(--sp-3);
 		}
-		/* The heading and five filter controls cost 143px — a sixth of the screen
-		   — before a single run row. The heading is redundant (the nav says where
-		   you are), and the controls fold behind one button. */
+		/* The heading costs a row before the first run and the nav already says
+		   where you are; it comes back, below the controls, as the result count
+		   once a filter or search narrows the list. */
+		.toolbar {
+			gap: var(--sp-2);
+		}
 		.toolbar h2 {
 			display: none;
+		}
+		.toolbar.filtered h2 {
+			display: block;
+			order: 1;
+			flex-basis: 100%;
+			font-size: var(--fs-md);
+			font-weight: 600;
+			line-height: 20px;
+		}
+		.toolbar.filtered .count {
+			font-size: var(--fs-sm);
+		}
+		.filters {
+			flex: 1;
+			min-width: 0;
+			gap: var(--sp-2);
+		}
+		/* min-width: 0 or the input keeps its intrinsic ~20ch width and pushes
+		   the funnel onto a second line. */
+		.filters .search {
+			width: auto;
+			flex: 1 1 0;
+			min-width: 0;
+			height: var(--tap);
+			padding: 0 var(--sp-3);
+			appearance: none;
+		}
+		.filters .search:focus {
+			outline: none;
+			border-color: var(--accent-dim);
+			box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+		}
+		/* The UA clear button is a 9px glyph; make it a 44px target with a
+		   dim 16px ×. iOS Safari draws none [device]. */
+		.filters .search::-webkit-search-cancel-button {
+			-webkit-appearance: none;
+			width: var(--tap);
+			height: var(--tap);
+			margin-right: calc(-1 * var(--sp-3));
+			background: var(--text-dim);
+			mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 4l8 8M12 4l-8 8' stroke='black' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")
+				center / 16px no-repeat;
+			cursor: pointer;
 		}
 		.filters-toggle {
 			display: inline-flex;
 			position: relative;
+			flex: none;
 			align-items: center;
 			justify-content: center;
-			min-width: 44px;
-			min-height: 44px;
+			width: var(--tap);
+			height: var(--tap);
+			padding: 0;
 			border: 1px solid var(--border);
-			border-radius: var(--radius-pill);
-			background: var(--bg-elev);
+			border-radius: var(--radius-sm);
+			background: var(--bg);
 			color: var(--text-dim);
+		}
+		.filters-toggle[aria-expanded='true'] {
+			color: var(--accent);
+			border-color: var(--accent-dim);
 		}
 		.filters-dot {
 			position: absolute;
-			top: 0.55rem;
-			right: 0.6rem;
+			top: var(--sp-2);
+			right: var(--sp-2);
 			width: 6px;
 			height: 6px;
 			border-radius: 50%;
@@ -490,27 +618,129 @@
 		.secondary {
 			display: none;
 		}
+		/* One row of 32px chips with 44px hit areas; a long status or grade at
+		   360px wraps the last chip (row gap clears the overlays). */
 		.secondary.open {
 			display: flex;
 			flex-wrap: wrap;
-			align-items: center;
-			gap: 0.5rem;
 			flex-basis: 100%;
+			gap: var(--sp-3) var(--sp-2);
 		}
-		/* min-width: 0 or the input keeps its intrinsic ~20ch width, refuses to
-		   shrink, and pushes the funnel onto a second line. */
-		.filters .search {
-			width: auto;
-			flex: 1 1 0;
-			min-width: 0;
+		.pick,
+		.secondary .chip {
+			position: relative;
+			flex: none;
+			height: 32px;
 		}
-		/* The toolbar is a space-between row; with the heading hidden the filter
-		   group is its only child and should own the full width. Wrapping stays
-		   ON so the expanded panel can take a second line; search and the funnel
-		   still share the first because the input shrinks to 0 (above) rather
-		   than demanding its intrinsic width. */
-		.filters {
-			flex: 1;
+		.pick {
+			display: inline-flex;
+			align-items: center;
+			color: var(--text-dim);
+		}
+		.pick::before {
+			content: '';
+			position: absolute;
+			inset: 0;
+			border: 1px solid var(--border);
+			border-radius: var(--radius-pill);
+			background: var(--bg-elev);
+			pointer-events: none;
+		}
+		/* chevron */
+		.pick::after {
+			content: '';
+			position: absolute;
+			right: 13px;
+			top: 12px;
+			width: 5px;
+			height: 5px;
+			border: solid currentColor;
+			border-width: 0 1.5px 1.5px 0;
+			transform: rotate(45deg);
+			pointer-events: none;
+		}
+		.pick.on,
+		.secondary .chip.on {
+			color: var(--accent);
+		}
+		.pick.on::before {
+			border-color: var(--accent-dim);
+		}
+		.filters .pick select {
+			position: relative;
+			appearance: none;
+			field-sizing: content;
+			height: var(--tap);
+			padding: 0 28px 0 var(--sp-3);
+			border: 0;
+			background: none;
+			color: inherit;
+			line-height: 32px;
+		}
+		.secondary .chip {
+			justify-content: center;
+			gap: 0;
+			min-width: var(--tap);
+			min-height: 0;
+			padding: 0 var(--sp-3);
+			font-size: var(--fs-input);
+		}
+		/* The star alone is the chip (the row fits at 360px); the name comes
+		   from aria-label. */
+		.secondary .star {
+			font-size: 0;
+		}
+		.secondary .star::before {
+			content: '★';
+			font-size: var(--fs-input);
+		}
+		/* Archived reads as a toggle chip like Starred; the checkbox stays for
+		   keyboard and screen readers, drawn as the chip's on state. */
+		.secondary .chip input {
+			appearance: none;
+			width: 0;
+			margin: 0;
+		}
+		.secondary .chip:has(:focus-visible) {
+			outline: 2px solid var(--accent-dim);
+		}
+		.secondary .chip.on {
+			border-color: var(--accent-dim);
+		}
+		/* -7px: insets are measured from the padding box, inside the 1px border */
+		.secondary .chip::after {
+			content: '';
+			position: absolute;
+			inset: -7px -1px;
+		}
+		/* Rows can scroll clear of the tail fade. */
+		.runs {
+			padding-bottom: var(--sp-5);
+		}
+		.runs-wrap::after {
+			height: var(--sp-5);
+		}
+		.compose {
+			margin: 0;
+		}
+		.no-match {
+			align-items: flex-start;
+			margin: var(--sp-5) 0 0;
+			gap: var(--sp-2);
+		}
+		.no-match p {
+			font-size: var(--fs-md);
+		}
+		.clear {
+			position: relative;
+			height: 30px;
+			min-height: 0;
+			padding: 0;
+		}
+		.clear::after {
+			content: '';
+			position: absolute;
+			inset: -7px 0;
 		}
 	}
 </style>

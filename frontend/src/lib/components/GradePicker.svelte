@@ -84,6 +84,9 @@
 
 <script lang="ts">
 	import { api } from '$lib/api';
+	import { beforeNavigate } from '$app/navigation';
+	import { menuKeys, popover } from '$lib/dismiss';
+	import MenuSheet from './MenuSheet.svelte';
 
 	// GradePicker shows a run's effective grade as a clickable smiley (or a dashed
 	// circle when ungraded) and opens a dropdown to set/clear it. The effective
@@ -116,23 +119,25 @@
 	);
 
 	let open = $state(false);
+	let wrap = $state<HTMLElement>();
+	let btn = $state<HTMLButtonElement>();
+	const pop = popover(() => close());
+	beforeNavigate(() => {
+		if (pop.release()) close();
+	});
+	$effect(() => () => void pop.closed());
 	function toggle(e: MouseEvent) {
 		e.stopPropagation();
-		open = !open;
+		if (open) close();
+		else {
+			open = true;
+			if (wrap) pop.opened(wrap);
+		}
 	}
 	function close() {
 		open = false;
+		pop.closed();
 	}
-	// Same click-outside mechanic as RunCard's overflow menu: a document-level
-	// listener closes the popover when the click lands outside the wrapper.
-	function clickOutside(node: HTMLElement, callback: () => void) {
-		const handle = (e: MouseEvent) => {
-			if (!node.contains(e.target as Node)) callback();
-		};
-		document.addEventListener('click', handle);
-		return { destroy: () => document.removeEventListener('click', handle) };
-	}
-
 	// Setting a grade sends the boundary string; clearing sends null so the
 	// server resets to ungraded (then the critic fallback takes over again).
 	async function pick(value: string | null, e: MouseEvent) {
@@ -143,8 +148,9 @@
 	}
 </script>
 
-<div class="grade-wrap" use:clickOutside={close}>
+<div class="grade-wrap" bind:this={wrap}>
 	<button
+		bind:this={btn}
 		class="grade-btn"
 		class:ungraded={!spec}
 		style={spec ? `color:${spec.color}` : ''}
@@ -160,36 +166,40 @@
 		{/if}
 	</button>
 	{#if open}
-		<div class="menu" role="menu">
-			{#each GRADE_SPECS as g (g.value)}
-				{@const Icon = g.icon}
+		<MenuSheet label="Grade" trigger={btn} onclose={close}>
+			<div class="menu" role="menu" aria-label="Grade" tabindex="-1" onkeydown={menuKeys}>
+				{#each GRADE_SPECS as g (g.value)}
+					{@const Icon = g.icon}
+					<button
+						role="menuitem"
+						class="item"
+						class:active={effective === g.value}
+						onclick={(e) => pick(g.value, e)}
+					>
+						<span class="item-icon" style={`color:${g.color}`}>
+							<Icon size={16} weight="fill" />
+						</span>
+						<span class="item-label">{g.label}</span>
+						{#if run.report_grade === g.value}
+							<span class="critic-tag" title="The keen-critic's grade">· critic</span>
+						{/if}
+					</button>
+				{/each}
+				<div class="divider" role="separator"></div>
+				<!-- Unset row: with a critic grade present, clearing re-defers to it
+				     ("Use critic grade"); otherwise it just clears outright. Both send
+				     grade:null — the difference is only the label/intent. -->
 				<button
-					class="item"
-					class:active={effective === g.value}
-					onclick={(e) => pick(g.value, e)}
+					role="menuitem"
+					class="item unset"
+					class:active={!run.grade}
+					onclick={(e) => pick(null, e)}
 				>
-					<span class="item-icon" style={`color:${g.color}`}>
-						<Icon size={16} weight="fill" />
-					</span>
-					<span class="item-label">{g.label}</span>
-					{#if run.report_grade === g.value}
-						<span class="critic-tag" title="The keen-critic's grade">· critic</span>
-					{/if}
+					<span class="item-icon"><CircleDashedIcon size={16} weight="regular" /></span>
+					<span class="item-label">{run.report_grade ? 'Use critic grade' : 'Clear grade'}</span>
 				</button>
-			{/each}
-			<div class="divider" role="separator"></div>
-			<!-- Unset row: with a critic grade present, clearing re-defers to it
-			     ("Use critic grade"); otherwise it just clears outright. Both send
-			     grade:null — the difference is only the label/intent. -->
-			<button
-				class="item unset"
-				class:active={!run.grade}
-				onclick={(e) => pick(null, e)}
-			>
-				<span class="item-icon"><CircleDashedIcon size={16} weight="regular" /></span>
-				<span class="item-label">{run.report_grade ? 'Use critic grade' : 'Clear grade'}</span>
-			</button>
-		</div>
+			</div>
+		</MenuSheet>
 	{/if}
 </div>
 
@@ -283,5 +293,37 @@
 		height: 1px;
 		background: var(--border);
 		margin: 0.25rem 0.1rem;
+	}
+
+	/* Phone: rows inside MenuSheet's bottom sheet (ux/spec.md §2.2). */
+	@media (max-width: 640px) {
+		.menu {
+			position: static;
+			min-width: 0;
+			padding: 0;
+			border: none;
+			border-radius: 0;
+			background: none;
+			box-shadow: none;
+		}
+		.menu .item {
+			flex-shrink: 0;
+			min-height: 48px;
+			gap: var(--sp-3);
+			padding: 0 var(--sp-3);
+			font-size: var(--fs-body);
+			border-radius: var(--radius-sm);
+		}
+		.item-icon > :global(svg) {
+			width: 20px;
+			height: 20px;
+		}
+		.critic-tag {
+			font-size: var(--fs-sm);
+		}
+		.menu .divider {
+			flex-shrink: 0;
+			margin: var(--sp-1) var(--sp-3);
+		}
 	}
 </style>

@@ -1073,4 +1073,89 @@
 		font-size: var(--fs-md);
 		white-space: pre-wrap;
 	}
+
+	/* Phone. The grid already collapsed at 900px; this sets the rhythm (8px
+	   between cards, 24px before a section) and the tap targets. */
+	@media (max-width: 640px) {
+		.overview-stack,
+		.overview-grid {
+			gap: var(--stack-gap);
+		}
+		h3 {
+			font-size: var(--fs-md);
+			font-weight: 600;
+		}
+		.overview-stack > section > h3 {
+			margin: calc(var(--section-gap) - var(--stack-gap)) 0 var(--sp-2);
+		}
+		/* Values wrap rather than ellipsise: a title= tooltip is unreachable by touch. */
+		.kv {
+			grid-template-columns: 6.5rem minmax(0, 1fr);
+			gap: var(--sp-2) var(--sp-3);
+		}
+		.kv dt {
+			font-size: var(--fs-sm);
+		}
+		.agents-md-wrap summary {
+			padding-block: calc((var(--tap) - 1.5em) / 2);
+		}
+		.report-head {
+			gap: var(--sp-2);
+			margin-bottom: var(--sp-3);
+		}
+		.report-head .primary {
+			position: relative;
+			height: 36px;
+			min-height: 0;
+			padding: 0 var(--sp-3);
+			font-size: var(--fs-sm);
+		}
+		.iteration-tabs .tab {
+			position: relative;
+			height: 30px;
+			min-width: var(--tap);
+			min-height: 0;
+		}
+		.report-head .primary::after,
+		.iteration-tabs .tab::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
+		}
+		/* Sections read as a divided list of 44px rows: the row is the summary
+		   itself, so there is no overlay to cover the list below it. */
+		.report .summary {
+			margin-bottom: var(--sp-3);
+		}
+		.report-section {
+			margin-top: 0;
+			padding-top: 0;
+		}
+		.report-section summary {
+			min-height: var(--row-h);
+		}
+		/* More than the citation links' 12px padding, so it cannot reach the
+		   next section's row. */
+		.report-section[open] {
+			padding-bottom: var(--sp-4);
+		}
+		/* Clears the first link's 12px padding. */
+		.report-section[open] > :not(summary) {
+			margin-top: var(--sp-3);
+		}
+		/* Two long labels side by side wrapped to two lines each at 390. */
+		.followup-actions {
+			flex-direction: column;
+		}
+		.followup-actions .gen-btn {
+			justify-content: center;
+		}
+		/* Citation links grow their hit area with inline padding, which does not
+		   change line height (an inline-flex 44px box did). */
+		.cite a,
+		a.cite,
+		a.claim-statement {
+			padding-block: var(--sp-3);
+		}
+	}
 </style>

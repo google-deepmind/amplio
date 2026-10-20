@@ -259,4 +259,59 @@
 		padding-left: 0.5rem;
 		border-left: 1px solid var(--border);
 	}
+
+	/* Phone. Card rows: icon, name and status on line 1; task, workspace chip
+	   and step·time on line 2. Names ellipsise instead of widening the page. */
+	@media (max-width: 640px) {
+		.name {
+			flex-shrink: 1;
+			min-width: 0;
+		}
+		.sess.card {
+			flex-wrap: wrap;
+			gap: 0 var(--sp-2);
+			padding: var(--card-pad-y) var(--card-pad-x);
+			margin-bottom: var(--stack-gap);
+		}
+		.sess.card .titleblock {
+			display: contents;
+		}
+		.sess.card .name {
+			flex: 1 1 0;
+		}
+		/* Full-width break between the two lines. */
+		.sess.card::after {
+			content: '';
+			order: 1;
+			flex-basis: 100%;
+			height: var(--sp-1);
+		}
+		.sess.card .task {
+			order: 2;
+			text-overflow: ellipsis;
+			mask-image: none;
+			-webkit-mask-image: none;
+		}
+		.sess.card .chip {
+			order: 3;
+			flex-shrink: 1;
+			min-width: 0;
+			max-width: 40%;
+		}
+		.sess.card .meta {
+			order: 4;
+			margin-left: auto;
+		}
+		.sess.compact {
+			height: var(--row-h);
+			padding: 0 var(--sp-3);
+			margin-bottom: 0;
+			gap: var(--sp-2);
+		}
+		/* One 12px step per level; right edges stay on the gutter. */
+		.child {
+			margin-left: var(--sp-1);
+			padding-left: var(--sp-2);
+		}
+	}
 </style>
