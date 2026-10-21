@@ -58,7 +58,7 @@ func (a *EventLoopAgent) tryCompact(ctx context.Context, llmErr error, callStep 
 		return false
 	}
 
-	a.logger.Info("context window exceeded; compacting", "boundary_step", boundaryStep)
+	a.logger.Info("context window exceeded; compacting", "boundary_step", boundaryStep, "error", llmErr)
 	// Advertise the in-flight compaction to the UI (subject = this session, so a
 	// session view shows the indicator in the right place). Deferred Unregister
 	// survives a panic in the summarize call below.

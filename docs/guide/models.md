@@ -56,6 +56,20 @@ always streams under the hood (even for blocking `Call`s) because Anthropic
 rejects non-streaming requests whose `max_tokens` could exceed the 10-minute
 limit.
 
+Images a session has viewed stay in its context, and the whole context is resent
+every turn. Every image is downscaled when it arrives to at most 2000 px on its
+long edge and 3.75 MB (5 MB in base64). The Claude and Gemini providers also
+keep each request within the backend's image limits. Past a limit they keep the
+newest images and replace each older one with a note in its tool result, so the
+model can view the file again if it needs it. The limits:
+
+| Provider | Images per request | Per image | Image bytes per request (base64) |
+| --- | --- | --- | --- |
+| `vertex-claude` | 600 | 10 MiB | 20 MB of the 30 MB request limit |
+| `claude` (documented) | 100 | 5 MB | 20 MB of 32 MB |
+| `vertex-gemini` | 3000 | — | 400 MB of the 500 MiB request limit |
+| `gemini` (documented) | 3000 (of 3,600) | — | 80 MB of 100 MB |
+
 Specs are configured in `config.toml` (`[run] llms`, `system_llm_hq`,
 `system_llm_fast`) — see [config.toml](#example-configtoml).
 

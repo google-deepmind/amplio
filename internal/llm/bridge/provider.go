@@ -134,23 +134,43 @@ func NewSubprocess(pos string, maxTokens int, clientArgs, args url.Values) (llm.
 func (p *provider) ModelID() string { return p.model }
 func (p *provider) MaxTokens() int  { return p.maxTokens }
 
+// Call retries transient far-side failures (see retry.go). Nothing reaches the
+// caller before the final line, so a retry is safe at any point.
 func (p *provider) Call(ctx context.Context, req llm.Request) (*llm.Response, error) {
-	resp, err := p.post(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return readFinal(resp.Body)
+	return withRetry(ctx, p.model, func() (*llm.Response, error) {
+		resp, err := p.post(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return readFinal(resp.Body)
+	})
 }
 
+// Stream retries transient far-side failures only BEFORE the first delta: once
+// text has streamed to the caller, a retry would show it twice. Each attempt
+// reads ahead to its first meaningful line (delta, final or error); only a
+// transient error there is retried, and anything else is replayed to the caller
+// unchanged.
 func (p *provider) Stream(ctx context.Context, req llm.Request) (llm.Stream, error) {
-	resp, err := p.post(ctx, req) //nolint:bodyclose // body ownership transfers to subStream.Close
-	if err != nil {
-		return nil, err
-	}
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
-	return &subStream{resp: resp, sc: sc}, nil
+	return withRetry(ctx, p.model, func() (llm.Stream, error) {
+		resp, err := p.post(ctx, req) //nolint:bodyclose // body ownership transfers to subStream.Close
+		if err != nil {
+			return nil, err
+		}
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 0, 64*1024), maxLine)
+		s := &subStream{resp: resp, sc: sc}
+		if s.Next() {
+			s.replay = true // the caller's first Next returns this delta
+			return s, nil
+		}
+		if isTransient(s.err) {
+			s.Close()
+			return nil, s.err
+		}
+		return s, nil // a final, or a non-transient error the caller reads via Err
+	})
 }
 
 // post sends the request to the bridge's /generate. The returned response body

@@ -21,6 +21,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"math/rand"
 	"testing"
 )
 
@@ -251,5 +252,75 @@ func TestScaledDims(t *testing.T) {
 			t.Errorf("scaledDims(%d,%d,%d) = %dx%d, want %dx%d",
 				c.w, c.h, c.max, gotW, gotH, c.wantW, c.wantH)
 		}
+	}
+}
+
+// noiseImage encodes a w×h image of random pixels: incompressible, so its
+// encoded size tracks its pixel count, like a photo's.
+func noiseImage(t *testing.T, w, h int, format string) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	rand.New(rand.NewSource(1)).Read(img.Pix) //nolint:gosec // test determinism
+	for i := 3; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 255
+	}
+	var buf bytes.Buffer
+	var err error
+	switch format {
+	case "png":
+		err = png.Encode(&buf, img)
+	case "jpeg":
+		err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
+	}
+	if err != nil {
+		t.Fatalf("encode %s: %v", format, err)
+	}
+	return buf.Bytes()
+}
+
+// A photo-like image within the dimension limit can still be too many bytes; it
+// is downscaled, aspect preserved, until its encoding fits.
+func TestShrink_OverCap_DownscalesUntilItFits(t *testing.T) {
+	for _, format := range []string{"png", "jpeg"} {
+		orig := noiseImage(t, 240, 120, format)
+		maxBytes := len(orig) / 4
+		out, mime, resized, err := Shrink(orig, "image/"+format, maxBytes)
+		if err != nil || !resized {
+			t.Fatalf("%s: resized=%v err=%v", format, resized, err)
+		}
+		if len(out) > maxBytes {
+			t.Errorf("%s: %d bytes, want <= %d", format, len(out), maxBytes)
+		}
+		if mime != "image/"+format {
+			t.Errorf("%s: output mime %q, want the format kept", format, mime)
+		}
+		if w, h := dims(t, out); w >= 240 || w < 2*h-1 || w > 2*h+1 {
+			t.Errorf("%s: %dx%d, want smaller than 240x120 with its 2:1 aspect", format, w, h)
+		}
+	}
+}
+
+func TestShrink_UnderCap_ReturnsOriginal(t *testing.T) {
+	orig := noiseImage(t, 40, 30, "png")
+	out, mime, resized, err := Shrink(orig, "image/png", len(orig))
+	if err != nil || resized || mime != "image/png" || !bytes.Equal(out, orig) {
+		t.Errorf("resized=%v mime=%q err=%v same=%v; want the original untouched", resized, mime, err, bytes.Equal(out, orig))
+	}
+}
+
+func TestShrink_InvalidData_ReturnsOriginalAndError(t *testing.T) {
+	bad := []byte("\x89PNG\r\n\x1a\nnot a png at all")
+	out, _, resized, err := Shrink(bad, "image/png", 4)
+	if err == nil || resized || !bytes.Equal(out, bad) {
+		t.Errorf("resized=%v err=%v; want the original and an error", resized, err)
+	}
+}
+
+// No image encodes to 8 bytes: Shrink gives up and keeps the original.
+func TestShrink_CannotFit_ReturnsOriginalAndError(t *testing.T) {
+	orig := noiseImage(t, 40, 30, "png")
+	out, _, resized, err := Shrink(orig, "image/png", 8)
+	if err == nil || resized || !bytes.Equal(out, orig) {
+		t.Errorf("resized=%v err=%v; want the original and an error", resized, err)
 	}
 }

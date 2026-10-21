@@ -16,7 +16,9 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
 	"amplio/internal/llm"
@@ -143,6 +145,45 @@ func TestConvertMessages_ParallelToolResultsWithAttachments(t *testing.T) {
 		if tr.Content[1].OfImage == nil {
 			t.Errorf("tool_result %q inner[1] is not image", want)
 		}
+	}
+}
+
+// Vertex rejects a request body over 30,000,000 bytes (measured; see
+// vertexImageLimits), and the history is resent every turn, so once a session's
+// images add up past it every later request failed. The request must stay under
+// the limit, keeping the newest images and leaving a note inside the tool_result
+// of each dropped one.
+func TestBuildParams_VertexImagesFitTheRequestLimit(t *testing.T) {
+	const vertexMaxRequestBytes = 30_000_000
+	img := strings.Repeat("A", 5_400_000) // a 2000px noise PNG is ~5.3 MB of base64
+	const n = 8
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "task"}}
+	for i := range n {
+		id := fmt.Sprintf("call%d", i)
+		msgs = append(msgs,
+			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: id, Name: "view_file", Arguments: `{}`}}},
+			llm.Message{Role: llm.RoleToolResult, ToolCallID: id, Content: "Image: " + id,
+				Attachments: []llm.Attachment{{MimeType: "image/png", Base64Data: img}}})
+	}
+	p := &provider{model: "claude-opus-5-5", maxTokens: 1024, imageLimits: vertexImageLimits}
+
+	params := p.buildParams(llm.Request{Messages: msgs})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) >= vertexMaxRequestBytes {
+		t.Fatalf("request is %d bytes; Vertex rejects anything over %d", len(body), vertexMaxRequestBytes)
+	}
+	result := func(i int) []anthropic.ToolResultBlockParamContentUnion {
+		return params.Messages[2+2*i].Content[0].OfToolResult.Content
+	}
+	if newest := result(n - 1); len(newest) != 2 || newest[1].OfImage == nil {
+		t.Errorf("newest tool_result has %d blocks, want its text and its image", len(newest))
+	}
+	oldest := result(0)
+	if len(oldest) != 1 || !strings.Contains(oldest[0].OfText.Text, "image omitted") {
+		t.Errorf("oldest tool_result = %+v, want only its text with an omitted-image note", oldest)
 	}
 }
 

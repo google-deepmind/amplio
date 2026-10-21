@@ -13,14 +13,15 @@
 // limitations under the License.
 
 // Package imageutil provides safeguards for image attachments before they are
-// persisted and later sent to an LLM. Its main job is Clamp: aspect-preserving
-// downscaling of images whose pixel dimensions exceed a provider's limit.
+// persisted and later sent to an LLM: aspect-preserving downscaling of images
+// whose pixel dimensions (Clamp) or encoded size (Shrink) exceed a provider's
+// limit.
 //
-// Model providers reject images by PIXEL DIMENSION, not byte size (e.g. Vertex/
-// Claude 400s on an image whose long edge is too large, and Anthropic itself
-// downscales anything over ~1568px before processing). A tall-but-small-bytes
-// screenshot therefore sails past a byte-size cap yet still fails at the API, so
-// we clamp dimensions at the single point every attachment funnels through.
+// Providers reject images on both counts (e.g. Vertex/Claude 400s on an image
+// whose long edge is too large, and on one over 10 MiB of base64). A tall-but-
+// small-bytes screenshot passes a byte cap and fails the dimension limit, while a
+// photo-like PNG within the dimension limit can still be too many bytes, so both
+// are applied at the single point every attachment funnels through.
 package imageutil
 
 import (
@@ -29,6 +30,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"math"
 
 	// Register GIF as a decodable format for image.Decode (decode-only; a
 	// resized GIF is re-encoded to PNG).
@@ -45,6 +47,11 @@ import (
 // under every provider's hard rejection threshold while leaving headroom above
 // Anthropic's ~1568px internal downscale target.
 const DefaultMaxDim = 2000
+
+// DefaultMaxBytes is the default cap on an image's encoded size: 3.75 MB is 5 MB
+// once base64-encoded, the strictest per-image limit among the providers (the
+// Anthropic API documents 5 MB; Vertex allows 10 MiB).
+const DefaultMaxBytes = 3_750_000
 
 // jpegQuality is the re-encode quality for JPEG output. 90 is visually
 // near-lossless while keeping the byte size well below the base64 caps.
@@ -84,25 +91,70 @@ func Clamp(data []byte, mime string, maxDim int) (out []byte, outMime string, re
 	if err != nil {
 		return data, mime, false, fmt.Errorf("decode image: %w", err)
 	}
-
 	nw, nh := scaledDims(cfg.Width, cfg.Height, maxDim)
-	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
+	out, outMime, err = resize(src, format, nw, nh)
+	if err != nil {
+		return data, mime, false, err
+	}
+	return out, outMime, true, nil
+}
+
+// Shrink downscales an image whose encoding is larger than maxBytes until it
+// fits, preserving aspect ratio, and otherwise behaves like Clamp: an image that
+// already fits comes back untouched, JPEG stays JPEG and the rest become PNG, and
+// on failure (including an image that cannot be shrunk enough) the original is
+// returned with a non-nil error.
+//
+// maxBytes <= 0 selects DefaultMaxBytes.
+func Shrink(data []byte, mime string, maxBytes int) (out []byte, outMime string, resized bool, err error) {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	if len(data) <= maxBytes {
+		return data, mime, false, nil
+	}
+	src, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return data, mime, false, fmt.Errorf("decode image: %w", err)
+	}
+	w, h := src.Bounds().Dx(), src.Bounds().Dy()
+	size := len(data)
+	// Encoded size grows roughly with pixel count, so scale both edges by the
+	// square root of the overshoot, with a margin; repeat if it still misses.
+	for range 5 {
+		scale := math.Sqrt(float64(maxBytes)/float64(size)) * 0.9
+		w, h = max(1, int(float64(w)*scale)), max(1, int(float64(h)*scale))
+		out, outMime, err = resize(src, format, w, h)
+		if err != nil {
+			return data, mime, false, err
+		}
+		if len(out) <= maxBytes {
+			return out, outMime, true, nil
+		}
+		size = len(out)
+	}
+	return data, mime, false, fmt.Errorf("still %d bytes at %dx%d, over %d", size, w, h, maxBytes)
+}
+
+// resize resamples src to w×h and encodes it in Clamp's output format for the
+// source format.
+func resize(src image.Image, format string, w, h int) ([]byte, string, error) {
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	// CatmullRom is a high-quality resampling kernel — good for downscaling
 	// screenshots/diagrams where sharp text should stay legible.
 	draw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Over, nil)
 
 	var buf bytes.Buffer
-	// Keep JPEG as JPEG; re-encode everything else to PNG.
 	if format == "jpeg" {
 		if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: jpegQuality}); err != nil {
-			return data, mime, false, fmt.Errorf("encode jpeg: %w", err)
+			return nil, "", fmt.Errorf("encode jpeg: %w", err)
 		}
-		return buf.Bytes(), "image/jpeg", true, nil
+		return buf.Bytes(), "image/jpeg", nil
 	}
 	if err := png.Encode(&buf, dst); err != nil {
-		return data, mime, false, fmt.Errorf("encode png: %w", err)
+		return nil, "", fmt.Errorf("encode png: %w", err)
 	}
-	return buf.Bytes(), "image/png", true, nil
+	return buf.Bytes(), "image/png", nil
 }
 
 // scaledDims returns the largest width/height that fit within a maxDim square

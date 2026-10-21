@@ -1275,12 +1275,11 @@ func (a *EventLoopAgent) storeAttachment(att event.Attachment) (event.Attachment
 	}, true
 }
 
-// clampImage downscales an image attachment whose pixel dimensions exceed the
-// provider limit (providers reject by dimension, not byte size). Non-image
-// attachments pass through untouched. On any decode/encode failure it keeps the
-// ORIGINAL bytes and logs — a clamp problem must never drop the image or fail
-// the turn; a too-large image failing later at the API is strictly better than
-// silently losing it here.
+// clampImage downscales an image attachment whose pixel dimensions or encoded
+// size exceed the provider limits. Non-image attachments pass through untouched.
+// On any decode/encode failure it keeps the bytes it has and logs — a clamp
+// problem must never drop the image or fail the turn; a too-large image is then
+// left to the provider, which replaces it with a note (see llm.FitImages).
 func (a *EventLoopAgent) clampImage(data []byte, mime string) ([]byte, string) {
 	if !strings.HasPrefix(mime, "image/") {
 		return data, mime
@@ -1295,7 +1294,16 @@ func (a *EventLoopAgent) clampImage(data []byte, mime string) ([]byte, string) {
 			"from_bytes", len(data), "to_bytes", len(out),
 			"from_mime", mime, "to_mime", outMime, "max_dim", imageutil.DefaultMaxDim)
 	}
-	return out, outMime
+	shrunk, shrunkMime, resized, err := imageutil.Shrink(out, outMime, imageutil.DefaultMaxBytes)
+	if err != nil {
+		a.logger.Warn("image shrink failed; storing it unshrunk", "error", err, "mime", outMime, "bytes", len(out))
+		return out, outMime
+	}
+	if resized {
+		a.logger.Info("shrank image attachment over the byte cap",
+			"from_bytes", len(out), "to_bytes", len(shrunk), "max_bytes", imageutil.DefaultMaxBytes)
+	}
+	return shrunk, shrunkMime
 }
 
 // loadAttachments resolves persisted attachment references into provider-ready

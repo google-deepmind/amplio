@@ -28,14 +28,33 @@ import (
 // subStream adapts the bridge's NDJSON /generate response to llm.Stream. It owns
 // the HTTP response body and releases it in Close.
 type subStream struct {
-	resp  *http.Response
-	sc    *bufio.Scanner
-	cur   llm.StreamEvent
-	final *llm.Response
-	err   error
+	resp   *http.Response
+	sc     *bufio.Scanner
+	cur    llm.StreamEvent
+	final  *llm.Response
+	err    error
+	replay bool // cur is a delta Stream read ahead; the next Next returns it
+	done   bool // a final, an error or EOF was reached; Next stays false
 }
 
 func (s *subStream) Next() bool {
+	if s.replay {
+		s.replay = false
+		return true
+	}
+	if s.done {
+		return false
+	}
+	if !s.next() {
+		s.done = true
+		return false
+	}
+	return true
+}
+
+// next reads lines up to the next delta (true), or to a final, an error or the
+// end of the stream (false).
+func (s *subStream) next() bool {
 	for s.sc.Scan() {
 		line := bytes.TrimSpace(s.sc.Bytes())
 		if len(line) == 0 {

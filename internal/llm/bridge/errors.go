@@ -25,9 +25,9 @@ import (
 // how the harness ends up asking a model to read English to decide what to do.
 const (
 	// CodeProvider: the far side reached the model and the model (or its API)
-	// failed. Retryable in general; the MESSAGE is the interesting part, and it
-	// is carried verbatim because amplio classifies context-window overflow by
-	// reading it.
+	// failed. The MESSAGE is the interesting part, and it is carried verbatim:
+	// the client retries the transient ones by reading it (retry.go), and amplio
+	// classifies context-window overflow by reading it.
 	CodeProvider = "provider"
 	// CodeNotAllowed: the far side refused to run this handle — not on its menu,
 	// ambiguous, or carrying client args a caller may not supply. Retrying is

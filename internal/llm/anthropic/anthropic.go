@@ -59,7 +59,23 @@ type provider struct {
 	// cacheTTL is the prompt-cache TTL ("5m" or "1h") for cache_control
 	// breakpoints, set per model via the spec arg ?cache_ttl=5m|1h.
 	cacheTTL anthropic.CacheControlEphemeralTTL
+	// imageLimits are the backend's request limits on images, enforced on every
+	// request (see buildParams).
+	imageLimits llm.ImageLimits
 }
+
+// vertexImageLimits are Vertex AI's limits for Claude as measured (breaking one
+// is a 400): 600 images ("Too much media: … > 600"), 10 MiB of base64 per image
+// ("image exceeds 10 MB maximum") and 30,000,000 bytes per request ("The message
+// size (…) exceeds 30.000MB limit"), on opus-5-5 and sonnet-5, the count also on
+// opus-5, opus-4-6 and sonnet-4-6. Images get 20 MB of the request, leaving 10 MB
+// for text; the largest contexts seen are ~4 MB.
+var vertexImageLimits = llm.ImageLimits{MaxImages: 600, MaxImageBytes: 10 << 20, MaxTotalBytes: 20_000_000}
+
+// apiImageLimits are the direct Anthropic API's documented limits, unmeasured:
+// 100 images (models with a 200k context; 600 for the rest), 5 MB per image and
+// 32 MB per request.
+var apiImageLimits = llm.ImageLimits{MaxImages: 100, MaxImageBytes: 5_000_000, MaxTotalBytes: 20_000_000}
 
 // NewVertex creates a Provider for Claude on the Vertex AI backend. Reads
 // VERTEXAI_PROJECT and VERTEXAI_LOCATION from the environment (the same ADC auth
@@ -82,7 +98,8 @@ func NewVertex(model string, maxTokens int, clientArgs, args url.Values) (llm.Pr
 			"https://www.googleapis.com/auth/cloud-platform"),
 		option.WithMaxRetries(maxRetries),
 	)
-	return &provider{client: client, model: model, maxTokens: maxTokens, reqOpts: specReqOpts(args), cacheTTL: parseCacheTTL(clientArgs)}, nil
+	return &provider{client: client, model: model, maxTokens: maxTokens, reqOpts: specReqOpts(args),
+		cacheTTL: parseCacheTTL(clientArgs), imageLimits: vertexImageLimits}, nil
 }
 
 // NewAPIKey creates a Provider on the direct Anthropic API backend using
@@ -94,7 +111,8 @@ func NewAPIKey(model string, maxTokens int, clientArgs, args url.Values) (llm.Pr
 		return nil, fmt.Errorf("ANTHROPIC_API_KEY not set")
 	}
 	client := anthropic.NewClient(option.WithAPIKey(key), option.WithMaxRetries(maxRetries))
-	return &provider{client: client, model: model, maxTokens: maxTokens, reqOpts: specReqOpts(args), cacheTTL: parseCacheTTL(clientArgs)}, nil
+	return &provider{client: client, model: model, maxTokens: maxTokens, reqOpts: specReqOpts(args),
+		cacheTTL: parseCacheTTL(clientArgs), imageLimits: apiImageLimits}, nil
 }
 
 // specReqOpts turns spec args into raw request-body overrides via sjson paths,
@@ -215,10 +233,17 @@ func (p *provider) buildParams(req llm.Request) anthropic.MessageNewParams {
 	if maxTokens <= 0 {
 		maxTokens = p.maxTokens
 	}
+	// The whole history is resent every turn, so an image over a limit would fail
+	// this request and every one after it: replace such images with a note.
+	msgs, omitted := llm.FitImages(req.Messages, p.imageLimits)
+	if omitted > 0 {
+		slog.Info("anthropic: omitted images to fit the request limits",
+			"model", p.model, "session", req.SessionID, "omitted", omitted)
+	}
 	params := anthropic.MessageNewParams{
 		Model:     p.model,
 		MaxTokens: int64(maxTokens),
-		Messages:  convertMessages(req.Messages),
+		Messages:  convertMessages(msgs),
 	}
 	if req.SystemPrompt != "" {
 		params.System = []anthropic.TextBlockParam{{Text: req.SystemPrompt}}

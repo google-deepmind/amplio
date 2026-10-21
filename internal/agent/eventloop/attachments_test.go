@@ -17,13 +17,17 @@ package eventloop
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
+	"slices"
 	"testing"
 
 	"amplio/internal/blob"
 	"amplio/internal/event"
+	"amplio/internal/imageutil"
 )
 
 // pngBytes builds a w×h PNG for attachment-clamp tests.
@@ -148,4 +152,50 @@ func TestStoreAttachmentUndecodableFallsBack(t *testing.T) {
 	if want := base64.StdEncoding.EncodeToString(data); atts[0].Base64Data != want {
 		t.Error("undecodable image bytes changed; want original preserved")
 	}
+}
+
+// paddedPNG is a w×h PNG carrying pad bytes of private ancillary chunk, the
+// kind of bulk (embedded metadata, say) decoders skip: an image over the byte cap
+// that is cheap to decode and resample.
+func paddedPNG(t *testing.T, w, h, pad int) []byte {
+	t.Helper()
+	img := pngBytes(t, w, h)
+	var chunk bytes.Buffer
+	_ = binary.Write(&chunk, binary.BigEndian, uint32(pad))
+	chunk.WriteString("prVt")
+	chunk.Write(make([]byte, pad))
+	_ = binary.Write(&chunk, binary.BigEndian, crc32.ChecksumIEEE(chunk.Bytes()[4:]))
+	iend := len(img) - 12 // the IEND chunk closes every PNG
+	return slices.Concat(img[:iend], chunk.Bytes(), img[iend:])
+}
+
+// An image within the dimension cap but over the byte cap is shrunk before
+// it's persisted, rather than stored as is to fail at the API on every turn.
+func TestStoreAttachmentShrinksOverByteCap(t *testing.T) {
+	a := newT(testCfg{BlobStore: blob.NewStore(t.TempDir())})
+	orig := paddedPNG(t, 64, 32, imageutil.DefaultMaxBytes)
+
+	ref, ok := a.storeAttachment(event.Attachment{MimeType: "image/png", Data: orig, SourceHint: "photo.png"})
+	if !ok {
+		t.Fatal("storeAttachment returned ok=false")
+	}
+	if ref.Size > imageutil.DefaultMaxBytes || ref.MimeType != "image/png" {
+		t.Errorf("stored %d bytes of %s, want a PNG within %d", ref.Size, ref.MimeType, imageutil.DefaultMaxBytes)
+	}
+	raw, err := base64.StdEncoding.DecodeString(a.loadAttachments([]event.Attachment{ref})[0].Base64Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, h := imageDims(t, raw); w > 64 || w < 2*h-1 || w > 2*h+1 {
+		t.Errorf("stored %dx%d, want at most 64x32 with its 2:1 aspect", w, h)
+	}
+}
+
+func imageDims(t *testing.T, data []byte) (int, int) {
+	t.Helper()
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("decode stored image: %v", err)
+	}
+	return cfg.Width, cfg.Height
 }

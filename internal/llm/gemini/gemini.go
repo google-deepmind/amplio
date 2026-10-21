@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
 	mrand "math/rand/v2"
 	"net/url"
 	"os"
@@ -155,7 +156,24 @@ type provider struct {
 	model     string
 	maxTokens int
 	cfg       geminiArgs // thinking/temperature overrides from the spec args
+	// imageLimits are the backend's request limits on images, enforced on every
+	// request (see build).
+	imageLimits llm.ImageLimits
 }
+
+// vertexImageLimits are Vertex AI's limits for Gemini as measured on
+// gemini-3.8-flash and gemini-4-argon (breaking one is a 400): 3000 images
+// ("it has 3001 image files but the model only supports up to 3000") and a
+// 524,288,000-byte request body, base64 images included ("Request payload size
+// exceeds the limit: 524288000 bytes."), the same for generateContent and
+// streamGenerateContent. The documented 7 MB per inline image is not enforced (a
+// 393 MB image was accepted). Images get 400 MB of the request, leaving 100+ MB
+// for text.
+var vertexImageLimits = llm.ImageLimits{MaxImages: 3000, MaxTotalBytes: 400_000_000}
+
+// apiImageLimits are the Gemini Developer API's documented limits, unmeasured:
+// 3,600 images per request and 100 MB of base64 inline data per request.
+var apiImageLimits = llm.ImageLimits{MaxImages: 3000, MaxTotalBytes: 80_000_000}
 
 // geminiArgs holds the genai-typed knobs parsed from spec `?k=v` args. genai is
 // a typed struct (no raw passthrough like Anthropic), so we map a known key set.
@@ -239,7 +257,7 @@ func NewVertex(model string, maxTokens int, _, args url.Values) (llm.Provider, e
 	if err != nil {
 		return nil, fmt.Errorf("gemini vertex client: %w", err)
 	}
-	return &provider{client: client, model: model, maxTokens: maxTokens, cfg: g}, nil
+	return &provider{client: client, model: model, maxTokens: maxTokens, cfg: g, imageLimits: vertexImageLimits}, nil
 }
 
 // NewAPIKey builds a Gemini provider on the Developer API backend using
@@ -263,7 +281,7 @@ func NewAPIKey(model string, maxTokens int, _, args url.Values) (llm.Provider, e
 	if err != nil {
 		return nil, fmt.Errorf("gemini api client: %w", err)
 	}
-	return &provider{client: client, model: model, maxTokens: maxTokens, cfg: g}, nil
+	return &provider{client: client, model: model, maxTokens: maxTokens, cfg: g, imageLimits: apiImageLimits}, nil
 }
 
 func (p *provider) ModelID() string { return p.model }
@@ -319,7 +337,14 @@ func (p *provider) Stream(ctx context.Context, req llm.Request) (llm.Stream, err
 }
 
 func (p *provider) build(req llm.Request) ([]*genai.Content, *genai.GenerateContentConfig, error) {
-	contents, err := convertMessages(req.Messages)
+	// The whole history is resent every turn, so images over a limit would fail
+	// this request and every one after it: replace such images with a note.
+	msgs, omitted := llm.FitImages(req.Messages, p.imageLimits)
+	if omitted > 0 {
+		slog.Info("gemini: omitted images to fit the request limits",
+			"model", p.model, "session", req.SessionID, "omitted", omitted)
+	}
+	contents, err := convertMessages(msgs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -444,14 +469,30 @@ func convertMessages(msgs []llm.Message) ([]*genai.Content, error) {
 					ID:       tr.ToolCallID,
 					Name:     names[tr.ToolCallID],
 					Response: payload,
+					Parts:    functionResponseParts(tr.Attachments),
 				}})
-				parts = appendImageParts(parts, tr.Attachments)
 			}
 			i-- // the for loop's i++ will re-advance past the last result
 			out = append(out, &genai.Content{Role: "user", Parts: parts})
 		}
 	}
 	return out, nil
+}
+
+// functionResponseParts carries a tool result's images inside its
+// FunctionResponse (multimodal function responses). Gemini 3 and later reject an
+// image part placed next to the FunctionResponse instead: "Requests ending with a
+// model turn are not supported."
+func functionResponseParts(atts []llm.Attachment) []*genai.FunctionResponsePart {
+	var parts []*genai.FunctionResponsePart
+	for _, att := range atts {
+		data, err := base64.StdEncoding.DecodeString(att.Base64Data)
+		if err != nil {
+			continue
+		}
+		parts = append(parts, &genai.FunctionResponsePart{InlineData: &genai.FunctionResponseBlob{MIMEType: att.MimeType, Data: data}})
+	}
+	return parts
 }
 
 func appendImageParts(parts []*genai.Part, atts []llm.Attachment) []*genai.Part {

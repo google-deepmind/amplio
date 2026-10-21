@@ -100,6 +100,13 @@ per line:
 ```
 
 Notes:
+- Relay a backend failure's text verbatim in `error`. amplio retries transient
+  ones itself, up to 4 attempts with backoff, when the message carries a gRPC
+  status such as `UNAVAILABLE`, `DEADLINE_EXCEEDED` or `RESOURCE_EXHAUSTED`, a
+  `(code 5xx)` / `(code 429)` suffix, "no capacity", "overloaded" or "no first
+  token within". A streaming request is retried only if the error comes before
+  the first delta. Context-window overflow text ("too long", "exceeds the
+  maximum", ...) is never retried: amplio compacts the conversation instead.
 - Deltas are for live UI only; the **`final.response` is authoritative** (amplio's
   blocking `Call` ignores deltas and returns `final.response`; `Stream` yields
   deltas and exposes `final.response` afterward). A bridge that doesn't stream may

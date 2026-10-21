@@ -271,6 +271,77 @@ func TestConvertMessagesCoalescesToolResults(t *testing.T) {
 	}
 }
 
+// A tool result's images ride INSIDE its FunctionResponse (functionResponse.parts),
+// never as sibling parts of the turn: Gemini 3 and later reject the sibling shape
+// with "Requests ending with a model turn are not supported." Images attached to
+// a user message stay plain inline parts.
+func TestConvertMessages_ToolResultImagesInsideFunctionResponse(t *testing.T) {
+	png1, png2 := []byte("\x89PNG one"), []byte("\x89PNG two")
+	att := func(b []byte) llm.Attachment {
+		return llm.Attachment{MimeType: "image/png", Base64Data: base64.StdEncoding.EncodeToString(b)}
+	}
+	msgs := []llm.Message{
+		{Role: llm.RoleUser, Content: "look", Attachments: []llm.Attachment{att(png1)}},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "c1", Name: "view_file", Arguments: `{}`},
+			{ID: "c2", Name: "view_file", Arguments: `{}`},
+		}},
+		{Role: llm.RoleToolResult, ToolCallID: "c1", Content: "Image: one.png", Attachments: []llm.Attachment{att(png1)}},
+		{Role: llm.RoleToolResult, ToolCallID: "c2", Content: "Image: two.png", Attachments: []llm.Attachment{att(png1), att(png2)}},
+	}
+	contents, err := convertMessages(msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user := contents[0].Parts; len(user) != 2 || user[1].InlineData == nil || string(user[1].InlineData.Data) != string(png1) {
+		t.Errorf("user turn parts = %+v, want its text then the image inline", user)
+	}
+	results := contents[2].Parts
+	if len(results) != 2 {
+		t.Fatalf("tool-result turn has %d parts, want exactly the 2 FunctionResponses", len(results))
+	}
+	for i, want := range [][]byte{png1, png2} {
+		p := results[i]
+		if p.InlineData != nil || p.FunctionResponse == nil {
+			t.Fatalf("part %d = %+v, want a FunctionResponse and no sibling image", i, p)
+		}
+		inner := p.FunctionResponse.Parts
+		if len(inner) != i+1 {
+			t.Fatalf("response %d carries %d images, want %d", i, len(inner), i+1)
+		}
+		last := inner[len(inner)-1].InlineData
+		if last == nil || last.MIMEType != "image/png" || string(last.Data) != string(want) {
+			t.Errorf("response %d last image = %+v, want %q as image/png", i, last, want)
+		}
+	}
+}
+
+// build applies the provider's image limits: past them the oldest images leave
+// the request, and each leaves a note in its own function response.
+func TestBuild_ReplacesImagesOverTheLimits(t *testing.T) {
+	img := llm.Attachment{MimeType: "image/png", Base64Data: base64.StdEncoding.EncodeToString([]byte("123456789"))} // 12 base64 bytes
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "look"}}
+	for _, id := range []string{"c1", "c2", "c3"} {
+		msgs = append(msgs,
+			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: id, Name: "view_file", Arguments: `{}`}}},
+			llm.Message{Role: llm.RoleToolResult, ToolCallID: id, Content: "Image: " + id, Attachments: []llm.Attachment{img}})
+	}
+	p := &provider{model: "gemini-test", maxTokens: 64, imageLimits: llm.ImageLimits{MaxTotalBytes: 20}}
+
+	contents, _, err := p.build(llm.Request{Messages: msgs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := func(i int) *genai.FunctionResponse { return contents[2+2*i].Parts[0].FunctionResponse }
+	if newest := response(2); len(newest.Parts) != 1 {
+		t.Errorf("newest response carries %d images, want 1", len(newest.Parts))
+	}
+	oldest := response(0)
+	if out, _ := oldest.Response["output"].(string); len(oldest.Parts) != 0 || !strings.Contains(out, "image omitted") {
+		t.Errorf("oldest response = %d images, output %q; want no image and a note", len(oldest.Parts), out)
+	}
+}
+
 func TestConvertToolsUsesJSONSchema(t *testing.T) {
 	tools := convertTools([]llm.ToolDef{{
 		Name:        "t",
