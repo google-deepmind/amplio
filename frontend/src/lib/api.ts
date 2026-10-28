@@ -53,6 +53,14 @@ export function artifactRawUrl(runId: string, path: string): string {
   return `/api/runs/${runId}/artifacts/raw?path=${encodeURIComponent(path)}`;
 }
 
+// The same file under a path-style URL (/artifacts/file/report/index.html), so
+// an HTML report's relative URLs (img/plot.png, style.css) resolve against its
+// own folder and load from the same route.
+export function artifactFileUrl(runId: string, path: string): string {
+  const segs = path.replace(/^\/+/, '').split('/').map(encodeURIComponent);
+  return `/api/runs/${runId}/artifacts/file/${segs.join('/')}`;
+}
+
 // Transient conditions worth retrying on an idempotent read: a fetch that threw
 // (no HTTP response reached us), or a gateway/proxy status. These are infra/
 // network blips (e.g. an UberProxy AuthController timeout) rather than an app

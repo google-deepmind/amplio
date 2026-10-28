@@ -319,7 +319,7 @@
 						{#if refusal}<RefusalNotice {refusal} />{/if}
 						{#if stopNotice}<StopNoticeView notice={stopNotice} />{/if}
 					</div>
-					{#if streaming}<span class="cursor"></span>{/if}
+					{#if streaming}<span class="cursor live-indicator"></span>{/if}
 					{#if toolCalls.length}
 						<div class="tools">
 						{#each toolCalls as tc}

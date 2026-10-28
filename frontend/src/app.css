@@ -80,9 +80,6 @@
 		--scrim: rgb(0 0 0 / 0.55);
 		--sheet-radius: 12px;
 		--drawer-w: min(304px, calc(100vw - 56px));
-		/* Phone only: RunCard and GradePicker use --radius, which desktop never
-		   defined; defining it there would round the desktop menus. */
-		--radius: var(--radius-md);
 	}
 
 	/* 44px is where both vendors' touch guidelines land; desktop controls are
@@ -136,8 +133,12 @@ a {
 	color: var(--accent);
 	text-decoration: none;
 }
-a:hover {
-	text-decoration: underline;
+/* Hover styles only where a pointer can hover: touch browsers emulate
+   :hover on tap and leave it stuck. */
+@media (hover: hover) {
+	a:hover {
+		text-decoration: underline;
+	}
 }
 
 button {
@@ -149,8 +150,10 @@ button {
 	padding: 0.4rem 0.8rem;
 	cursor: pointer;
 }
-button:hover:not(:disabled) {
-	border-color: var(--accent-dim);
+@media (hover: hover) {
+	button:hover:not(:disabled) {
+		border-color: var(--accent-dim);
+	}
 }
 button:disabled {
 	opacity: 0.5;
@@ -164,8 +167,10 @@ button.primary {
 button.danger {
 	border-color: color-mix(in srgb, var(--err) 45%, var(--border));
 }
-button.danger:hover {
-	border-color: var(--err);
+@media (hover: hover) {
+	button.danger:hover {
+		border-color: var(--err);
+	}
 }
 
 /* Text-like fields stretch; checkboxes/radios keep their native box. */
@@ -473,14 +478,23 @@ textarea {
 	}
 }
 
+/* .live-indicator marks an animation that reports state (the "working" dot, a
+   streaming cursor, a critical resource chip): opacity only, no movement, so
+   reduced motion leaves it running. */
 @media (prefers-reduced-motion: reduce) {
-	*,
+	*:not(.live-indicator),
 	*::before,
 	*::after {
 		animation-duration: 0.01ms !important;
 		animation-iteration-count: 1 !important;
 		transition-duration: 0.01ms !important;
 		scroll-behavior: auto !important;
+	}
+	/* A spinner is the only sign that something is still working: keep it
+	   turning, slower, instead of stopping after one turn. */
+	.spin {
+		animation-duration: 1.5s !important;
+		animation-iteration-count: infinite !important;
 	}
 }
 
@@ -508,21 +522,6 @@ textarea {
 	[role='button']:active,
 	[role='tab']:active {
 		background-image: linear-gradient(var(--press), var(--press));
-	}
-	/* Touch browsers emulate :hover on tap; keep it from sticking. */
-	@media (hover: none) {
-		button:hover:not(:disabled) {
-			border-color: var(--border);
-		}
-		button.danger:hover {
-			border-color: color-mix(in srgb, var(--err) 45%, var(--border));
-		}
-		button.primary:hover:not(:disabled) {
-			border-color: var(--accent);
-		}
-		a:hover {
-			text-decoration: none;
-		}
 	}
 	/* !important: a floor, not a style; scoped field rules (.filters .search)
 	   outrank any plain global selector. */

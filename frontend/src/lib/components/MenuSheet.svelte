@@ -18,6 +18,7 @@
 	import type { Snippet } from 'svelte';
 	import { tick } from 'svelte';
 	import { viewport } from '$lib/viewport.svelte';
+	import { isBackdropClick } from '$lib/dialog';
 
 	// A ⋮-style menu's surface. Phone: a modal <dialog> bottom sheet, like the
 	// drawer: focus moves to the first item, Tab stays inside, the page behind
@@ -54,11 +55,7 @@
 		(e.shiftKey ? f[f.length - 1] : f[0])?.focus();
 	}
 	function backdropClick(e: MouseEvent) {
-		if (e.target !== dlg) return;
-		const r = dlg.getBoundingClientRect();
-		const inside =
-			e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-		if (!inside) onclose();
+		if (isBackdropClick(e, dlg)) onclose();
 	}
 </script>
 

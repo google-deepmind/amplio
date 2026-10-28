@@ -174,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/artifacts", s.handleArtifacts)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/all", s.handleArtifactsAll)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/raw", s.handleArtifactRaw)
+	mux.HandleFunc("GET /api/runs/{id}/artifacts/file/{path...}", s.handleArtifactFile)
 	mux.HandleFunc("GET /api/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("GET /api/recall", s.handleRecallSearch)
 	mux.HandleFunc("GET /api/recall/item", s.handleRecallItem)

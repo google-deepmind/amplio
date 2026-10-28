@@ -20,6 +20,8 @@ import { RowsIcon, PulseIcon, BellIcon, BookOpenIcon, InfoIcon } from 'phosphor-
 
 /** Inside a run, whose shell brings its own bar and nav. */
 export const isRunPath = (path: string) => path.startsWith('/runs/');
+/** The dashboard. */
+export const isHomePath = (path: string) => path === '/';
 
 export type Destination = {
 	label: string;

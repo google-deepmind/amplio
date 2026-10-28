@@ -33,6 +33,7 @@
 	import { AndroidLogoIcon, FolderIcon, PathIcon, ScrollIcon } from 'phosphor-svelte';
 	import { iconForName } from '$lib/sessionIcon';
 	import { atLeast } from '$lib/viewport.svelte';
+	import { dismissKeyboardOnScroll } from '$lib/dismissKeyboardOnScroll';
 	import { toolIcon } from '$lib/toolIcon';
 
 	const store = getRunStore();
@@ -723,12 +724,12 @@
 		{#snippet subagentsCompact(clickable: boolean = false)}
 			{#if clickable}
 				<button class="sa-compact-btn dim small" onclick={toggleArtifacts}>
-					<span class="dot working"></span>
+					<span class="dot working live-indicator"></span>
 					<span>{liveTree.live} sub-agent{liveTree.live === 1 ? '' : 's'} active</span>
 				</button>
 			{:else}
 				<span class="sa-compact dim small">
-					<span class="dot working"></span>
+					<span class="dot working live-indicator"></span>
 					<span>{liveTree.live} sub-agent{liveTree.live === 1 ? '' : 's'} active</span>
 				</span>
 			{/if}
@@ -737,7 +738,13 @@
 		{#if error}<p class="err">{error}</p>{/if}
 		<!-- use:artifactPills delegates artifact-pill (data-artifact-path) clicks from
 		     the {@html} markdown to open the file in the side panel. -->
-		<div class="scroll" bind:this={scrollEl} onscroll={onScroll} use:artifactPills>
+		<div
+			class="scroll"
+			bind:this={scrollEl}
+			onscroll={onScroll}
+			use:artifactPills
+			use:dismissKeyboardOnScroll
+		>
 			{#each phaseCards as c (c.end_step)}
 				<div class="phase">
 					<!-- The WHOLE card opens this rolled-up phase in the read-only chat
@@ -792,10 +799,10 @@
 		<div class="statusbar">
 			<div class="sb-lhs">
 				{#if compacting}
-					<span class="dot working"></span>
+					<span class="dot working live-indicator"></span>
 					<span class="dim small">compacting context…</span>
 				{:else if working || liveTree.live > 0}
-					<span class="dot working"></span>
+					<span class="dot working live-indicator"></span>
 					<span class="dim small">working</span>
 					<!-- Only when the aside ISN'T showing sub-agent info (i.e. narrow
 					     viewports: on wide ones asideVisible is true whenever sub-agents are
@@ -1330,8 +1337,9 @@
 
 	@media (max-width: 640px) {
 		/* The page gutter is the left edge. On the right, the scroller runs on to
-		   the glass and keeps a --tap-wide lane for the segment navigator's dots;
-		   the column takes the gutter back as padding for the bar and composer. */
+		   the glass so the segment navigator can overlay its edge, and pads the
+		   transcript back to the gutter; the column does the same for the bar and
+		   composer. */
 		.chat-layout {
 			margin-right: calc(-1 * var(--gutter));
 		}
@@ -1340,11 +1348,9 @@
 		}
 		.scroll {
 			padding-left: 0;
-			padding-right: var(--tap);
+			padding-right: var(--gutter);
 			margin-right: calc(-1 * var(--gutter));
 			gap: var(--sp-2);
-			--nav-offset: var(--tap);
-			--nav-phone: block;
 		}
 		/* One line at 360: the status text ellipsises before anything wraps. */
 		.statusbar {

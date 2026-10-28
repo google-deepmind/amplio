@@ -23,9 +23,9 @@ export const DRAWER_ID = 'nav-drawer';
 // flag serves both. Opening pushes a shallow history entry, so the system Back
 // (Android button, iOS swipe) closes the drawer instead of leaving the page;
 // links inside the drawer replace that entry (data-sveltekit-replacestate on
-// the dialog), so a later Back never lands on it. The flag is ours rather than
-// page.state: SvelteKit cannot restore page.state on a Back into an entry that
-// auth.init rewrote with a raw history.replaceState (every ?token= landing).
+// the dialog), so a later Back never lands on it. The open flag is module
+// state rather than page.state; page.state would also work now that ?token=
+// is exchanged before the router starts (hooks.client.ts).
 let open = $state(false);
 let entry = false; // our shallow entry is the current one
 

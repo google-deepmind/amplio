@@ -25,6 +25,7 @@
 	import { runsStore } from '$lib/runsStore.svelte';
 	import { setFavicon } from '$lib/favicon';
 	import { trackKeyboard } from '$lib/keyboard.svelte';
+	import { isHomePath, isRunPath } from '$lib/route';
 	import TopBanner from '$lib/components/TopBanner.svelte';
 	import ServerStatusBanner from '$lib/components/ServerStatusBanner.svelte';
 
@@ -66,15 +67,15 @@
 		setFavicon({ dotted, chat });
 	});
 
-	// Same test TopBanner uses to hand the top of the screen to the run bar.
-	const inRun = $derived(page.url.pathname.startsWith('/runs/'));
+	const inRun = $derived(isRunPath(page.url.pathname));
+	const atHome = $derived(isHomePath(page.url.pathname));
 
 	onMount(trackKeyboard);
 </script>
 
 <TopBanner />
 <ServerStatusBanner />
-<main class:run={inRun} class:home={page.url.pathname === '/'}>
+<main class:run={inRun} class:home={atHome}>
 	{@render children()}
 </main>
 
@@ -92,13 +93,15 @@
 		   exactly, so this never shows a scrollbar there. */
 		overflow-y: auto;
 	}
-	/* The dashboard hides its scrollbars (see routes/+page.svelte); main
-	   scrolls there only when the window is too short for the app-shell. */
-	main.home {
-		scrollbar-width: none;
-	}
-	main.home::-webkit-scrollbar {
-		display: none;
+	/* On phones the dashboard hides its scrollbars (see routes/+page.svelte);
+	   main scrolls there only when the window is too short for the app-shell. */
+	@media (max-width: 640px) {
+		main.home {
+			scrollbar-width: none;
+		}
+		main.home::-webkit-scrollbar {
+			display: none;
+		}
 	}
 
 	@media (max-width: 640px) {

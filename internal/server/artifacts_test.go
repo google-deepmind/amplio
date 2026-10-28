@@ -126,6 +126,128 @@ func TestServer_Artifacts(t *testing.T) {
 	}
 }
 
+// An HTML report is served from /artifacts/file/<path> so that its relative URLs
+// resolve against its own folder, back into the same route, and under a policy
+// that runs its scripts in an opaque origin without letting it reach anything
+// outside amplio.
+//
+// Not parallel: config.SetDataDir pins the data dir for the whole process.
+func TestServer_ArtifactFile_HTMLReport(t *testing.T) {
+	dataDir := t.TempDir()
+	config.SetDataDir(dataDir)
+	t.Cleanup(func() { config.SetDataDir("") })
+	srv, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	base := config.ArtifactDir(testRun)
+	for name, body := range map[string]string{
+		"report/index.html":  `<html><head><link rel="stylesheet" href="style.css"></head><body><img src="img/dot.png"></body></html>`,
+		"report/style.css":   "body{}",
+		"report/img/dot.png": "\x89PNG\r\n\x1a\n",
+	} {
+		p := filepath.Join(base, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Outside the artifact dir: must never be served.
+	if err := os.WriteFile(filepath.Join(dataDir, "config.toml"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type reply struct {
+		StatusCode int
+		Header     http.Header
+		Body       []byte
+	}
+	get := func(u string) reply {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, u, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close() //nolint:errcheck
+		b, _ := io.ReadAll(resp.Body)
+		return reply{resp.StatusCode, resp.Header, b}
+	}
+
+	reportURL := ts.URL + "/api/runs/" + testRun + "/artifacts/file/report/index.html"
+	resp := get(reportURL)
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+		t.Fatalf("report: status %d, type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	for _, want := range []string{"sandbox allow-scripts;", "default-src 'self' data: blob:", "connect-src 'none'", "form-action 'none'"} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("report CSP %q lacks %q", csp, want)
+		}
+	}
+	// allow-same-origin would hand the report the dashboard's origin; https: or
+	// a wildcard would let it load from (and leak to) other sites.
+	for _, bad := range []string{"allow-same-origin", "https:", "*"} {
+		if strings.Contains(csp, bad) {
+			t.Errorf("report CSP %q contains %q", csp, bad)
+		}
+	}
+	for h, want := range map[string]string{"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"} {
+		if got := resp.Header.Get(h); got != want {
+			t.Errorf("report %s = %q, want %q", h, got, want)
+		}
+	}
+	if d := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(d, "inline") {
+		t.Errorf("report disposition %q, want inline", d)
+	}
+
+	// The report's relative URLs resolve, as a browser resolves them, into this
+	// route, and its assets keep the strict non-HTML policy.
+	for _, ref := range []string{"img/dot.png", "style.css"} {
+		u, _ := url.Parse(reportURL)
+		abs := u.ResolveReference(&url.URL{Path: ref})
+		if want := "/api/runs/" + testRun + "/artifacts/file/report/" + ref; abs.Path != want {
+			t.Fatalf("%s resolved to %s, want %s", ref, abs.Path, want)
+		}
+		r := get(abs.String())
+		if r.StatusCode != http.StatusOK {
+			t.Errorf("%s: status %d", ref, r.StatusCode)
+		}
+		if got := r.Header.Get("Content-Security-Policy"); got != "sandbox; default-src 'none'" {
+			t.Errorf("%s CSP = %q, want the strict non-HTML policy", ref, got)
+		}
+	}
+
+	// An encoded traversal reaches the handler as "../../config.toml" and is
+	// confined by os.Root; an empty path is a client error.
+	if r := get(ts.URL + "/api/runs/" + testRun + "/artifacts/file/..%2F..%2Fconfig.toml"); r.StatusCode != http.StatusNotFound {
+		t.Errorf("traversal: status %d, body %q; want 404", r.StatusCode, r.Body)
+	}
+	if r := get(ts.URL + "/api/runs/" + testRun + "/artifacts/file/"); r.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty path: status %d, want 400", r.StatusCode)
+	}
+}
+
+// HTML and XHTML both display in place (the viewer frames them; an attachment in
+// a frame downloads instead) and both get the report policy. Checked on the
+// media types directly, since mapping .xhtml to one depends on the host's MIME
+// table.
+func TestArtifactReportTypes(t *testing.T) {
+	for _, mt := range []string{htmlType, xhtmlType} {
+		if !inlineType(mt) {
+			t.Errorf("inlineType(%q) = false, want true", mt)
+		}
+		if got := artifactCSP(mt); got != htmlCSP {
+			t.Errorf("artifactCSP(%q) = %q, want htmlCSP", mt, got)
+		}
+	}
+	if got := artifactCSP("image/svg+xml"); got != "sandbox; default-src 'none'" {
+		t.Errorf("SVG CSP = %q, want the strict policy", got)
+	}
+}
+
 // A run that has not written any artifact yet has no artifact dir. Both listings
 // still answer 200 with their usual object shape and an empty (not null) list:
 // /artifacts/all used to answer a bare [], which the browser's file search read

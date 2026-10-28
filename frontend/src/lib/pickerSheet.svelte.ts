@@ -21,9 +21,8 @@ import { viewport } from '$lib/viewport.svelte';
 // Phone sheets that Back closes: the new-run form and the pickers inside it.
 // Each open layer owns one shallow history entry, stamped with its depth, so
 // nested layers pop in order (picker, then form) and a Back closes exactly the
-// layers above the entry it lands on. Read from history.state rather than
-// page.state, which SvelteKit cannot restore on entries auth.init rewrote with
-// a raw replaceState (every ?token= landing); those read as depth 0.
+// layers above the entry it lands on. The depth is read from history.state;
+// an entry this module did not push has no depth and reads as 0.
 type Layer = { close: () => void };
 const stack: Layer[] = [];
 

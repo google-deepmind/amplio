@@ -26,11 +26,16 @@
 	import { pageTitle } from '$lib/title';
 	import type { RunReport } from '$lib/types';
 	import { gradeSpecByRank } from '$lib/components/GradePicker.svelte';
+	import MenuSheet from '$lib/components/MenuSheet.svelte';
+	import { menuKeys, popover } from '$lib/dismiss';
+	import { viewport } from '$lib/viewport.svelte';
+	import { beforeNavigate } from '$app/navigation';
 	import {
 		CheckCircleIcon,
 		XCircleIcon,
 		WarningIcon,
-		PaperclipIcon
+		PaperclipIcon,
+		CaretDownIcon
 	} from 'phosphor-svelte';
 
 	const store = getRunStore();
@@ -84,6 +89,38 @@
 	const isViewingLatest = $derived(
 		selectedVersion === null || (latest != null && selectedVersion === latest.version)
 	);
+	function selectIteration(r: RunReport) {
+		selectedVersion = r === latest ? null : r.version;
+	}
+
+	// Phone: one row of iteration tabs doesn't fit once a run has had a few
+	// iterations, so the tabs become a button that opens a bottom sheet listing
+	// every iteration (newest first) with its date and critic grade.
+	let iterOpen = $state(false);
+	let iterWrap = $state<HTMLElement>();
+	let iterBtn = $state<HTMLButtonElement>();
+	const iterPop = popover(() => closeIterations());
+	beforeNavigate(() => {
+		if (iterPop.release()) iterOpen = false;
+	});
+	$effect(() => () => void iterPop.closed());
+	function toggleIterations(e: MouseEvent) {
+		e.stopPropagation();
+		if (iterOpen) closeIterations();
+		else {
+			iterOpen = true;
+			if (iterWrap) iterPop.opened(iterWrap);
+		}
+	}
+	function closeIterations() {
+		iterOpen = false;
+		iterPop.closed();
+	}
+	function pickIteration(r: RunReport, e: MouseEvent) {
+		e.stopPropagation();
+		selectIteration(r);
+		closeIterations();
+	}
 
 	// Ephemeral (non-session) report generator — registered by the critic
 	// finalizer for both auto and manual triggers. Drives the "Generating
@@ -401,7 +438,51 @@
 					<!-- Iteration tabs: only when there's more than one. Clicking a
 					     non-latest tab freezes the view; the latest tab restores the
 					     "track newest" behavior (null selection). -->
-					{#if reports.length > 1}
+					{#if reports.length > 1 && viewport.isPhone && displayed}
+						<div class="iter-pick" bind:this={iterWrap}>
+							<button
+								type="button"
+								class="iter-btn"
+								bind:this={iterBtn}
+								aria-haspopup="menu"
+								aria-expanded={iterOpen}
+								onclick={toggleIterations}
+							>
+								v{displayed.version} <span class="iter-of">of {reports.length}</span>
+								<CaretDownIcon size={12} />
+							</button>
+							{#if iterOpen}
+								<MenuSheet label="Report iteration" trigger={iterBtn} onclose={closeIterations}>
+									<div
+										class="iter-menu"
+										role="menu"
+										aria-label="Report iteration"
+										tabindex="-1"
+										onkeydown={menuKeys}
+									>
+										{#each [...reports].reverse() as r (r.version)}
+											{@const gs = gradeSpecByRank(r.grade)}
+											<button
+												role="menuitem"
+												class="iter-item"
+												class:active={displayed.version === r.version}
+												onclick={(e) => pickIteration(r, e)}
+											>
+												<span class="iter-v">v{r.version}</span>
+												<span class="iter-when">{new Date(r.created_at).toLocaleString()}</span>
+												{#if gs}
+													<span class="iter-grade" style="color:{gs.color}" title="Critic grade: {gs.label}">
+														<gs.icon size={16} weight="duotone" />
+													</span>
+												{/if}
+												{#if r === latest}<span class="iter-latest">latest</span>{/if}
+											</button>
+										{/each}
+									</div>
+								</MenuSheet>
+							{/if}
+						</div>
+					{:else if reports.length > 1}
 						<div class="iteration-tabs" role="tablist">
 							{#each reports as r (r.version)}
 								<button
@@ -409,7 +490,7 @@
 									class="tab"
 									class:on={displayed?.version === r.version}
 									title="Iteration {r.version} — {new Date(r.created_at).toLocaleString()}"
-									onclick={() => (selectedVersion = r === latest ? null : r.version)}
+									onclick={() => selectIteration(r)}
 								>
 									v{r.version}{r === latest ? ' · latest' : ''}
 								</button>
@@ -815,6 +896,7 @@
 	   obvious; others stay quiet. */
 	.iteration-tabs {
 		display: flex;
+		flex-wrap: wrap;
 		gap: 0.2rem;
 	}
 	.iteration-tabs .tab {
@@ -1110,17 +1192,69 @@
 			padding: 0 var(--sp-3);
 			font-size: var(--fs-sm);
 		}
-		.iteration-tabs .tab {
+		/* Iteration picker: a 30px pill with a 44px hit area, opening a bottom
+		   sheet of 48px rows (MenuSheet). */
+		.iter-btn {
 			position: relative;
+			display: inline-flex;
+			align-items: center;
+			gap: var(--sp-1);
 			height: 30px;
-			min-width: var(--tap);
 			min-height: 0;
+			padding: 0 var(--sp-3);
+			font-size: var(--fs-sm);
+			white-space: nowrap;
+			border-color: var(--accent-dim);
+			background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
+		}
+		.iter-of {
+			color: var(--text-dim);
 		}
 		.report-head .primary::after,
-		.iteration-tabs .tab::after {
+		.iter-btn::after {
 			content: '';
 			position: absolute;
 			inset: calc((100% - var(--tap)) / 2) 0;
+		}
+		.iter-menu {
+			display: flex;
+			flex-direction: column;
+		}
+		.iter-item {
+			display: flex;
+			align-items: center;
+			gap: var(--sp-3);
+			min-height: 48px;
+			padding: 0 var(--sp-3);
+			font-size: var(--fs-body);
+			text-align: left;
+			background: none;
+			border: none;
+			border-radius: var(--radius-sm);
+		}
+		.iter-item.active {
+			color: var(--accent);
+			background: color-mix(in srgb, var(--accent) 12%, transparent);
+		}
+		.iter-v {
+			min-width: 2.5em;
+			font-weight: 600;
+		}
+		.iter-when {
+			flex: 1;
+			min-width: 0;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+			color: var(--text-dim);
+			font-size: var(--fs-sm);
+		}
+		.iter-grade {
+			display: inline-flex;
+		}
+		.iter-latest {
+			font-size: var(--fs-xs);
+			color: var(--accent);
 		}
 		/* Sections read as a divided list of 44px rows: the row is the summary
 		   itself, so there is no overlay to cover the list below it. */

@@ -91,7 +91,7 @@
 		});
 	});
 
-	// Built from location, not page.url: auth strips ?token= behind the router.
+	// The current URL with ?entry= set (or cleared, for the list).
 	function entryUrl(handle: string): URL {
 		const url = new URL(location.href);
 		if (handle) url.searchParams.set('entry', handle);

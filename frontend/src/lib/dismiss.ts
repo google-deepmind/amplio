@@ -24,7 +24,7 @@ import { viewport } from './viewport.svelte';
  * - a click outside `root`: closes. On a phone the menu is a modal sheet, so
  *   that click is consumed and cannot also activate what lies under the scrim.
  * - Escape: closes, focus back to the trigger (the first button in `root`).
- * - Back (phone): opening pushes a shallow history entry, as PR A's drawer
+ * - Back (phone): opening pushes a shallow history entry, as Drawer.svelte
  *   does; Back pops it and closes. Any other close pops it with
  *   history.back(), so the next Back navigates normally. Desktop popovers
  *   never touch history.

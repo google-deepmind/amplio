@@ -166,9 +166,10 @@
 		.ptitle {
 			display: none;
 		}
-		/* In the page's flow (see the layout). No right gutter for the segment
-		   navigator: it is hidden on phone, and clip keeps its rail from scrolling
-		   the run shell sideways wherever it is not. */
+		/* In the page's flow (see the layout): the run shell scrolls, and the
+		   segment navigator follows that scroller as a fixed overlay, so no
+		   right gutter. Clip keeps any wide child from scrolling the shell
+		   sideways. */
 		.scroll {
 			flex: none;
 			overflow: visible;

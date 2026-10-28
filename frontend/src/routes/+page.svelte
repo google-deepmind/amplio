@@ -392,15 +392,17 @@
 		flex-direction: column;
 		gap: 0.8rem;
 	}
-	/* Homepage only, desktop too: scrolling is unchanged, the scrollbars are
-	   hidden (run list, composer textarea and menus). */
-	.dash,
-	.dash :global(*) {
-		scrollbar-width: none;
-	}
-	.dash::-webkit-scrollbar,
-	.dash :global(*::-webkit-scrollbar) {
-		display: none;
+	/* Homepage on phones: scrolling is unchanged, the scrollbars are hidden
+	   (run list, composer textarea and menus). Desktop keeps them. */
+	@media (max-width: 640px) {
+		.dash,
+		.dash :global(*) {
+			scrollbar-width: none;
+		}
+		.dash::-webkit-scrollbar,
+		.dash :global(*::-webkit-scrollbar) {
+			display: none;
+		}
 	}
 	.runs-wrap {
 		position: relative;

@@ -239,7 +239,7 @@
 		top: calc(100% + 0.3rem);
 		background: var(--bg-elev);
 		border: 1px solid var(--border);
-		border-radius: var(--radius);
+		border-radius: var(--radius-md);
 		padding: 0.25rem;
 		z-index: 20;
 		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
@@ -257,7 +257,7 @@
 		color: var(--text);
 		text-align: left;
 		cursor: pointer;
-		border-radius: calc(var(--radius) - 2px);
+		border-radius: calc(var(--radius-md) - 2px);
 		font: inherit;
 	}
 	.menu .item:hover {

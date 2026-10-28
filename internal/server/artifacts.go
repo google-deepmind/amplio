@@ -179,12 +179,27 @@ func (s *Server) handleArtifactsAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, artifactAllListing{Root: base, Files: files})
 }
 
-// handleArtifactRaw serves a single file from a run's artifact dir. The file is
-// sandboxed (CSP + nosniff) so an agent-written HTML/SVG can't execute JS in the
-// dashboard origin; non-displayable types are sent as a download.
+// handleArtifactRaw serves a single file from a run's artifact dir, named by the
+// ?path= query (see serveArtifactFile).
 func (s *Server) handleArtifactRaw(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sub := cleanArtifactSub(r.URL.Query().Get("path"))
+	s.serveArtifactFile(w, r, r.PathValue("id"), cleanArtifactSub(r.URL.Query().Get("path")))
+}
+
+// handleArtifactFile serves the same files as handleArtifactRaw, named by the
+// URL path instead of a query: /api/runs/{id}/artifacts/file/report/index.html.
+// An HTML report previewed from here resolves its relative URLs (img/plot.png,
+// style.css, page2.html) against its own folder, back into this route, so no
+// rewriting is needed. A root-relative URL (/style.css) still resolves to the
+// dashboard's root and does not load.
+func (s *Server) handleArtifactFile(w http.ResponseWriter, r *http.Request) {
+	s.serveArtifactFile(w, r, r.PathValue("id"), cleanArtifactSub(r.PathValue("path")))
+}
+
+// serveArtifactFile serves file sub of run id's artifact dir, confined to that
+// dir by os.Root (no "..", absolute paths or symlink escapes). The file is
+// sandboxed (CSP + nosniff) so agent-written HTML/SVG can't execute JS in the
+// dashboard origin; non-displayable types are sent as a download.
+func (s *Server) serveArtifactFile(w http.ResponseWriter, r *http.Request, id, sub string) {
 	if sub == "" {
 		writeErr(w, http.StatusBadRequest, "path is required")
 		return
@@ -241,6 +256,9 @@ func (s *Server) handleArtifactRaw(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", artifactCSP(mt))
+	// A report that navigates itself (or is clicked away) to another site must
+	// not hand that site the dashboard URL and run id.
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Either way the real filename rides along, so a Save lands on "paper.pdf"
 	// and not on the endpoint's name ("raw").
 	w.Header().Set("Content-Disposition", contentDisposition(inlineType(mt), fi.Name()))
@@ -250,11 +268,28 @@ func (s *Server) handleArtifactRaw(w http.ResponseWriter, r *http.Request) {
 // pdfType is the one binary type the viewer embeds instead of downloading.
 const pdfType = "application/pdf"
 
+// htmlType and xhtmlType are the report types the viewer previews in a frame.
+const (
+	htmlType  = "text/html"
+	xhtmlType = "application/xhtml+xml"
+)
+
+// htmlCSP is the policy an HTML artifact is served under (see artifactCSP).
+// 'unsafe-eval' is there for inline-bundled report libraries that need it (e.g.
+// plotly's WebGL traces); inside an opaque origin with no outside network it
+// adds no reach.
+const htmlCSP = "sandbox allow-scripts; default-src 'self' data: blob:; " +
+	"script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'self' 'unsafe-inline' data:; " +
+	"img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; " +
+	"connect-src 'none'; object-src 'none'; form-action 'none'; base-uri 'self'"
+
 // inlineType reports whether the browser may display media type mt in place
 // rather than download it: text and images, plus PDF, which every current
-// browser renders with a built-in viewer the artifact browser embeds in a frame.
+// browser renders with a built-in viewer the artifact browser embeds in a frame,
+// and XHTML, which the viewer previews like HTML (an attachment in a frame
+// would download instead of rendering).
 func inlineType(mt string) bool {
-	return mt == pdfType || strings.HasPrefix(mt, "image/") || strings.HasPrefix(mt, "text/")
+	return mt == pdfType || mt == xhtmlType || strings.HasPrefix(mt, "image/") || strings.HasPrefix(mt, "text/")
 }
 
 // artifactCSP is the sandbox an artifact is served under, so agent-written
@@ -266,7 +301,19 @@ func inlineType(mt string) bool {
 // the isolation that matters here — the sandbox still forces an opaque origin,
 // with no reach into the dashboard's DOM, cookies or storage — and Chrome needs
 // neither: it ignores CSP sandbox on a PDF response (crbug.com/40754148).
+//
+// HTML (the artifact viewer previews reports) runs its scripts, still in an
+// opaque origin, but loads nothing from outside amplio: its own inline code and
+// styles, and same-server subresources, which through /artifacts/file/ are the
+// report's relative assets. connect-src 'none' keeps scripts from fetching (the
+// responses carry no CORS headers, and must not: artifact reads need no login,
+// so CORS would let any website read them). form-action 'none' stops form posts
+// to other sites. What CSP cannot stop is a script navigating its own frame
+// away; that needs scripts off (drop allow-scripts from htmlCSP).
 func artifactCSP(mt string) string {
+	if mt == htmlType || mt == xhtmlType {
+		return htmlCSP
+	}
 	if mt == pdfType {
 		return "sandbox allow-scripts allow-downloads; default-src 'none'"
 	}

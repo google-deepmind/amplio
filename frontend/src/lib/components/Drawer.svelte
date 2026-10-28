@@ -26,6 +26,7 @@
 	import { auth } from '$lib/auth.svelte';
 	import { DRAWER_ID, navDrawer } from '$lib/navDrawer.svelte';
 	import { globalDestinations, isCurrent } from '$lib/route';
+	import { isBackdropClick } from '$lib/dialog';
 	import { runsStore } from '$lib/runsStore.svelte';
 	import { updates } from '$lib/updates.svelte';
 
@@ -47,24 +48,26 @@
 		addEventListener('popstate', onPop);
 		return () => removeEventListener('popstate', onPop);
 	});
-	// Backdrop taps close. So does choosing the page already shown: navigating
-	// would replace the drawer's entry with a copy of the one below it, and the
-	// next Back would look like it did nothing.
+	function isCurrentPage(href: string): boolean {
+		const to = new URL(href);
+		return to.pathname + to.search === page.url.pathname + page.url.search;
+	}
 	function onclick(e: MouseEvent) {
-		const a = e.target instanceof Element ? e.target.closest('a') : null;
-		if (a) {
-			const to = new URL(a.href);
-			if (to.pathname + to.search !== page.url.pathname + page.url.search) return;
+		if (isBackdropClick(e, dlg)) return navDrawer.hide();
+		// Choosing the page already shown just closes the drawer: navigating would
+		// replace its history entry with a copy of the one below.
+		const link = (e.target as Element).closest('a');
+		if (link && isCurrentPage(link.href)) {
 			e.preventDefault();
-		} else if (e.target !== dlg) return;
-		navDrawer.hide();
+			navDrawer.hide();
+		}
 	}
 	// Unmounted while open (rotated past the phone breakpoint): pop the entry.
 	$effect(() => () => navDrawer.hide());
 </script>
 
 <!-- Every close path (Escape, scrim, ✕, Back) ends in navDrawer.hide() or
-     comes from it; the click target is the dialog itself only on ::backdrop. -->
+     comes from it. -->
 <dialog
 	bind:this={dlg}
 	id={DRAWER_ID}

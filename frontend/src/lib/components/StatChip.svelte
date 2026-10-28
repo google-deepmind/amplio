@@ -59,7 +59,7 @@
 
 {#if tier !== 'hidden'}
 	<span class="chip tier-{tier}" title={tooltip}>
-		<span class="fill" style="width: {clampedPct}%"></span>
+		<span class="fill" class:live-indicator={tier === 'critical'} style="width: {clampedPct}%"></span>
 		{#if Icon}<span class="icon"><Icon size={13} weight="bold" /></span>{/if}
 		<!-- The label lives INSIDE .text, space included, so desktop renders the
 		     single "CPU 37%" text run it always has; phone only hides the label.

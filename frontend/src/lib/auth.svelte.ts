@@ -42,7 +42,7 @@ class Auth {
 		try {
 			await fetch(`/api/auth/login?token=${encodeURIComponent(token)}`, {
 				method: 'POST',
-				signal: AbortSignal.timeout(3000),
+				signal: AbortSignal.timeout(10000),
 			});
 		} catch {
 			// network error or timeout — start anyway; we'll resolve to readonly

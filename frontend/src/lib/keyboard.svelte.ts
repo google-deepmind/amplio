@@ -25,8 +25,6 @@
 // Larger than any URL-bar / toolbar delta, smaller than any phone keyboard.
 const MIN_KEYBOARD_PX = 120;
 
-let isOpen = false;
-
 function editableFocused(doc: Document): boolean {
 	const el = doc.activeElement as HTMLElement | null;
 	if (!el) return false;
@@ -46,6 +44,8 @@ export function trackKeyboard(): () => void {
 	const root = document.documentElement;
 	let frame = 0;
 	let appliedH = 0;
+	let appliedEl: Element | null = null;
+	let isOpen = false;
 
 	const apply = () => {
 		frame = 0;
@@ -58,15 +58,19 @@ export function trackKeyboard(): () => void {
 			const h = Math.round(vv.height);
 			root.style.setProperty('--app-h', `${h}px`);
 			// iOS scrolled the field into view against the full-height layout;
-			// redo it inside the shorter shell. Only on a height change, so the
-			// user can still scroll away while typing.
-			if (h !== appliedH)
+			// redo it inside the shorter shell. Only when the height or the
+			// focused field changes, so the user can still scroll away while
+			// typing. A field change matters because the pan undone below may
+			// have been Safari bringing the new field into view.
+			if (h !== appliedH || document.activeElement !== appliedEl)
 				(document.activeElement as HTMLElement).scrollIntoView({ block: 'nearest' });
 			appliedH = h;
+			appliedEl = document.activeElement;
 			if (window.scrollY !== 0 || vv.offsetTop !== 0) window.scrollTo(0, 0);
 		} else {
 			if (isOpen) root.style.removeProperty('--app-h');
 			appliedH = 0;
+			appliedEl = null;
 		}
 		isOpen = open;
 	};
@@ -76,9 +80,12 @@ export function trackKeyboard(): () => void {
 
 	vv.addEventListener('resize', schedule);
 	vv.addEventListener('scroll', schedule);
+	// Moving between fields with the keyboard up fires no viewport resize.
+	document.addEventListener('focusin', schedule);
 	return () => {
 		vv.removeEventListener('resize', schedule);
 		vv.removeEventListener('scroll', schedule);
+		document.removeEventListener('focusin', schedule);
 		if (frame) cancelAnimationFrame(frame);
 		root.style.removeProperty('--app-h');
 		isOpen = false;

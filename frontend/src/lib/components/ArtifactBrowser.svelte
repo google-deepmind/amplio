@@ -23,7 +23,7 @@
 	// set, renders an "Expand" affordance (the panel → full-page bridge).
 	import { untrack } from 'svelte';
 	import { browser } from '$app/environment';
-	import { api, artifactRawUrl, errorText } from '$lib/api';
+	import { api, artifactFileUrl, artifactRawUrl, errorText } from '$lib/api';
 	import { renderMarkdown, highlightFile } from '$lib/markdown';
 	import { fuzzyFilter } from '$lib/fuzzy';
 	import { isPdfPath, splitAnchor, PDF_MAGIC } from '$lib/pdf';
@@ -109,9 +109,9 @@
 		selectedFile = selected;
 	});
 
-	let previewKind = $state<'none' | 'image' | 'pdf' | 'text' | 'markdown' | 'binary' | 'missing'>(
-		'none'
-	);
+	let previewKind = $state<
+		'none' | 'image' | 'pdf' | 'html' | 'text' | 'markdown' | 'binary' | 'missing'
+	>('none');
 	let previewText = $state('');
 	let copied = $state('');
 
@@ -161,6 +161,7 @@
 	const searching = $derived(query.trim() !== '');
 	const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'];
 	const MD_EXT = ['md', 'markdown'];
+	const HTML_EXT = ['html', 'htm', 'xhtml'];
 	const TEXT_PREVIEW_MAX = 256 * 1024;
 
 	function ext(name: string): string {
@@ -203,6 +204,13 @@
 			? artifactRawUrl(runId, selected) +
 				(reloadTick ? `&_=${reloadTick}` : '') +
 				previewAnchor
+			: ''
+	);
+	// HTML reports load from the path-style URL, so their relative assets resolve
+	// (see artifactFileUrl); the query only cache-busts the page on Reload.
+	const fileUrl = $derived(
+		selected
+			? artifactFileUrl(runId, selected) + (reloadTick ? `?_=${reloadTick}` : '') + previewAnchor
 			: ''
 	);
 
@@ -258,6 +266,12 @@
 			previewKind = 'pdf';
 			return;
 		}
+		// An HTML report renders in a sandboxed frame (any size; the frame fetches
+		// it), not as source text.
+		if (HTML_EXT.includes(ext(name))) {
+			previewKind = 'html';
+			return;
+		}
 		if (size != null && size > TEXT_PREVIEW_MAX) {
 			previewKind = 'binary';
 			return;
@@ -291,7 +305,9 @@
 
 	// Kinds the BROWSER fetches for us, straight from rawUrl (an <img> / a PDF
 	// frame), rather than kinds we fetch and render as text.
-	const embedsRawUrl = $derived(previewKind === 'image' || previewKind === 'pdf');
+	const embedsRawUrl = $derived(
+		previewKind === 'image' || previewKind === 'pdf' || previewKind === 'html'
+	);
 
 	// Reload the currently-previewed file's content (toolbar refresh). Re-fetches
 	// text/markdown; for an embedded kind, bumping reloadTick is enough — the
@@ -747,14 +763,20 @@
 						{#if copied === 'path'}<CheckIcon size={14} />{:else}<CopyIcon size={14} />{/if}
 						<span>Path</span>
 					</button>
-					<a class="btn" href={rawUrl} target="_blank" rel="noopener" title="Open raw file in a new tab">
+					<a
+						class="btn"
+						href={previewKind === 'html' ? fileUrl : rawUrl}
+						target="_blank"
+						rel="noopener"
+						title="Open raw file in a new tab"
+					>
 						<ArrowSquareOutIcon size={14} /><span>Raw</span>
 					</a>
 				</div>
 			</div>
 			<!-- A PDF brings its own scrolling viewer, so the body stops padding and
 			     scrolling and just hands it the pane. -->
-			<div class="pbody" class:fill={previewKind === 'pdf'}>
+			<div class="pbody" class:fill={previewKind === 'pdf' || previewKind === 'html'}>
 				{#if previewKind === 'image'}
 					<img src={rawUrl} alt={selected} />
 				{:else if previewKind === 'pdf'}
@@ -765,6 +787,14 @@
 					     the previous document's scroll position and zoom behind. -->
 					{#key rawUrl}
 						<iframe class="pdf" src={rawUrl} title={selected}></iframe>
+					{/key}
+				{:else if previewKind === 'html'}
+					<!-- An HTML report, sandboxed twice: here, and by the CSP the server
+					     sends with it (see artifactCSP). Scripts run, in an opaque origin
+					     with no reach into the dashboard and nothing loaded from outside
+					     amplio; relative assets load through the path-style fileUrl. -->
+					{#key fileUrl}
+						<iframe class="html" sandbox="allow-scripts" src={fileUrl} title={selected}></iframe>
 					{/key}
 				{:else if previewKind === 'markdown'}
 					<!-- Authored .md files soft-wrap at ~80 cols; render with standard
@@ -1108,13 +1138,21 @@
 	/* Fills .pbody.fill wherever that has a definite height (both split columns
 	   and the chat aside); min-height is the floor for the top-down layout, where
 	   the pane is content-sized and a percentage height resolves to auto. */
-	.preview iframe.pdf {
+	.preview iframe.pdf,
+	.preview iframe.html {
 		display: block;
 		width: 100%;
 		height: 100%;
 		min-height: min(28rem, 70dvh);
 		border: none;
 		background: var(--bg-elev);
+	}
+	/* A report renders as it would in its own tab: on white, in the light scheme.
+	   Unstyled HTML has a transparent background and black text, which the dark
+	   dashboard would show through. */
+	.preview iframe.html {
+		background: #fff;
+		color-scheme: light;
 	}
 	.preview img {
 		max-width: 100%;
