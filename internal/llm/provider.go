@@ -20,6 +20,12 @@ import (
 	"strings"
 )
 
+// SessionMetadataKey is the Session.metadata key holding a session's own model
+// spec when it runs on a model other than the run's (a sub-agent spawned with a
+// model, and its descendants). Absent means the run's model (RunConfig.LLM),
+// which is every session in a run that never asked for another.
+const SessionMetadataKey = "llm"
+
 // Provider abstracts an LLM chat-completion endpoint.
 type Provider interface {
 	// Call sends a request and returns the complete response.

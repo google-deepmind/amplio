@@ -18,7 +18,7 @@
 	import type { SessionDTO } from '$lib/types';
 	import { timeAgo } from '$lib/time';
 	import StatusBadge from './StatusBadge.svelte';
-	import { AndroidLogoIcon, ChatTeardropIcon, LinkIcon, PathIcon } from 'phosphor-svelte';
+	import { AndroidLogoIcon, ChatTeardropIcon, CubeIcon, LinkIcon, PathIcon } from 'phosphor-svelte';
 	import { iconForName } from '$lib/sessionIcon';
 
 	// One row per session, echoing the run card's visual language (identity icon
@@ -73,6 +73,17 @@
 		if (!ws || !s.parent_id) return false;
 		return ws !== (wsById.get(s.parent_id) ?? '');
 	}
+
+	// The model chip follows the same rule: shown where a sub-agent's model
+	// diverges from its parent's, i.e. where a model was asked for at spawn. Its
+	// descendants inherit it and show none. llm is the EFFECTIVE model (the run's
+	// when the session has none of its own), so a root never shows one.
+	const llmById = $derived(new Map(sessions.map((s) => [s.session_id, s.llm ?? ''])));
+	function ownsModel(s: SessionDTO): boolean {
+		const m = s.llm ?? '';
+		if (!m || !s.parent_id) return false;
+		return m !== (llmById.get(s.parent_id) ?? '');
+	}
 </script>
 
 {#snippet node(s: SessionDTO)}
@@ -110,6 +121,14 @@
 				<span class="chip" title={s.workspace}>
 					<LinkIcon size={12} weight="bold" />
 					<span class="chip-text">{s.workspace_name}</span>
+				</span>
+			{/if}
+			{#if ownsModel(s) && !compact}
+				<!-- CubeIcon and short label as on the run card; full spec in the
+				     tooltip. -->
+				<span class="chip" title="Model: {s.llm}">
+					<CubeIcon size={12} weight="bold" />
+					<span class="chip-text">{s.llm_name || s.llm}</span>
 				</span>
 			{/if}
 			<StatusBadge status={s.status} />

@@ -281,3 +281,34 @@ func TestMenuResolve_RelabelledEntryIsNotAmbiguous(t *testing.T) {
 		t.Errorf("Resolve = %q, want %q", got, want)
 	}
 }
+
+// Lookup finds an entry by the names the picker shows and returns it verbatim,
+// args, client block and nickname included; it never matches a spec, so a spec
+// is the caller's to run as written.
+func TestMenuLookup(t *testing.T) {
+	m := Menu{Specs: []string{
+		"vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive#opus",
+		"vertex-gemini:gemini-3.6-flash",
+		"openai{base_url=http://localhost:4000/v1}:qwen3#local",
+		"openai{base_url=http://localhost:4001/v1}:qwen3#local", // two rows, one nickname
+	}}
+	for _, c := range []struct {
+		name, want string
+		ok         bool
+	}{
+		{"opus", "vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive#opus", true},
+		{"#opus", "vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive#opus", true},
+		{" #opus ", "vertex-claude{cache_ttl=1h}:claude-opus-5?thinking.type=adaptive#opus", true},
+		{"gemini-3.6-flash", "vertex-gemini:gemini-3.6-flash", true}, // derived label
+		{"local", "", false},                          // ambiguous: refused, not guessed
+		{"vertex-gemini:gemini-3.6-flash", "", false}, // a spec, not a name
+		{"#", "", false},
+		{"", "", false},
+		{"sonnet", "", false},
+	} {
+		got, ok := m.Lookup(c.name)
+		if got != c.want || ok != c.ok {
+			t.Errorf("Lookup(%q) = %q, %v; want %q, %v", c.name, got, ok, c.want, c.ok)
+		}
+	}
+}

@@ -62,6 +62,8 @@ type RunManager struct {
 	providerMu sync.Mutex
 	providers  map[string]llm.Provider // spec -> provider; stateless, reused across runs
 
+	menuLLMs []string // config.toml's [run].llms, for spawn_agent's model names; see resolveLLM
+
 	allocMu    sync.Mutex
 	allocators map[string]*session.NameAllocator // per-run session-id allocators
 
@@ -107,6 +109,12 @@ func (m *RunManager) SetSystemProviders(fast, hq llm.Provider) {
 	m.systemFast, m.systemHQ = fast, hq
 }
 
+// SetModelMenu installs config.toml's [run].llms, the half of the model menu
+// that lives in config (the other half is the CustomModel table), so
+// spawn_agent's model argument can name an entry by #nickname or label. Set
+// once at startup.
+func (m *RunManager) SetModelMenu(llms []string) { m.menuLLMs = llms }
+
 // markdownHeadingRe matches a leading markdown heading line (the title).
 var markdownHeadingRe = regexp.MustCompile(`^\s*#{1,6}\s+(.+?)\s*$`)
 
@@ -151,6 +159,47 @@ func (m *RunManager) providerFor(spec string) (llm.Provider, error) {
 	}
 	m.providers[spec] = p
 	return p, nil
+}
+
+// resolveLLM is agent.Env.ResolveLLM: it turns spawn_agent's model argument into
+// the spec a sub-agent runs on, and its provider.
+//
+// A name on the model menu (a #nickname, or the label the picker shows) means
+// that entry, verbatim, so the operator's tuned args and display name come with
+// it. Anything else must be a full spec, and any spec is accepted: unlike the
+// lending API (llm.Menu.Resolve), the menu does not restrict here. That grants
+// an agent nothing new: every agent type has bash, running with the server's
+// environment, so it can already reach any endpoint with any credential this
+// process holds. An agent type without bash or network access would change
+// that, and should then not be offered this argument.
+func (m *RunManager) resolveLLM(ctx context.Context, model string) (string, llm.Provider, error) {
+	model = strings.TrimSpace(model)
+	custom, err := m.store.ListCustomModels(ctx)
+	if err != nil {
+		// Names from the UI-added half just won't resolve; specs still do.
+		slog.Warn("spawn: read custom models for the model menu", "error", err)
+	}
+	menu := llm.Menu{Specs: append(append([]string{}, m.menuLLMs...), custom...)}
+	spec, ok := menu.Lookup(model)
+	if !ok {
+		if _, err := llm.ParseSpec(model); err != nil {
+			return "", nil, fmt.Errorf("%q is not a model spec (%v), nor the name of exactly one entry on this server's model menu, which offers %s",
+				model, err, menu.Summary())
+		}
+		spec = model
+	}
+	provider, err := m.providerFor(spec)
+	if err != nil {
+		return "", nil, fmt.Errorf("build %s: %w", spec, err)
+	}
+	return spec, provider, nil
+}
+
+// sessionLLM is the model spec a session's metadata records as its own, or ""
+// for a session on the run's model (see llm.SessionMetadataKey).
+func sessionLLM(sess *db.SessionRecord) string {
+	spec, _ := sess.Metadata[llm.SessionMetadataKey].(string)
+	return spec
 }
 
 // allocatorFor returns the run's shared session-id allocator, creating it on
@@ -319,6 +368,7 @@ func (m *RunManager) launchAgent(ctx context.Context, runID, agentType string, p
 		Store:       m.store,
 		RunID:       runID,
 		LLM:         provider,
+		ResolveLLM:  m.resolveLLM,
 		Registry:    registry,
 		Names:       m.allocatorFor(runID),
 		Workspace:   ws,
@@ -468,9 +518,17 @@ func (m *RunManager) RespawnSession(runID, sessionID string) {
 		return
 	}
 
-	provider, err := m.providerFor(run.Config.LLM)
+	// The session's own model if it was spawned on one (or descends from one),
+	// else the run's. Not checked against the menu: taking a model off the menu
+	// must not strand the sessions already running on it.
+	ownLLM := sessionLLM(sess)
+	llmSpec := ownLLM
+	if llmSpec == "" {
+		llmSpec = run.Config.LLM
+	}
+	provider, err := m.providerFor(llmSpec)
 	if err != nil {
-		slog.Error("respawn: resolve llm failed", "run_id", runID, "llm", run.Config.LLM, "error", err)
+		slog.Error("respawn: resolve llm failed", "run_id", runID, "session_id", sessionID, "llm", llmSpec, "error", err)
 		return
 	}
 
@@ -487,6 +545,8 @@ func (m *RunManager) RespawnSession(runID, sessionID string) {
 		Store:       m.store,
 		RunID:       runID,
 		LLM:         provider,
+		LLMSpec:     ownLLM,
+		ResolveLLM:  m.resolveLLM,
 		Registry:    registry,
 		Names:       m.allocatorFor(runID),
 		Workspace:   ws,

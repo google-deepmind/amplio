@@ -573,6 +573,13 @@ func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 			meta = map[string]any{workspace.SessionMetadataKey: string(blob)}
 		}
 	}
+	// Likewise its own model, when it isn't the run's, so a revival rebuilds it.
+	if a.env.LLMSpec != "" {
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta[llm.SessionMetadataKey] = a.env.LLMSpec
+	}
 
 	err := a.env.Store.CreateSession(ctx, db.SessionRecord{
 		RunID:     a.env.RunID,

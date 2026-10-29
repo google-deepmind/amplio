@@ -286,6 +286,38 @@ protocol is the same for `bridge` and `subprocess` modes.
 
 
 
+## Sub-agents on another model
+
+A run's model is the one picked when it starts, and by default every sub-agent
+runs on its parent's. `spawn_agent` takes an optional `model` to start one on
+another, so a single run can mix models: for example, chat on Claude, workers
+on Gemini and a verifier on GPT. Agents don't choose a model on their own. They
+set one when the task asks for it, so you name the models in the prompt:
+
+> Spawn the workers with model `#flash` and the verifier with model
+> `openai:gpt-6`.
+
+`model` takes either of two forms:
+
+- **A name from the model menu** (`[run] llms` plus models added in the UI): a
+  `#nickname`, with or without the `#`, or the short label the picker shows.
+  The sub-agent gets that entry exactly as configured, including its client
+  block and model args.
+- **Any full spec**, which runs exactly as written. It doesn't need to be on the
+  menu, and a spec that matches a menu entry's provider and model doesn't take
+  that entry's args.
+
+A sub-agent passes its model on to its own sub-agents, so `#flash` covers the
+whole subtree below that worker. A spec that doesn't parse, or whose provider
+can't be built (for example, missing credentials), fails the spawn with the
+reason, rather than falling back to the parent's model. A model name the
+provider rejects shows up on the sub-agent's first call, which crashes it and
+reports to the parent.
+
+The session records its model in its metadata. A revived session keeps that
+model even if it has since been taken off the menu. The run's session tree
+marks a sub-agent whose model differs from its parent's.
+
 ## Example config.toml
 
 ```toml

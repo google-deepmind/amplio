@@ -118,6 +118,7 @@ func setupSystem(ctx context.Context, cfg config.Config, opts systemOpts) (*syst
 	}
 	mgr := buildManager(store, extra...)
 	mgr.SetSystemProviders(systemFast, systemHQ)
+	mgr.SetModelMenu(cfg.Run.LLMs)
 	bindCLITools(cfg)
 	if opts.broadcaster != nil {
 		mgr.SetBroadcaster(opts.broadcaster)

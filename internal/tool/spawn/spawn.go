@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"amplio/internal/agent"
@@ -34,6 +35,7 @@ type Params struct {
 	Task          string `json:"task" jsonschema:"required" jsonschema_description:"Task description for the sub-agent"`
 	AgentType     string `json:"agent_type,omitempty" jsonschema_description:"Agent type to spawn (default: standard_agent)"`
 	WorkspaceMode string `json:"workspace_mode,omitempty" jsonschema_description:"share (default): work in the same workspace as the parent. link: an isolated linked workspace (git/jj worktree or CitC link) sharing history but with independent file edits — use for parallel sub-agents that must not clobber each other."`
+	Model         string `json:"model,omitempty" jsonschema_description:"LLM for the sub-agent: a model spec, or a #nickname from the model menu. Omit it to use your own model; set it only when the operator names a model."`
 }
 
 func New(env *agent.Env, parentSessionID string) *tool.Tool {
@@ -69,6 +71,31 @@ func makeExecutor(env *agent.Env, parentSessionID string) tool.Executor {
 			}, nil
 		}
 
+		// Model: the parent's by default (the child gets a copy of its Env), or the
+		// one asked for. Resolved before anything is allocated or created, so a bad
+		// name costs nothing to refuse.
+		childEnv := env
+		modelInfo := ""
+		if model := strings.TrimSpace(params.Model); model != "" {
+			if env.ResolveLLM == nil {
+				return &tool.Result{
+					Content: "Error: this server cannot start sub-agents on another model; omit model to use your own",
+					IsError: true,
+				}, nil
+			}
+			spec, provider, err := env.ResolveLLM(ctx, model)
+			if err != nil {
+				return &tool.Result{
+					Content: fmt.Sprintf("Error: model %s", err),
+					IsError: true,
+				}, nil
+			}
+			e := *env
+			e.LLM, e.LLMSpec = provider, spec
+			childEnv = &e
+			modelInfo = ", model=" + spec
+		}
+
 		// Allocate a unique session ID from the run's shared allocator (seeded
 		// from the DB, reserved in-memory under a lock — so it excludes cold
 		// sessions and never collides with a concurrent spawn).
@@ -85,7 +112,6 @@ func makeExecutor(env *agent.Env, parentSessionID string) tool.Executor {
 		// each other's files. Named "<runID>-<session>" (workspace.LinkName), not
 		// the bare session id: session ids repeat across runs, and a link's name
 		// can live in a namespace shared by all runs (a CitC alias is per-user).
-		childEnv := env
 		linkedInfo := ""
 		if params.WorkspaceMode == "link" {
 			linked, err := env.Workspace.CreateLinked(ctx, workspace.LinkName(env.RunID, sessionID))
@@ -95,7 +121,7 @@ func makeExecutor(env *agent.Env, parentSessionID string) tool.Executor {
 					IsError: true,
 				}, nil
 			}
-			e := *env
+			e := *childEnv
 			e.Workspace = linked
 			childEnv = &e
 			linkedInfo = fmt.Sprintf(" in linked workspace %s", linked.Root())
@@ -155,8 +181,8 @@ func makeExecutor(env *agent.Env, parentSessionID string) tool.Executor {
 		}()
 
 		return &tool.Result{
-			Content: fmt.Sprintf("Spawned sub-agent %q (type=%s)%s at %s for task: %s",
-				sessionID, agentType, linkedInfo, util.FormatLocalISO(time.Now()), util.TruncateRunes(params.Task, 80)),
+			Content: fmt.Sprintf("Spawned sub-agent %q (type=%s%s)%s at %s for task: %s",
+				sessionID, agentType, modelInfo, linkedInfo, util.FormatLocalISO(time.Now()), util.TruncateRunes(params.Task, 80)),
 		}, nil
 	}
 }

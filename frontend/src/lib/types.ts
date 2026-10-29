@@ -213,6 +213,10 @@ export interface SessionDTO {
   status_changed_at: string; // ISO; mirrors RootInfo for run-page header synthesis
   workspace?: string; // full path (tooltip); may differ per session (linked sub-agents)
   workspace_name?: string; // cheap display name
+  // Effective model: the session's own (a sub-agent spawned with a model, or a
+  // descendant of one), else the run's.
+  llm?: string; // full spec (tooltip)
+  llm_name?: string; // short display label derived from llm (display only)
 }
 
 export interface RunDetail {

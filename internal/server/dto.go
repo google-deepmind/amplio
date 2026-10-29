@@ -272,10 +272,21 @@ type sessionDTO struct {
 	// differ from the run's (and across siblings). Empty if not yet persisted.
 	Workspace     string `json:"workspace,omitempty"`      // full path (tooltip)
 	WorkspaceName string `json:"workspace_name,omitempty"` // cheap display (basename / link name / numeric id)
+	// The model this session runs on: its own (a sub-agent spawned with a model,
+	// or descended from one; see llm.SessionMetadataKey), else the run's. Always
+	// the effective model, so comparing a session with its parent is one string
+	// compare.
+	LLM     string `json:"llm,omitempty"`      // full spec (tooltip)
+	LLMName string `json:"llm_name,omitempty"` // cheap display label, derived — never show it without llm reachable
 }
 
-func toSessionDTO(s db.SessionRecord) sessionDTO {
+// toSessionDTO renders a session of a run whose model is runLLM.
+func toSessionDTO(s db.SessionRecord, runLLM string) sessionDTO {
 	path, name := sessionWorkspace(s)
+	spec, _ := s.Metadata[llm.SessionMetadataKey].(string)
+	if spec == "" {
+		spec = runLLM
+	}
 	return sessionDTO{
 		SessionID:       s.SessionID,
 		ParentID:        s.ParentID,
@@ -287,6 +298,8 @@ func toSessionDTO(s db.SessionRecord) sessionDTO {
 		StatusChangedAt: s.StatusChangedAt,
 		Workspace:       path,
 		WorkspaceName:   name,
+		LLM:             spec,
+		LLMName:         llm.ShortLabel(spec),
 	}
 }
 

@@ -47,6 +47,7 @@ type testCfg struct {
 	RunID       string
 	Store       db.Store
 	LLM         llm.Provider
+	LLMSpec     string
 	Registry    *session.Registry
 	Workspace   workspace.Workspace
 	Broadcaster eventstream.Broadcaster
@@ -73,6 +74,7 @@ func newT(c testCfg) *EventLoopAgent {
 		RunID:       c.RunID,
 		Store:       c.Store,
 		LLM:         c.LLM,
+		LLMSpec:     c.LLMSpec,
 		Registry:    c.Registry,
 		Workspace:   c.Workspace,
 		Broadcaster: c.Broadcaster,
@@ -1220,6 +1222,45 @@ func TestBootstrap_PersistsWorkspaceInMetadata(t *testing.T) {
 	}
 	if ws.Root() != "/tmp" || ws.Kind() != "plain" {
 		t.Errorf("reconstructed workspace root=%q kind=%q, want /tmp plain", ws.Root(), ws.Kind())
+	}
+}
+
+// Bootstrap records a session's own model (a sub-agent spawned on one) next to
+// its workspace, and records none for a session on the run's model, so a run
+// that never asks for another model stores nothing new.
+func TestBootstrap_PersistsOwnModelInMetadata(t *testing.T) {
+	for _, c := range []struct {
+		name, spec string
+		wantKey    bool
+	}{
+		{"own model", "vertex-gemini:gemini-3.6-flash#fast", true},
+		{"run's model", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store, runID, registry := testSetup(t)
+			ctx := context.Background()
+			mock := &llm.MockProvider{Responses: []llm.Response{{Content: "done", StopReason: "end_turn"}}}
+			ag := newT(testCfg{
+				RunID: runID, SessionID: "s1", Task: "do the thing",
+				AgentType: "standard_agent", SystemPrompt: "sys",
+				LLM: mock, LLMSpec: c.spec, Store: store, Registry: registry,
+				Workspace: plain.New("/tmp"),
+			})
+			if err := ag.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			sess, err := store.GetSession(ctx, runID, "s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, has := sess.Metadata[llm.SessionMetadataKey]
+			if has != c.wantKey || (c.wantKey && got != c.spec) {
+				t.Errorf("metadata[%q] = %v (present=%v), want %q (present=%v)", llm.SessionMetadataKey, got, has, c.spec, c.wantKey)
+			}
+			if _, ok := sess.Metadata[workspace.SessionMetadataKey].(string); !ok {
+				t.Errorf("workspace no longer persisted alongside: %v", sess.Metadata)
+			}
+		})
 	}
 }
 

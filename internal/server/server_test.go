@@ -2084,3 +2084,49 @@ func TestServer_ChatCarriesResponseRewrite(t *testing.T) {
 		t.Errorf("rewrite lost after compaction: %q", got.Rewrite)
 	}
 }
+
+// Run detail reports every session's EFFECTIVE model: its own when it has one
+// (a sub-agent spawned on a model, and the descendants that inherit it), else
+// the run's.
+func TestServer_RunDetail_SessionModels(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	const runSpec, ownSpec = "vertex-claude:claude-opus-5#opus", "vertex-gemini:gemini-3.6-flash"
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun, Config: config.RunConfig{LLM: runSpec}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []db.SessionRecord{
+		{SessionID: "root"},
+		{SessionID: "worker", ParentID: "root", Metadata: map[string]any{llm.SessionMetadataKey: ownSpec}},
+		{SessionID: "helper", ParentID: "worker", Metadata: map[string]any{llm.SessionMetadataKey: ownSpec}},
+		{SessionID: "plain", ParentID: "root"},
+	} {
+		s.RunID, s.AgentType, s.Status = testRun, "standard_agent", db.SessionOngoing
+		if err := store.CreateSession(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	_, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"?token=secret", "")
+	var detail runDetail
+	if err := json.Unmarshal(body, &detail); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]string{
+		"root":   {runSpec, "opus"},
+		"worker": {ownSpec, "gemini-3.6-flash"},
+		"helper": {ownSpec, "gemini-3.6-flash"},
+		"plain":  {runSpec, "opus"},
+	}
+	if len(detail.Sessions) != len(want) {
+		t.Fatalf("got %d sessions, want %d", len(detail.Sessions), len(want))
+	}
+	for _, s := range detail.Sessions {
+		if w := want[s.SessionID]; s.LLM != w[0] || s.LLMName != w[1] {
+			t.Errorf("%s: llm=%q llm_name=%q, want %q %q", s.SessionID, s.LLM, s.LLMName, w[0], w[1])
+		}
+	}
+}

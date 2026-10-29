@@ -74,8 +74,34 @@ func (m Menu) Resolve(handle string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%q is not in this server's menu; it offers %s", handle, m.summary())
 	}
-	return entry.String(), nil
+	// Drop the nickname: it is a display label, and the resolved spec is for
+	// construction.
+	return (&Spec{Provider: entry.sp.Provider, Client: entry.sp.Client, Tail: entry.sp.Tail}).String(), nil
 }
+
+// Lookup finds the one entry a name refers to, by the rule matchAlias applies
+// (a #nickname, written with or without its '#', or the label the picker
+// shows), and returns that entry verbatim, nickname included, so whatever
+// displays the result shows the operator's name for it.
+//
+// Unlike Resolve it restricts nothing. It serves callers that may run any spec
+// and only want the operator's models reachable by name, the way a prompt says
+// "verify with #gpt" rather than spelling the spec out.
+func (m Menu) Lookup(name string) (string, bool) {
+	name = strings.TrimPrefix(strings.TrimSpace(name), string(nicknameCh))
+	if name == "" {
+		return "", false
+	}
+	entry, ok := matchAlias(m.parse(), name)
+	if !ok {
+		return "", false
+	}
+	return entry.spec, true
+}
+
+// Summary lists the names and provider:model pairs a caller could ask for, for
+// an error message.
+func (m Menu) Summary() string { return m.summary() }
 
 // resolveSpec applies the rule above to a handle that parses as a spec.
 func resolveSpec(entries []menuEntry, req *Spec) (string, error) {
@@ -169,14 +195,14 @@ func argSuffix(args url.Values) string {
 // that can change between releases (a facet added, the length cap moved), which
 // a #nickname or a spec cannot. When that happens the caller gets a refusal
 // listing what is on offer, not a wrong model.
-func matchAlias(entries []menuEntry, handle string) (*Spec, bool) {
+func matchAlias(entries []menuEntry, handle string) (menuEntry, bool) {
 	for _, name := range []func(menuEntry) string{
 		func(e menuEntry) string { return e.sp.Nickname },
 		func(e menuEntry) string { return ShortLabel(e.spec) },
 	} {
-		var hit *Spec
+		var hit *menuEntry
 		ambiguous := false
-		for _, e := range entries {
+		for i, e := range entries {
 			if name(e) != handle {
 				continue
 			}
@@ -184,18 +210,16 @@ func matchAlias(entries []menuEntry, handle string) (*Spec, bool) {
 				ambiguous = true
 				break
 			}
-			hit = e.sp
+			hit = &entries[i]
 		}
 		if ambiguous {
-			return nil, false
+			return menuEntry{}, false
 		}
 		if hit != nil {
-			// Drop the nickname: it is a display label, and the resolved spec is
-			// for construction.
-			return &Spec{Provider: hit.Provider, Client: hit.Client, Tail: hit.Tail}, true
+			return *hit, true
 		}
 	}
-	return nil, false
+	return menuEntry{}, false
 }
 
 // menuEntry pairs a parsed spec with the verbatim string, which ShortLabel needs

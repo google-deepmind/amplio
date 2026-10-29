@@ -23,6 +23,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strings"
+
+	"amplio/internal/llm"
 )
 
 // ToolChip returns the {verb, detail} for a tool-call chip. bash commands are
@@ -94,10 +97,21 @@ func ToolDetail(name, args string) string {
 	case "spawn_agent":
 		var a struct {
 			AgentType string `json:"agent_type"`
+			Model     string `json:"model"`
 		}
-		if parse(&a) && a.AgentType != "" {
-			return a.AgentType
+		if !parse(&a) {
+			return ""
 		}
+		// The model only when one was asked for: it is the exception, and the
+		// chip is where a reader of the transcript sees the choice was made.
+		var parts []string
+		if a.AgentType != "" {
+			parts = append(parts, a.AgentType)
+		}
+		if m := strings.TrimSpace(a.Model); m != "" {
+			parts = append(parts, llm.ShortLabel(m))
+		}
+		return strings.Join(parts, " · ")
 	case "session_search", "recall_search":
 		var a struct {
 			Query string `json:"query"`

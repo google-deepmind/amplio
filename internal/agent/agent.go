@@ -46,9 +46,18 @@ type Agent interface {
 // Each agent receives its own run's SessionRegistry — agents only coordinate
 // with sessions in the same run.
 type Env struct {
-	Store       db.Store
-	RunID       string
-	LLM         llm.Provider
+	Store db.Store
+	RunID string
+	LLM   llm.Provider
+	// LLMSpec is the spec LLM was built from when this session runs on a model
+	// other than the run's: set for a sub-agent spawned with a model, and passed
+	// down to its own sub-agents with the rest of the Env. Empty means the run's
+	// model (RunConfig.LLM). Persisted in the session's metadata
+	// (llm.SessionMetadataKey) so a revival rebuilds the same model.
+	LLMSpec string
+	// ResolveLLM turns spawn_agent's model argument into the spec to run and its
+	// provider. Nil means sub-agents can only inherit their parent's model.
+	ResolveLLM  func(ctx context.Context, model string) (spec string, provider llm.Provider, err error)
 	Registry    *session.Registry      // per-run session registry
 	Names       *session.NameAllocator // per-run unique session-id allocator
 	Workspace   workspace.Workspace
