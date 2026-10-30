@@ -145,10 +145,13 @@ func New(runCtx context.Context, store db.Store, mgr *runtime.RunManager, bus *e
 	return &Server{store: store, mgr: mgr, bus: bus, token: token, defaults: defaults, runCtx: runCtx}
 }
 
-// Handler wires the routes. Reads (GET) and the SPA are open — that's the
-// readonly share view anyone on the corp network gets. Mutations require the
-// token (cookie/Bearer) via requireAuth. The two /api/auth endpoints are open:
-// login exchanges a token for the cookie; the status drives the readonly UI.
+// Handler wires the routes. Reads of a run (everything under /api/runs/{id})
+// and the SPA are open: that's the readonly share view, so a run's URL can be
+// sent to anyone on the corp network. Reads that span runs (the list, the
+// all-runs stream, recall) require the token like mutations do (cookie/Bearer,
+// via requireAuth), so a shared run doesn't lead to the others. The two
+// /api/auth endpoints are open: login exchanges a token for the cookie; the
+// status drives the readonly UI.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -156,11 +159,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auth", s.handleAuth)
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 
-	// Reads — open (readonly view).
-	mux.HandleFunc("GET /api/runs", s.handleListRuns)
+	// Reads that span runs — require the token. Each would show a viewer of
+	// one shared run the others: their ids (the list and its counts, lessons'
+	// source runs), their live output (the all-runs stream), or what was
+	// mined from them (recall). Workspaces only feeds the new-run form.
+	mux.HandleFunc("GET /api/runs", s.requireAuth(s.handleListRuns))
 	// Registered before the {id} route is irrelevant for net/http's mux (it
 	// matches by specificity), but keep counts adjacent to the list it summarizes.
-	mux.HandleFunc("GET /api/runs/counts", s.handleRunCounts)
+	mux.HandleFunc("GET /api/runs/counts", s.requireAuth(s.handleRunCounts))
+	mux.HandleFunc("GET /api/stream", s.requireAuth(s.handleGlobalStream))
+	mux.HandleFunc("GET /api/recall", s.requireAuth(s.handleRecallSearch))
+	mux.HandleFunc("GET /api/recall/item", s.requireAuth(s.handleRecallItem))
+	mux.HandleFunc("GET /api/lessons", s.requireAuth(s.handleListLessons))
+	mux.HandleFunc("GET /api/workspaces", s.requireAuth(s.handleWorkspaces))
+
+	// Reads of one run, and of the server itself — open (readonly view).
 	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /api/sysstat", s.handleSysStat)
 	mux.HandleFunc("GET /api/models", s.handleListModels)
@@ -175,15 +188,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/all", s.handleArtifactsAll)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/raw", s.handleArtifactRaw)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/file/{path...}", s.handleArtifactFile)
-	mux.HandleFunc("GET /api/workspaces", s.handleWorkspaces)
-	mux.HandleFunc("GET /api/recall", s.handleRecallSearch)
-	mux.HandleFunc("GET /api/recall/item", s.handleRecallItem)
-	mux.HandleFunc("GET /api/lessons", s.handleListLessons)
 	mux.HandleFunc("GET /api/about", s.handleAbout)
 	mux.HandleFunc("GET /api/briefings", s.handleListBriefings)
 	mux.HandleFunc("GET /api/runs/{id}/report", s.handleGetReport)
 	mux.HandleFunc("GET /api/runs/{id}/stream", s.handleRunStream)
-	mux.HandleFunc("GET /api/stream", s.handleGlobalStream)
 
 	// Writes — require the token.
 	mux.HandleFunc("POST /api/runs", s.requireAuth(s.handleStartRun))

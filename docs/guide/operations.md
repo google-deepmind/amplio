@@ -28,9 +28,14 @@ The startup banner prints the URL with a token:
 
     amplio → http://localhost:26759/?token=abcdEFGH123some-long-token
 
-**Reads are open; writes need the token.** Anyone who can reach the port sees
-the read-only UI — every run, task, and transcript. The token authorises
-mutations: starting runs, sending messages, cancelling, deleting.
+**A run's pages are open; everything else needs the token.** Anyone who can
+reach the port and has a run's URL sees that run read-only: its tasks,
+transcripts, artifacts and report. The token authorises mutations (starting
+runs, sending messages, cancelling, deleting) and the views that span runs:
+the run list and its counts, live updates from all runs, and recall, whose
+lessons are mined from your runs. Without it, the dashboard and Recall pages
+say they are private, so a viewer can open only the runs whose links they were
+given. Run ids are 8 random characters, too many to guess.
 
 Therefore, it is recommended to bind to loopback, and use SSH tunnel if you
 need to access the web UI on a different machine.
@@ -38,9 +43,9 @@ need to access the web UI on a different machine.
 If you are in an isolated team / corp network environment, where convenient
 proxy (e.g. UberProxy) has been setup, you may use a routable address intead
 of loopback, and directly use corp proxy access without having to manually
-setup SSH tunnels. In this case, sharing your server address to collaborators 
-within the same network (**without** the `?token=` part) gives them a readonly
-view of your amplio runs.
+setup SSH tunnels. In this case, sharing a run's URL with collaborators within
+the same network (**without** the `?token=` part) gives them a readonly view of
+that run.
 
 Set `token` in `config.toml` to pin a known value; otherwise one is generated
 into `<data-dir>/auth.token` on first start and reused.

@@ -19,6 +19,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api } from '$lib/api';
+	import { auth } from '$lib/auth.svelte';
+	import PrivateNotice from '$lib/components/PrivateNotice.svelte';
 	import { viewport } from '$lib/viewport.svelte';
 	import { renderMarkdown } from '$lib/markdown';
 	import { pageTitle } from '$lib/title';
@@ -40,7 +42,10 @@
 	let item = $state<RecallItem | null>(null);
 	let loadingItem = $state(false);
 
+	// Recall needs the owner's login: its lessons are mined from their runs, and
+	// carry the run each came from. The readonly view shows a notice instead.
 	$effect(() => {
+		if (!auth.authed) return;
 		void loadLessons();
 		// Clear any pending debounce on teardown so a search can't fire into a
 		// destroyed component after navigation.
@@ -66,6 +71,7 @@
 	}
 
 	async function runSearch(q: string) {
+		if (!auth.authed) return;
 		searching = true;
 		try {
 			const r = await api.searchRecall(q);
@@ -120,6 +126,7 @@
 			item = null;
 			return;
 		}
+		if (!auth.authed) return;
 		void loadItem(handle);
 	});
 
@@ -158,79 +165,87 @@
 </svelte:head>
 
 <h2>Recall</h2>
-<p class="dim sub">The skill + lesson corpus agents search via recall. Type to rank like an agent; click any entry to read its full body.</p>
 
-<div class="recall" class:reading bind:this={recallEl}>
-	<div class="left card">
-		<input
-			class="search"
-			type="search"
-			placeholder="Search skills + lessons…"
-			bind:value={query}
-			oninput={onInput}
-		/>
+{#if auth.ready && !auth.authed}
+	<PrivateNotice
+		message={auth.user
+			? `${auth.user}'s recall library is private: its lessons are mined from their runs.`
+			: "This recall library is private: its lessons are mined from the owner's runs."}
+	/>
+{:else}
+	<p class="dim sub">The skill + lesson corpus agents search via recall. Type to rank like an agent; click any entry to read its full body.</p>
+	<div class="recall" class:reading bind:this={recallEl}>
+		<div class="left card">
+			<input
+				class="search"
+				type="search"
+				placeholder="Search skills + lessons…"
+				bind:value={query}
+				oninput={onInput}
+			/>
 
-		{#if results}
-			<div class="section">
-				<h3>Skills{searching ? ' …' : ` (${results.skills.length})`}</h3>
-				{#if results.skills.length === 0}
-					<p class="dim empty">No matching skills.</p>
-				{/if}
-				{#each results.skills as h (h.handle)}
-					<button class="row" class:active={selected === h.handle} onclick={() => select(h.handle)}>
-						<span class="name">{h.name}</span>
-						<span class="desc dim">{h.description}</span>
-					</button>
-				{/each}
-			</div>
-			<div class="section">
-				<h3>Lessons ({results.lessons.length})</h3>
-				{#if results.lessons.length === 0}
-					<p class="dim empty">No matching lessons.</p>
-				{/if}
-				{#each results.lessons as h (h.handle)}
-					<button class="row" class:active={selected === h.handle} onclick={() => select(h.handle)}>
-						<span class="name">{h.title} <span class="badge mono">score {signedScore(h.score)} · {h.loaded_count}×</span></span>
-						<span class="desc dim">{h.description}</span>
-					</button>
-				{/each}
-			</div>
-		{/if}
-
-		<div class="section">
-			<h3>All lessons ({lessons.length})</h3>
-			{#if lessons.length === 0}
-				<p class="dim empty">No lessons mined yet — they appear as runs conclude.</p>
+			{#if results}
+				<div class="section">
+					<h3>Skills{searching ? ' …' : ` (${results.skills.length})`}</h3>
+					{#if results.skills.length === 0}
+						<p class="dim empty">No matching skills.</p>
+					{/if}
+					{#each results.skills as h (h.handle)}
+						<button class="row" class:active={selected === h.handle} onclick={() => select(h.handle)}>
+							<span class="name">{h.name}</span>
+							<span class="desc dim">{h.description}</span>
+						</button>
+					{/each}
+				</div>
+				<div class="section">
+					<h3>Lessons ({results.lessons.length})</h3>
+					{#if results.lessons.length === 0}
+						<p class="dim empty">No matching lessons.</p>
+					{/if}
+					{#each results.lessons as h (h.handle)}
+						<button class="row" class:active={selected === h.handle} onclick={() => select(h.handle)}>
+							<span class="name">{h.title} <span class="badge mono">score {signedScore(h.score)} · {h.loaded_count}×</span></span>
+							<span class="desc dim">{h.description}</span>
+						</button>
+					{/each}
+				</div>
 			{/if}
-			{#each lessons as l}
-				<button class="row" class:active={selected === `lesson:${l.id}`} onclick={() => select(`lesson:${l.id}`)}>
-					<span class="name">{l.title} <span class="badge mono">score {signedScore(l.score)} · {l.loaded_count}×</span></span>
-					<span class="desc dim">{l.description}</span>
-				</button>
-			{/each}
+
+			<div class="section">
+				<h3>All lessons ({lessons.length})</h3>
+				{#if lessons.length === 0}
+					<p class="dim empty">No lessons mined yet — they appear as runs conclude.</p>
+				{/if}
+				{#each lessons as l}
+					<button class="row" class:active={selected === `lesson:${l.id}`} onclick={() => select(`lesson:${l.id}`)}>
+						<span class="name">{l.title} <span class="badge mono">score {signedScore(l.score)} · {l.loaded_count}×</span></span>
+						<span class="desc dim">{l.description}</span>
+					</button>
+				{/each}
+			</div>
+		</div>
+
+		<div class="right card">
+			{#if reading}
+				<button class="back" onclick={closeReader}><CaretLeftIcon size={16} />All entries</button>
+			{/if}
+			{#if loadingItem}
+				<p class="dim">Loading…</p>
+			{:else if item}
+				<div class="item">
+					<h3>{item.kind === 'skill' ? item.name : item.title}</h3>
+					<p class="meta dim mono">
+						{#if item.kind === 'skill'}skill · {item.path}{:else}lesson:{item.id} · score {signedScore(item.score)} · used {item.loaded_count}× · source {item.source_run || 'unknown'}{/if}
+					</p>
+					{#if item.description}<p class="idesc">{item.description}</p>{/if}
+					<div class="md">{@html renderMarkdown(item.body)}</div>
+				</div>
+			{:else}
+				<p class="dim">Select a skill or lesson to read it.</p>
+			{/if}
 		</div>
 	</div>
-
-	<div class="right card">
-		{#if reading}
-			<button class="back" onclick={closeReader}><CaretLeftIcon size={16} />All entries</button>
-		{/if}
-		{#if loadingItem}
-			<p class="dim">Loading…</p>
-		{:else if item}
-			<div class="item">
-				<h3>{item.kind === 'skill' ? item.name : item.title}</h3>
-				<p class="meta dim mono">
-					{#if item.kind === 'skill'}skill · {item.path}{:else}lesson:{item.id} · score {signedScore(item.score)} · used {item.loaded_count}× · source {item.source_run || 'unknown'}{/if}
-				</p>
-				{#if item.description}<p class="idesc">{item.description}</p>{/if}
-				<div class="md">{@html renderMarkdown(item.body)}</div>
-			</div>
-		{:else}
-			<p class="dim">Select a skill or lesson to read it.</p>
-		{/if}
-	</div>
-</div>
+{/if}
 
 <style>
 	h2 {

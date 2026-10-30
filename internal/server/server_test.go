@@ -112,6 +112,24 @@ func doReq(t *testing.T, method, url, body string) (int, []byte) {
 	return resp.StatusCode, b
 }
 
+// statusOnly issues a GET and returns the status without reading the body, so
+// it also works on a stream that never ends.
+func statusOnly(t *testing.T, url string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
 func TestServer_Auth(t *testing.T) {
 	t.Parallel()
 	srv, _, store := newTestServer(t)
@@ -119,9 +137,48 @@ func TestServer_Auth(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	// Reads are open — the readonly share view needs no token.
-	if code, _ := doReq(t, http.MethodGet, ts.URL+"/api/runs", ""); code != http.StatusOK {
-		t.Errorf("read without token: %d, want 200 (reads open)", code)
+	// Reads of one run are open: the readonly share view needs no token.
+	for _, path := range []string{
+		"/api/runs/" + testRun,
+		"/api/runs/" + testRun + "/sessions/main-agent/chat",
+		"/api/runs/" + testRun + "/sessions/main-agent/trajectory",
+		"/api/runs/" + testRun + "/sessions/main-agent/events",
+		"/api/runs/" + testRun + "/artifacts",
+		"/api/runs/" + testRun + "/report",
+		"/api/about",
+		"/api/models",
+		"/api/sysstat",
+		"/api/auth",
+	} {
+		if code, body := doReq(t, http.MethodGet, ts.URL+path, ""); code != http.StatusOK {
+			t.Errorf("GET %s without token: %d %s, want 200 (single-run reads open)", path, code, body)
+		}
+	}
+	if code := statusOnly(t, ts.URL+"/api/runs/"+testRun+"/stream"); code != http.StatusOK {
+		t.Errorf("run stream without token: %d, want 200", code)
+	}
+
+	// Reads that span runs need the token, so a shared run's viewer can't
+	// list, watch or search the others; with it they work as before.
+	for _, path := range []string{
+		"/api/runs",
+		"/api/runs/counts",
+		"/api/stream",
+		"/api/recall?q=x",
+		"/api/recall/item?handle=lesson:x",
+		"/api/lessons",
+		"/api/workspaces",
+	} {
+		if code := statusOnly(t, ts.URL+path); code != http.StatusUnauthorized {
+			t.Errorf("GET %s without token: %d, want 401 (spans runs)", path, code)
+		}
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		if code := statusOnly(t, ts.URL+path+sep+"token=secret"); code == http.StatusUnauthorized {
+			t.Errorf("GET %s with token: 401, want it served", path)
+		}
 	}
 
 	// Writes require the token.

@@ -38,7 +38,7 @@
 	// Nav items are stable (always present) so layout never shifts as runs
 	// come and go; only the (N) suffix appears/disappears with the count.
 	// On a phone the row holds the brand and the chips; the nav is in the drawer.
-	const destinations = $derived(globalDestinations(runsStore.activeCount, updates.count));
+	const destinations = $derived(globalDestinations(runsStore.activeCount, updates.count, auth.ready && !auth.authed));
 	// Inside a run on a phone the run shell shows its own compact bar (menu,
 	// title, status) and drawer, so this bar and its drawer stay out.
 	const inRun = $derived(isRunPath(page.url.pathname));
