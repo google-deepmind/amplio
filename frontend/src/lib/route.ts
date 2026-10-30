@@ -33,8 +33,11 @@ export type Destination = {
 };
 
 /** The app-wide destinations: the desktop banner nav and both phone drawers. */
-export function globalDestinations(activeCount: number, unreadCount: number): Destination[] {
-	return [
+// In the readonly (shared) view only About remains: the run list, its counts
+// and recall need the owner's login (the server refuses them), so a viewer sent
+// one run's link has nowhere to browse to.
+export function globalDestinations(activeCount: number, unreadCount: number, readonly = false): Destination[] {
+	const all: Destination[] = [
 		{ label: 'All Runs', href: '/', icon: RowsIcon },
 		{
 			label: 'Active Runs',
@@ -55,6 +58,7 @@ export function globalDestinations(activeCount: number, unreadCount: number): De
 		{ label: 'Recall', href: '/recall', icon: BookOpenIcon },
 		{ label: 'About', href: '/about', icon: InfoIcon }
 	];
+	return readonly ? all.filter((d) => d.href === '/about') : all;
 }
 
 /** Whether `url` is the page `href` leads to (the dashboard's ?filter included). */

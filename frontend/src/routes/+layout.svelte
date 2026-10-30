@@ -16,7 +16,7 @@
 
 <script lang="ts">
 	import '../app.css';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { auth } from '$lib/auth.svelte';
 	import { api } from '$lib/api';
@@ -33,20 +33,26 @@
 
 	// Seed once on app mount. auth.init() resolves read/write status (drives the
 	// readonly UI); any ?token= was already exchanged in hooks.client.ts. sysstat
-	// seeds the status chips' first paint; runsStore seeds the top-banner
-	// counters. All best-effort — a network fail surfaces via the
-	// server-unreachable banner (api.ts wrapper).
+	// seeds the status chips' first paint. All best-effort — a network fail
+	// surfaces via the server-unreachable banner (api.ts wrapper).
 	onMount(() => {
 		void auth.init();
 		api.getSysStat()
 			.then((s) => sysstat.update(s))
 			.catch(() => {});
-		void runsStore.init();
 		// iOS Safari only applies :active (the phone pressed state) to pages
 		// with a touch listener.
 		const noop = () => {};
 		document.addEventListener('touchstart', noop, { passive: true });
 		return () => document.removeEventListener('touchstart', noop);
+	});
+
+	// The top-banner counters come from the run counts and the all-runs stream,
+	// which need the owner's login: start them once auth says we have it. In the
+	// readonly view they would only be refused, and a refused stream reads as a
+	// lost server (see stream.ts).
+	$effect(() => {
+		if (auth.authed) untrack(() => void runsStore.init());
 	});
 
 	// Favicon dot reflects what THIS tab is showing:

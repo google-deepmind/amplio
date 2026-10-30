@@ -25,6 +25,7 @@
 	import RunList from '$lib/components/RunList.svelte';
 	import StartRunForm from '$lib/components/StartRunForm.svelte';
 	import { auth } from '$lib/auth.svelte';
+	import PrivateNotice from '$lib/components/PrivateNotice.svelte';
 	import { prefetchWorkspaceInfo } from '$lib/workspaceInfo';
 	import { prefetchModelMenu } from '$lib/modelMenu';
 	import { FunnelIcon } from 'phosphor-svelte';
@@ -177,6 +178,7 @@
 	// a "Load more"-expanded list back to page 1. Either way it rebuilds from the
 	// top so the newest runs and latest statuses always show.
 	async function refresh(preserveExpanded = false) {
+		if (!auth.authed) return; // the list needs the owner's login (see below)
 		const limit = preserveExpanded
 			? Math.min(Math.max(PAGE_SIZE, runs.length), MAX_RUNS_PAGE)
 			: PAGE_SIZE;
@@ -206,7 +208,7 @@
 	// concurrent clicks. A subsequent live (SSE) refresh PRESERVES this expanded
 	// count (see refresh's preserveExpanded), so it no longer snaps back to page 1.
 	async function loadMore() {
-		if (loadingMore || !hasMore) return;
+		if (loadingMore || !hasMore || !auth.authed) return;
 		loadingMore = true;
 		try {
 			const pageData = await api.listRuns({
@@ -235,27 +237,35 @@
 		timer = setTimeout(() => refresh(true), 250);
 	}
 
-	onMount(() => {
-		refresh();
-		prefetchWorkspaceInfo(); // warm caches so the composer opens without a flicker
-		prefetchModelMenu();
-		prefetchBriefings();
-		const close = openStream(null, (ev) => {
-			// Ignore signals that change no persisted state the dashboard renders:
-			// token previews and sysstat (handled by its own store). Keep this in
-			// sync with runsStore's ignore set. (ephemeral_agents — report/compaction
-			// — is rare enough to just refresh on.)
-			if (ev.kind !== 'stream_chunk' && ev.kind !== 'sysstat') schedule();
+	// The list, the all-runs stream and the composer's menus need the owner's
+	// login, so start them once auth says we have it. The readonly view shows a
+	// notice instead, and must not open the stream: a refused stream reads as a
+	// lost server (see stream.ts).
+	$effect(() => {
+		if (!auth.authed) return;
+		return untrack(() => {
+			refresh();
+			prefetchWorkspaceInfo(); // warm caches so the composer opens without a flicker
+			prefetchModelMenu();
+			prefetchBriefings();
+			const close = openStream(null, (ev) => {
+				// Ignore signals that change no persisted state the dashboard renders:
+				// token previews and sysstat (handled by its own store). Keep this in
+				// sync with runsStore's ignore set. (ephemeral_agents — report/compaction
+				// — is rare enough to just refresh on.)
+				if (ev.kind !== 'stream_chunk' && ev.kind !== 'sysstat') schedule();
+			});
+			return () => {
+				close();
+				clearTimeout(timer);
+			};
 		});
-		return () => {
-			close();
-			clearTimeout(timer);
-			// Drop any un-consumed "new run like" prefill on leaving the dashboard, so
-			// it can't resurface on a later visit (belt-and-suspenders: the composer
-			// normally consumes it immediately, but it may be absent when signed out).
-			clearRunPrefill();
-		};
 	});
+
+	// Drop any un-consumed "new run like" prefill on leaving the dashboard, so it
+	// can't resurface on a later visit (belt-and-suspenders: the composer normally
+	// consumes it immediately, but it may be absent when signed out).
+	onMount(() => clearRunPrefill);
 
 	// Every filter is SERVER-side, so any change must refetch page 1 (resetting
 	// the cursor) rather than re-derive a client view. All four are URL-driven, so
@@ -277,109 +287,115 @@
 	<title>{pageTitle(heading)}</title>
 </svelte:head>
 
-<div class="dash">
-	<div class="toolbar" class:filtered={anyFilterActive && runs.length > 0}>
-		<h2>{heading} <span class="count dim">{runs.length}{hasMore ? '+' : ''}</span></h2>
-		<div class="filters">
-			<input
-				class="search"
-				type="search"
-				enterkeyhint="search"
-				placeholder={viewport.isPhone ? 'Search runs' : 'Search title, task, run id, or workspace…'}
-				aria-label="Search runs by title, task, run id, or workspace"
-				bind:value={searchInput}
-				oninput={onSearchInput}
-				onkeydown={onSearchKey}
-			/>
-			<button
-				class="filters-toggle"
-				aria-expanded={filtersOpen}
-				aria-controls="dash-filters"
-				aria-label={filtersActive ? 'Filters (some active)' : 'Filters'}
-				onclick={() => (filtersOpen = !filtersOpen)}
-			>
-				<FunnelIcon size={18} weight={filtersActive ? 'fill' : 'regular'} />
-				{#if filtersActive}<span class="filters-dot"></span>{/if}
-			</button>
-			<div id="dash-filters" class="secondary" class:open={filtersOpen}>
-			<!-- .pick is display: contents on desktop; on phone it draws the chip
-			     around a full-height (44px) transparent select. -->
-			<span class="pick" class:on={statusFilter !== 'all'}>
-			<select
-				value={statusFilter}
-				onchange={(e) => setFilter(e.currentTarget.value)}
-				{@attach fitToLabel(statusFilter)}
-				aria-label="Filter by status"
-			>
-				<option value="all">All</option>
-				<option value="active">Active</option>
-				<option value="done">Done</option>
-				<option value="failed">Failed</option>
-				<option value="updates">Updates</option>
-			</select>
-			</span>
-			<!-- Exact-match grade filter, kept alongside the star toggle. Effective
-			     grade = human grade ?? critic grade; "Ungraded" = neither set. -->
-			<span class="pick" class:on={gradeFilter !== 'all'}>
-			<select
-				value={gradeFilter}
-				onchange={(e) => updateURL('grade', e.currentTarget.value)}
-				{@attach fitToLabel(gradeFilter)}
-				aria-label="Filter by grade"
-			>
-				<option value="all">All grades</option>
-				<option value="excellent">Excellent</option>
-				<option value="good">Good</option>
-				<option value="meh">Meh</option>
-				<option value="bad">Bad</option>
-				<option value="garbage">Garbage</option>
-				<option value="ungraded">Ungraded</option>
-			</select>
-			</span>
-			<button
-				class="chip star"
-				class:on={starredOnly}
-				aria-pressed={starredOnly}
-				aria-label="Starred"
-				onclick={() => updateURL('starred', starredOnly ? null : '1')}>★ Starred</button
-			>
-			<label class="chip" class:on={showArchived}>
-				<input type="checkbox" bind:checked={showArchived} onchange={() => refresh()} /> Archived
-			</label>
+{#if auth.ready && !auth.authed}
+	<PrivateNotice
+		message="{auth.user ? `${auth.user}'s` : 'This'} run list is private. Open a run from a link you were given."
+	/>
+{:else}
+	<div class="dash">
+		<div class="toolbar" class:filtered={anyFilterActive && runs.length > 0}>
+			<h2>{heading} <span class="count dim">{runs.length}{hasMore ? '+' : ''}</span></h2>
+			<div class="filters">
+				<input
+					class="search"
+					type="search"
+					enterkeyhint="search"
+					placeholder={viewport.isPhone ? 'Search runs' : 'Search title, task, run id, or workspace…'}
+					aria-label="Search runs by title, task, run id, or workspace"
+					bind:value={searchInput}
+					oninput={onSearchInput}
+					onkeydown={onSearchKey}
+				/>
+				<button
+					class="filters-toggle"
+					aria-expanded={filtersOpen}
+					aria-controls="dash-filters"
+					aria-label={filtersActive ? 'Filters (some active)' : 'Filters'}
+					onclick={() => (filtersOpen = !filtersOpen)}
+				>
+					<FunnelIcon size={18} weight={filtersActive ? 'fill' : 'regular'} />
+					{#if filtersActive}<span class="filters-dot"></span>{/if}
+				</button>
+				<div id="dash-filters" class="secondary" class:open={filtersOpen}>
+				<!-- .pick is display: contents on desktop; on phone it draws the chip
+				     around a full-height (44px) transparent select. -->
+				<span class="pick" class:on={statusFilter !== 'all'}>
+				<select
+					value={statusFilter}
+					onchange={(e) => setFilter(e.currentTarget.value)}
+					{@attach fitToLabel(statusFilter)}
+					aria-label="Filter by status"
+				>
+					<option value="all">All</option>
+					<option value="active">Active</option>
+					<option value="done">Done</option>
+					<option value="failed">Failed</option>
+					<option value="updates">Updates</option>
+				</select>
+				</span>
+				<!-- Exact-match grade filter, kept alongside the star toggle. Effective
+				     grade = human grade ?? critic grade; "Ungraded" = neither set. -->
+				<span class="pick" class:on={gradeFilter !== 'all'}>
+				<select
+					value={gradeFilter}
+					onchange={(e) => updateURL('grade', e.currentTarget.value)}
+					{@attach fitToLabel(gradeFilter)}
+					aria-label="Filter by grade"
+				>
+					<option value="all">All grades</option>
+					<option value="excellent">Excellent</option>
+					<option value="good">Good</option>
+					<option value="meh">Meh</option>
+					<option value="bad">Bad</option>
+					<option value="garbage">Garbage</option>
+					<option value="ungraded">Ungraded</option>
+				</select>
+				</span>
+				<button
+					class="chip star"
+					class:on={starredOnly}
+					aria-pressed={starredOnly}
+					aria-label="Starred"
+					onclick={() => updateURL('starred', starredOnly ? null : '1')}>★ Starred</button
+				>
+				<label class="chip" class:on={showArchived}>
+					<input type="checkbox" bind:checked={showArchived} onchange={() => refresh()} /> Archived
+				</label>
+				</div>
 			</div>
 		</div>
-	</div>
-	{#if error}<p class="err">{error}</p>{/if}
-	<!-- The scroller is wrapped so the fade can be pinned to its bottom edge:
-	     rows dissolve into the page rather than being cut off against the
-	     composer. -->
-	<div class="runs-wrap">
-		<section class="runs">
-		{#if loaded && runs.length === 0 && anyFilterActive}
-			<div class="no-match">
-				<p class="dim small">
-					{searchOnly ? `No runs match “${search.trim()}”.` : 'No runs match the current filters.'}
-				</p>
-				<button class="clear" onclick={clearFilters}>{searchOnly ? 'Clear search' : 'Clear filters'}</button>
-			</div>
-		{:else if loaded}
-			<RunList {runs} onmutated={refresh} />
-		{/if}
-		<!-- Pagination affordance at the scroll-tail. Every filter is server-side, so
-		     "Load more" paginates the true (filtered) match set — always valid. -->
-		{#if hasMore}
-			<button class="load-more" onclick={loadMore} disabled={loadingMore}>
-				{loadingMore ? 'Loading…' : 'Load more runs'}
-			</button>
-		{/if}
-	</section>
-	</div>
-	{#if auth.authed}
-		<div class="compose">
-			<StartRunForm />
+		{#if error}<p class="err">{error}</p>{/if}
+		<!-- The scroller is wrapped so the fade can be pinned to its bottom edge:
+		     rows dissolve into the page rather than being cut off against the
+		     composer. -->
+		<div class="runs-wrap">
+			<section class="runs">
+			{#if loaded && runs.length === 0 && anyFilterActive}
+				<div class="no-match">
+					<p class="dim small">
+						{searchOnly ? `No runs match “${search.trim()}”.` : 'No runs match the current filters.'}
+					</p>
+					<button class="clear" onclick={clearFilters}>{searchOnly ? 'Clear search' : 'Clear filters'}</button>
+				</div>
+			{:else if loaded}
+				<RunList {runs} onmutated={refresh} />
+			{/if}
+			<!-- Pagination affordance at the scroll-tail. Every filter is server-side, so
+			     "Load more" paginates the true (filtered) match set — always valid. -->
+			{#if hasMore}
+				<button class="load-more" onclick={loadMore} disabled={loadingMore}>
+					{loadingMore ? 'Loading…' : 'Load more runs'}
+				</button>
+			{/if}
+		</section>
 		</div>
-	{/if}
-</div>
+		{#if auth.authed}
+			<div class="compose">
+				<StartRunForm />
+			</div>
+		{/if}
+	</div>
+{/if}
 
 <style>
 	/* App-shell dashboard: fills main exactly. Toolbar pinned at top, the run

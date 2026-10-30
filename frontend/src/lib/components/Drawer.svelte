@@ -33,7 +33,7 @@
 	let { children }: { children?: Snippet } = $props();
 
 	let dlg = $state<HTMLDialogElement>();
-	const global = $derived(globalDestinations(runsStore.activeCount, updates.count));
+	const global = $derived(globalDestinations(runsStore.activeCount, updates.count, auth.ready && !auth.authed));
 
 	$effect(() => {
 		if (!dlg) return;

@@ -26,8 +26,9 @@ On startup it prints the URL to open:
     amplio → http://localhost:26759/?token=abcdEFGH123some-long-token
 
 **That token is a credential.** Following the link authenticates the browser and
-stores a cookie. Without the token or cookie, the UI is read-only. The token is 
-generated once and kept in `<data-dir>/auth.token`, so it survives restarts.
+stores a cookie. Without the token or cookie, the UI shows a run read-only from
+its URL, and the run list is private. The token is generated once and kept in
+`<data-dir>/auth.token`, so it survives restarts.
 
 Bind address: `--listen` > `$AMPLIO_LISTEN` > `config.toml`, defaulting to
 `localhost:26759`. See [operations](operations.md) for more details.

@@ -62,8 +62,9 @@ func (s *Server) authed(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1
 }
 
-// requireAuth gates a mutating handler. Reads are wired unguarded (the readonly
-// share view); only writes go through here.
+// requireAuth gates a handler on the token: every mutation, and the reads that
+// span runs (see Handler). Reads of a single run are wired unguarded (the
+// readonly share view).
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.authed(r) {

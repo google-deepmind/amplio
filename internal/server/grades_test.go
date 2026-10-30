@@ -87,7 +87,7 @@ func TestRunDTOs_GradesAndArtifactDir(t *testing.T) {
 				ArtifactDir string                    `json:"artifact_dir"`
 			} `json:"runs"`
 		}
-		getJSON(t, h, "/api/runs", &page)
+		getJSON(t, h, "/api/runs?token=secret", &page)
 		byID := map[string]int{}
 		for _, r := range page.Runs {
 			byID[r.RunID] = len(r.Grades)
