@@ -91,6 +91,8 @@ type Server struct {
 	// procCache coalesces concurrent viewers of the process list onto one /proc
 	// scan (see processes.go).
 	procCache procCache
+
+	pairs pairCodes // one-time "Open on phone" login codes (see pair.go)
 }
 
 // SetSysStat installs the server-host status watcher behind GET /api/sysstat.
@@ -150,14 +152,16 @@ func New(runCtx context.Context, store db.Store, mgr *runtime.RunManager, bus *e
 // sent to anyone on the corp network. Reads that span runs (the list, the
 // all-runs stream, recall) require the token like mutations do (cookie/Bearer,
 // via requireAuth), so a shared run doesn't lead to the others. The two
-// /api/auth endpoints are open: login exchanges a token for the cookie; the
-// status drives the readonly UI.
+// /api/auth endpoints are open: login exchanges a token (or a pairing code) for
+// the cookie; the status drives the readonly UI. Minting a pairing code
+// requires auth.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Auth.
 	mux.HandleFunc("GET /api/auth", s.handleAuth)
 	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	mux.HandleFunc("POST /api/auth/pair", s.requireAuth(s.handleAuthPair))
 
 	// Reads that span runs — require the token. Each would show a viewer of
 	// one shared run the others: their ids (the list and its counts, lessons'

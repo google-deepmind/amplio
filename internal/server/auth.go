@@ -75,15 +75,21 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// handleAuthLogin exchanges a valid presented token for an HttpOnly cookie, so
-// the frontend can strip ?token= from the URL and later token-less shared links
-// resolve to the readonly view. SameSite=Lax gives basic CSRF protection for
-// cross-site writes. The Secure flag is set when the server has TLS configured
-// (see SetSecureCookie); plain-HTTP deployments leave it unset so browsers
-// still send the cookie over the unencrypted connection.
+// handleAuthLogin exchanges a valid presented token, or a one-time pairing
+// code (?pair=, see pairCodes), for an HttpOnly cookie, so the frontend can
+// strip the secret from the URL and later token-less shared links resolve to
+// the readonly view. SameSite=Lax gives basic CSRF protection for cross-site
+// writes. The Secure flag is set when the server has TLS configured (see
+// SetSecureCookie); plain-HTTP deployments leave it unset so browsers still
+// send the cookie over the unencrypted connection.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if s.token != "" {
-		if subtle.ConstantTimeCompare([]byte(bearerOrQueryToken(r)), []byte(s.token)) != 1 {
+		if code := r.URL.Query().Get("pair"); code != "" {
+			if !s.pairs.redeem(code) {
+				writeErr(w, http.StatusUnauthorized, "invalid or expired pairing code")
+				return
+			}
+		} else if subtle.ConstantTimeCompare([]byte(bearerOrQueryToken(r)), []byte(s.token)) != 1 {
 			writeErr(w, http.StatusUnauthorized, "invalid token")
 			return
 		}

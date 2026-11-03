@@ -28,6 +28,7 @@
 	import MemChip from './MemChip.svelte';
 	import SwapChip from './SwapChip.svelte';
 	import Drawer from './Drawer.svelte';
+	import OpenOnPhone from './OpenOnPhone.svelte';
 	import MenuButton from './MenuButton.svelte';
 
 	// Global, app-wide banner. Holds branding + global navigation on the left
@@ -88,6 +89,7 @@
 				{#if INTERNAL && sysstat.credentialSeconds !== null}
 					<GcertChip />
 				{/if}
+				{#if auth.authed && !viewport.isPhone}<OpenOnPhone />{/if}
 			{/if}
 		</div>
 	</div>

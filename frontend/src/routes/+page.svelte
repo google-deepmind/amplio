@@ -289,7 +289,11 @@
 
 {#if auth.ready && !auth.authed}
 	<PrivateNotice
-		message="{auth.user ? `${auth.user}'s` : 'This'} run list is private. Open a run from a link you were given."
+		message={auth.pairFailed === 'refused'
+			? 'That code expired or was already used. Press New code on your computer and scan again.'
+			: auth.pairFailed === 'unreachable'
+				? "Couldn't reach Amplio to sign you in. Check the connection and scan the code again."
+				: `${auth.user ? `${auth.user}'s` : 'This'} run list is private. Open a run from a link you were given.`}
 	/>
 {:else}
 	<div class="dash">

@@ -382,6 +382,12 @@ export const api = {
   getSessionTools: (id: string, sid: string) =>
     req<SessionTools>(`/runs/${id}/sessions/${sid}/tools`),
   getAbout: () => req<AboutInfo>("/about"),
+  // One-time login code for "Open on phone" (requires auth; see pair.go).
+  mintPairCode: () =>
+    req<{ code: string; expires_at: string; expires_in: number }>(
+      "/auth/pair",
+      { method: "POST" },
+    ),
   // Token-gated, unlike other reads: command lines carry secrets.
   getProcesses: (id: string) => req<ProcessSnapshot>(`/runs/${id}/processes`),
   // Pre-flight test of an agent-LLM spec (build provider + one trivial Call)

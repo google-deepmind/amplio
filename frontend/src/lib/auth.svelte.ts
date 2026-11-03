@@ -20,7 +20,8 @@
 //
 // consumeURLToken() runs from the client `init` hook (hooks.client.ts), before
 // the router starts: if the URL carries ?token= (the link the owner opened from
-// their terminal), it strips the token from the address bar and POSTs it to
+// their terminal) or ?pair= (a one-time code from the "Open on phone" QR), it
+// strips it from the address bar and POSTs it to
 // /api/auth/login so the server sets the cookie. The router therefore never sees
 // the token (it cannot resurface on a later goto), and no page's first API call
 // can race the cookie. A copied (token-less) URL shared with a teammate lands
@@ -30,22 +31,34 @@ class Auth {
 	authed = $state(false);
 	user = $state(''); // server owner's username, for the readonly banner
 	ready = $state(false); // false until /api/auth has answered (avoid UI flash)
+	// Why a ?pair= login (a scanned QR code) didn't sign this browser in:
+	// 'refused' = expired, already used or unknown; 'unreachable' = no answer.
+	pairFailed = $state<'refused' | 'unreachable' | null>(null);
 
 	async consumeURLToken() {
 		const url = new URL(window.location.href);
-		const token = url.searchParams.get('token');
-		if (!token) return;
-		url.searchParams.delete('token');
+		const login = new URLSearchParams();
+		for (const k of ['token', 'pair']) {
+			const v = url.searchParams.get(k);
+			if (!v) continue;
+			login.set(k, v);
+			url.searchParams.delete(k);
+		}
+		// Not login.size: URLSearchParams.size needs Chrome 113 / Safari 17.
+		if (!login.toString()) return;
 		// The router has not started, so nothing to conflict with; the prototype
 		// call skips SvelteKit's dev-only warning wrapper on history.replaceState.
 		History.prototype.replaceState.call(history, history.state, '', url);
+		const pairing = login.has('pair');
 		try {
-			await fetch(`/api/auth/login?token=${encodeURIComponent(token)}`, {
+			const res = await fetch(`/api/auth/login?${login}`, {
 				method: 'POST',
 				signal: AbortSignal.timeout(10000),
 			});
+			if (pairing && res.status === 401) this.pairFailed = 'refused';
 		} catch {
 			// network error or timeout — start anyway; we'll resolve to readonly
+			if (pairing) this.pairFailed = 'unreachable';
 		}
 	}
 
