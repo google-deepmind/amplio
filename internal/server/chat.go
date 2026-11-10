@@ -37,7 +37,10 @@ type chatBubble struct {
 	From     string `json:"from,omitempty"`
 	// Verdict is set only for kind=="child_result": the sub-agent's terminal
 	// status (concluded | crashed | cancelled), so the client can badge it.
-	Verdict   string         `json:"verdict,omitempty"`
+	Verdict string `json:"verdict,omitempty"`
+	// Notes, also only for child_result: facts about how the sub-agent concluded
+	// (e.g. what it left running), each with a label to show.
+	Notes     []chatNote     `json:"notes,omitempty"`
 	Step      int            `json:"step"`
 	CreatedAt time.Time      `json:"created_at"`
 	ToolCalls []chatToolCall `json:"tool_calls"`
@@ -158,9 +161,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		switch ev := rec.Event.(type) {
 		case *event.UserEvent:
+			// The harness writes user-role nudges too (conclusion checks such as
+			// the end-of-run reminder): shown as amplio's, not as the operator's.
+			kind, from := "operator", "user"
+			if ev.IsHarness() {
+				kind, from = "environment", "amplio"
+			}
 			msgs = append(msgs, chatBubble{
-				EventID: rec.EventID, Kind: "operator", Content: ev.Content,
-				From: "user", Step: rec.Step, CreatedAt: rec.CreatedAt,
+				EventID: rec.EventID, Kind: kind, Content: ev.Content,
+				From: from, Step: rec.Step, CreatedAt: rec.CreatedAt,
 				ToolCalls: []chatToolCall{},
 			})
 		case *event.AssistantEvent:
@@ -210,7 +219,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			// concluded vs crashed/cancelled distinctly.
 			msgs = append(msgs, chatBubble{
 				EventID: rec.EventID, Kind: "child_result", Content: ev.Content,
-				From: ev.ChildSessionID, Verdict: ev.Verdict,
+				From: ev.ChildSessionID, Verdict: ev.Verdict, Notes: chatNotes(ev.AllNotes()),
 				Step: rec.Step, CreatedAt: rec.CreatedAt,
 				ToolCalls: []chatToolCall{},
 			})
@@ -293,4 +302,18 @@ func obsStr(o db.ObservationRecord, key string) string {
 		return s
 	}
 	return ""
+}
+
+// chatNote is a child_result note as the chat shows it.
+type chatNote struct {
+	Label string `json:"label"`
+	Text  string `json:"text"`
+}
+
+func chatNotes(notes []event.ResultNote) []chatNote {
+	out := make([]chatNote, 0, len(notes))
+	for _, n := range notes {
+		out = append(out, chatNote{Label: event.NoteLabel(n.Kind), Text: n.Text})
+	}
+	return out
 }

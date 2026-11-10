@@ -24,8 +24,9 @@ import (
 // The two-level structure (run → sessions) avoids composite keys and gives
 // each run its own isolated coordination namespace.
 type RunRegistry struct {
-	mu   sync.RWMutex
-	runs map[string]*session.Registry
+	mu     sync.RWMutex
+	runs   map[string]*session.Registry
+	closed bool // set by CancelAll: registries created after it are closed too
 }
 
 func NewRunRegistry() *RunRegistry {
@@ -41,6 +42,9 @@ func (rr *RunRegistry) GetOrCreate(runID string) *session.Registry {
 		return reg
 	}
 	reg := session.NewRegistry()
+	if rr.closed {
+		reg.CancelAll() // it has no sessions yet, so this only closes it
+	}
 	rr.runs[runID] = reg
 	return reg
 }
@@ -117,14 +121,20 @@ func (rr *RunRegistry) ActiveRunIDs() []string {
 	return ids
 }
 
-// CancelAll cancels all sessions across all runs.
+// CancelAll cancels all sessions across all runs and closes every run's
+// registry, including one created later (see session.Registry.CancelAll): this
+// process is stopping, so no session starts again before it exits. Without
+// that, a session whose goroutine has already exited, with its run's registry
+// dropped, could be revived into a fresh registry. Nothing is persisted, so a
+// later process (a resume, serve) revives the sessions as usual.
 func (rr *RunRegistry) CancelAll() {
-	rr.mu.RLock()
+	rr.mu.Lock()
+	rr.closed = true
 	regs := make([]*session.Registry, 0, len(rr.runs))
 	for _, reg := range rr.runs {
 		regs = append(regs, reg)
 	}
-	rr.mu.RUnlock()
+	rr.mu.Unlock()
 	for _, reg := range regs {
 		reg.CancelAll()
 	}

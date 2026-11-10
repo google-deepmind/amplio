@@ -422,7 +422,11 @@ func renderStepBody(b *strings.Builder, recs []db.EventRecord) {
 				fmt.Fprintf(b, "    · %s\n", toolsummary.Brief(tc.Name, tc.Arguments))
 			}
 		case *event.UserEvent:
-			writeBody(b, "user", e.Content)
+			label := "user"
+			if e.IsHarness() {
+				label = "amplio" // a conclusion-check nudge, not the operator
+			}
+			writeBody(b, label, e.Content)
 		case *event.MessageEvent:
 			label := "message"
 			if e.Sender != "" {

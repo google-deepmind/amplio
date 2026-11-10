@@ -28,3 +28,5 @@ func killGroup(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Kill()
 }
+
+func groupAlive(int) bool { return false }

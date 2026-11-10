@@ -33,3 +33,6 @@ import (
 func Scan(string) Snapshot {
 	return Snapshot{Supported: false, Platform: runtime.GOOS, TakenAt: time.Now(), Roots: []*Process{}}
 }
+
+// Outputs is unknown without /proc.
+func Outputs(int) (stdout, stderr string) { return "", "" }

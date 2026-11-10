@@ -139,8 +139,37 @@ process owns the data directory for its lifetime, so it **cannot** share one
 with a running `serve`. To run several headless tasks on one machine, give each
 its own data directory.
 
+Agents' background jobs reach them with `amplio-notify` as they do under
+`serve`, and so can a supervising script (`amplio notify --session=main-agent`
+with `$AMPLIO_RUN_ID` set): the process serves just the notify endpoint, on
+loopback with a per-process token, and records it in `server.json` while it
+runs. Nothing else is served, so `amplio client` still needs a `serve`.
+
 `resume` reconstructs the run's model, workspace and agent from its stored
 config, so it needs no flags beyond the id.
+
+`resume` revives only what was interrupted; a run already at rest stays
+there. `--message=TEXT` first gives the root agent new input, which revives
+even a concluded root: a harness's "time is up, answer now" turn. As with
+`run`, the exit code says whether the command did its job, and the run's
+outcome is in its state: if the message revives nothing (the root can't be
+respawned; the log says why), `resume` exits 1, while a root that runs but
+doesn't reply (it crashes, say) exits 0 with a warning, its status recorded.
+
+When none of the run's agents is running any more, the process logs `run at
+rest` with the `run_id` (a field of its own with `--log-format=json`), at info
+level, so a harness that raises `--log-level` above info won't see it. All
+that follows is exit work, the run report and the observer's last summaries,
+which can take minutes, so a harness that only needs the outcome can stop the
+process at that line. An interrupt (SIGINT) logs `interrupted, cancelling run`
+instead. It stops the run's agents without changing their status, so a later
+`resume` picks the run up where it stopped. In the second or so before this
+`headless` process exits, nothing revives them: a notification that arrives
+then is stored, and the agent sees it when the run is resumed.
+
+Once the run is at rest, the process writes the run report (a critic pass on
+the HQ model) before it exits. `--no-report`, on `run` or `resume`, skips it
+for one-shot runs whose report nobody reads.
 
 ## Managing runs with amplio
 

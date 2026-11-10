@@ -43,6 +43,17 @@ func detachTerminal(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
+// groupAlive reports whether process group pgid still has members (EPERM means
+// it does, under another uid).
+func groupAlive(pgid int) bool {
+	if pgid <= 1 {
+		// kill(0) would probe amplio's own group, and kill(-1) every process.
+		return false
+	}
+	err := syscall.Kill(-pgid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
 // killGroup kills the command's entire process group. Used only on timeout or
 // cancellation: a bare Process.Kill() reaps the shell and leaves whatever it
 // spawned running, which is how a hung command turns into an orphan.

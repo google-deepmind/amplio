@@ -119,7 +119,11 @@ func (h *Handle) WaitAfter(ctx context.Context, last uint64, timeout time.Durati
 type Registry struct {
 	mu       sync.RWMutex
 	sessions map[string]*Handle
+	closed   bool // set by CancelAll: no session registers again in this process
 }
+
+// ErrClosed is Register's error once CancelAll has closed the registry.
+var ErrClosed = errors.New("session registry closed: this process is stopping")
 
 func NewRegistry() *Registry {
 	return &Registry{sessions: make(map[string]*Handle)}
@@ -128,6 +132,9 @@ func NewRegistry() *Registry {
 func (r *Registry) Register(sessionID string, h *Handle) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return ErrClosed
+	}
 	if _, exists := r.sessions[sessionID]; exists {
 		return fmt.Errorf("session %q already registered", sessionID)
 	}
@@ -144,7 +151,8 @@ func (r *Registry) Register(sessionID string, h *Handle) error {
 //   - release: cancels ctx and unregisters the slot; the goroutine defers it.
 //
 // It returns ok=false (and does nothing) if the slot is already taken — the
-// caller should treat that as "already live" and NOT launch a rival goroutine.
+// caller should treat that as "already live" and NOT launch a rival goroutine —
+// or if the registry is closed (Closed tells the two apart).
 //
 // This is the single registration path for every session launch (fresh run,
 // respawn, spawned child). Registering the slot BEFORE the caller spawns its
@@ -158,6 +166,9 @@ func (r *Registry) Register(sessionID string, h *Handle) error {
 func (r *Registry) RegisterAndContext(parent context.Context, sessionID string) (ctx context.Context, h *Handle, release func(), ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil, nil, nil, false
+	}
 	if _, exists := r.sessions[sessionID]; exists {
 		return nil, nil, nil, false
 	}
@@ -202,18 +213,30 @@ func (r *Registry) Interrupt(sessionID string) {
 	}
 }
 
-// CancelAll interrupts all session goroutines in this registry (e.g. on process
-// shutdown). It only ctx-cancels; it does not change DB status.
+// CancelAll interrupts all session goroutines in this registry on process
+// shutdown, and closes the registry: from then on no session registers, so
+// nothing (a notification reviving a session, say) starts one in the time
+// left before this process exits. It only ctx-cancels; it does not change DB
+// status. The registry is in-memory, so a later process (a resume, serve)
+// revives the sessions as usual.
 func (r *Registry) CancelAll() {
-	r.mu.RLock()
+	r.mu.Lock()
+	r.closed = true
 	handles := make([]*Handle, 0, len(r.sessions))
 	for _, h := range r.sessions {
 		handles = append(handles, h)
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 	for _, h := range handles {
 		h.cancel()
 	}
+}
+
+// Closed reports whether CancelAll has closed the registry.
+func (r *Registry) Closed() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.closed
 }
 
 // CancelSession is the canceller-driven cancel primitive, applied recursively
@@ -244,7 +267,7 @@ func CancelSession(store db.Store, reg *Registry, runID, sessionID, reason strin
 	}
 	// -1: an async cancel marker belongs at the session's current step.
 	if err := store.TerminateAndNotifyParent(context.Background(), runID, sessionID, sess.ParentID,
-		db.SessionCancelled, reason, &event.SystemEvent{Content: reason, Marker: event.MarkerCancelled}, -1); err != nil {
+		db.SessionCancelled, reason, nil, &event.SystemEvent{Content: reason, Marker: event.MarkerCancelled}, -1); err != nil {
 		// The terminal write failed: do NOT interrupt the goroutine. Leaving it
 		// alive keeps the session truthfully ongoing (not ongoing-but-dead), so
 		// the canceller can retry — interrupting now would strand the session and

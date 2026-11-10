@@ -112,7 +112,7 @@ type Store interface {
 	// is a no-op (no writes, no notify). Status is thus the dedupe token. The
 	// commit handler fires for the PARENT only — never for the terminating
 	// session itself, so it never self-wakes the session being stopped.
-	TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, selfEvent event.Event, selfEventStep int) error
+	TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, selfEvent event.Event, selfEventStep int) error
 
 	MergeSessionMetadata(ctx context.Context, runID, sessionID string, updates map[string]any) error
 

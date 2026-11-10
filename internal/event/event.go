@@ -139,6 +139,25 @@ func (e *SystemEvent) ToText() string {
 type UserEvent struct {
 	ColumnFields
 	Content string `json:"content"`
+	// Check is set when the harness, not the operator, wrote this message: a
+	// nudge at a conclusion check (CheckLeftovers, CheckEmptyTurn,
+	// CheckOutputLimit). The model sees it as any user message; the loop finds it
+	// by Check rather than by its text, and UIs show it as the harness's.
+	Check string `json:"check,omitempty"`
+}
+
+// Conclusion checks that write a UserEvent (see UserEvent.Check).
+const (
+	CheckLeftovers   = "leftovers"    // the end-of-run reminder: work still running
+	CheckEmptyTurn   = "empty_turn"   // a final turn with no text
+	CheckOutputLimit = "output_limit" // a final turn cut off by the output-token limit
+)
+
+// IsHarness reports whether the harness wrote this message. Events written
+// before Check existed are recognised by the "[system] " prefix every harness
+// nudge carries.
+func (e *UserEvent) IsHarness() bool {
+	return e.Check != "" || strings.HasPrefix(e.Content, "[system] ")
 }
 
 func (*UserEvent) eventTag()         {}
@@ -301,6 +320,44 @@ type ChildResultEvent struct {
 	Content        string `json:"content"`
 	ChildSessionID string `json:"child_session_id"`
 	Verdict        string `json:"verdict"` // concluded, crashed, cancelled
+	// Notes are facts about how the child concluded, for its parent (e.g. what
+	// it left running), kept out of Content, which is its result exactly as it
+	// wrote it.
+	Notes []ResultNote `json:"notes,omitempty"`
+	// Leftover is the single note of events written before Notes existed; read
+	// it through AllNotes.
+	Leftover string `json:"leftover,omitempty"`
+}
+
+// ResultNote is one fact on a child_result: Kind is a machine name (NoteLeftover),
+// Text the fact itself.
+type ResultNote struct {
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
+// Kinds of ResultNote.
+const (
+	NoteLeftover = "leftover" // what the child left running when it concluded
+)
+
+// NoteLabel is how a note kind reads in a header or a UI.
+func NoteLabel(kind string) string {
+	switch kind {
+	case NoteLeftover:
+		return "left running"
+	default:
+		return kind
+	}
+}
+
+// AllNotes returns Notes, plus the legacy Leftover of events written before
+// Notes existed.
+func (e *ChildResultEvent) AllNotes() []ResultNote {
+	if e.Leftover == "" {
+		return e.Notes
+	}
+	return append([]ResultNote{{Kind: NoteLeftover, Text: e.Leftover}}, e.Notes...)
 }
 
 func (*ChildResultEvent) eventTag()         {}
@@ -308,6 +365,9 @@ func (*ChildResultEvent) EventType() string { return "child_result" }
 
 func (e *ChildResultEvent) ToText() string {
 	attrs := []string{"child=" + e.ChildSessionID, "verdict=" + e.Verdict, tsAttr("at", e.CreatedAt)}
+	for _, n := range e.AllNotes() {
+		attrs = append(attrs, NoteLabel(n.Kind)+": "+n.Text)
+	}
 	return banner("child_result", attrs, e.Content)
 }
 

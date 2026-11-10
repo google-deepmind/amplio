@@ -127,29 +127,27 @@ func execute(ctx context.Context, command, cwd string, extraEnv []string, timeou
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Use temp files for stdout/stderr (not pipes) so background
-	// subprocesses (trailing &) don't block us on EOF.
-	stdoutF, err := os.CreateTemp("", "amplio-bash-stdout-*")
+	// Files for stdout/stderr (not pipes) so background subprocesses (trailing
+	// &) don't block us on EOF. In a run they live in the run's artifact dir and
+	// are kept while a background process still writes to them (leftover.go).
+	runID := envLookup(extraEnv, config.EnvRunID)
+	files, err := newCallFiles(callDir(extraEnv), envLookup(extraEnv, config.EnvSessionID))
 	if err != nil {
-		return fmt.Sprintf("Error: could not create temp file for stdout: %s", err)
+		return fmt.Sprintf("Error: could not create files for the command's output: %s", err)
 	}
-	stderrF, err := os.CreateTemp("", "amplio-bash-stderr-*")
-	if err != nil {
-		stdoutF.Close()
-		os.Remove(stdoutF.Name())
-		return fmt.Sprintf("Error: could not create temp file for stderr: %s", err)
-	}
-	defer func() {
-		stdoutF.Close()
-		stderrF.Close()
-		os.Remove(stdoutF.Name())
-		os.Remove(stderrF.Name())
-	}()
+	stdoutF, stderrF := files.out, files.err
+	var keepOut, keepErr bool
+	defer func() { files.close(keepOut, keepErr) }()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = cwd
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
+		if runID != "" {
+			// Marks everything this call starts, so what it leaves running can be
+			// found after it returns, even if it left the process group.
+			cmd.Env = append(cmd.Env, config.EnvBashCall+"="+files.id)
+		}
 	}
 	cmd.Stdin = nil // EOF on stdin so interactive prompts fail fast
 	cmd.Stdout = stdoutF
@@ -195,7 +193,16 @@ func execute(ctx context.Context, command, cwd string, extraEnv []string, timeou
 	stderr := readCapped(stderrF, maxOutput)
 
 	status := statusLine(timedOut, timeout, exitCode, elapsed, launchErr)
-	return formatOutput(stdout, stderr, status, maxOutput)
+	out := formatOutput(stdout, stderr, status, maxOutput)
+	if runID != "" && cmd.Process != nil {
+		// Setsid made the shell its group's leader, so its pid is the group id.
+		left := findLeftovers(runID, files, cmd.Process.Pid)
+		keepOut, keepErr = left.keepOut, left.keepErr
+		if note := left.note(); note != "" {
+			out += "\n\nBACKGROUND:\n" + note
+		}
+	}
+	return out
 }
 
 // readCapped reads up to limit bytes from f. If the file is larger, it appends a

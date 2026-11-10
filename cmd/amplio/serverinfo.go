@@ -31,9 +31,10 @@ import (
 )
 
 // serverInfo is the discovery metadata a running `serve` writes to
-// <data-dir>/server.json so clients (e.g. `submit`) can find it. It is NOT a
-// lock — the data-dir flock is. A stale file (after a crash) is harmless: the
-// URL simply refuses the connection.
+// <data-dir>/server.json so clients (e.g. `submit`) can find it; a headless
+// process writes one for its notify-only endpoint (headless_notify.go). It is
+// NOT a lock — the data-dir flock is. A stale file (after a crash) is harmless:
+// the URL simply refuses the connection.
 type serverInfo struct {
 	PID   int    `json:"pid"`
 	URL   string `json:"url"`   // banner base URL for humans/frontend, e.g. http://host:port

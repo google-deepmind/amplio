@@ -101,9 +101,11 @@ tunable on its own, e.g. `crashed`), not in `Classify` (which stays a pure
 function of the event):
 the env message is still appended (persisted) to the terminal session's stream,
 it just doesn't respawn it, so it's seen on the next genuine restart. A
-runaway/forgotten notifier remains recoverable: `notify` stamps the caller's pid
-onto the sender (e.g. `environment (pid=12345)`), so a revived agent can identify
-and `kill` the offending script.
+runaway/forgotten notifier remains recoverable: `notify` stamps its process
+group onto the sender (e.g. `environment (pgid=12345)`), so a revived agent can
+stop the offending script and everything it started with `kill -- -12345`. Not
+the parent pid: once the shell that launched a backgrounded notifier exits, its
+parent is whoever adopted it — init, or `systemd --user` under a systemd unit.
 
 **Env notifications are capped per step** (`server.maxEnvNoticesPerStep`, 50).
 Since they persist even when they cannot wake anyone, an abandoned poller would
@@ -245,7 +247,12 @@ Mechanically, Recover appends a **`RecoverEvent`** to each spine session.
 `RecoverEvent` is an `Input`-class event, so it flows through the normal respawn
 machinery (re-enter the loop with status `ongoing`) and doubles as the visible
 "resumed" marker the LLM sees. It is **only** produced by Recover — never by
-normal agent flow. (Subtlety from crash recovery: Recover **skips** the
+normal agent flow. Its content also says what the session still has running:
+its live background processes (from the process table, attributed by the
+`AMPLIO_SESSION_ID` in each process's environment; each with its process group,
+age and command) and its running sub-agents, or that nothing survived. Without
+it an agent learns only that its wait was interrupted, not whether the job it
+was waiting for is gone. (Subtlety from crash recovery: Recover **skips** the
 `RecoverEvent` when the stream is already "at rest" — crashed after the final
 reply but before the status flip — to avoid a redundant LLM round-trip; see
 [Crash recovery](#crash-recovery).)
@@ -263,6 +270,25 @@ Waiting is itself a tool (`await_event` → `awaiting`), so a bare no-tool-call 
 is unambiguous: the agent is neither acting nor waiting, so it's done. 
 Model it as a function: `spawn` = async call, `await_event` = await, a no-tool
 turn (autonomous) = `return <text>`, `child_result` = the returned value.
+
+**End-of-run reminder.** Concluding is final: running sub-agents are cancelled,
+and notifications from the agent's background processes reach no one afterwards
+(see the environment-notification exception above). So an autonomous agent about
+to conclude while its own background processes (attributed by
+`AMPLIO_SESSION_ID`, as the Processes tab does) or sub-agents are still running
+gets one `[system]` user message instead, listing them and what concluding will
+do, and decides whether to wait, stop them, or conclude anyway. The attempt right
+after a reminder always concludes; an agent that goes back to work and concludes
+later is reminded again if anything is still running. The check sits in front of
+both places that conclude an agent (the live loop, and the recovery path for an
+at-rest final answer), and the only state is the reminder in the event stream.
+Interactive agents never reach it: they go idle, and notifications wake them.
+What a concluding sub-agent leaves running is also reported on its parent's
+`child_result`, as a note (`notes`: kind `leftover`, e.g. "1 background process
+group"; events written before notes existed carry it as `leftover`), outside the
+result text. The reminder, like the nudges for an empty or output-limited final
+turn, is a user-role message marked with the check that wrote it
+(`UserEvent.Check`), so UIs show it as amplio's rather than the operator's.
 
 ## Cascade on exit
 

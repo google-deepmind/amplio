@@ -37,7 +37,10 @@ var systemPrompt string
 const completionSnippet = "\n\n## Completion\n\n" +
 	"When the overarching task is completely finished, give your final summary in " +
 	"plain text with NO tool calls — the absence of tool calls signals completion. " +
-	"Be concise and direct about the final state."
+	"Be concise and direct about the final state. If you are then told that work you " +
+	"started is still running, decide whether to wait for it, stop it, or leave it; " +
+	"when you conclude after that, give your full final summary again, since your " +
+	"final message is your result."
 
 const AgentType = "standard_agent"
 

@@ -35,6 +35,10 @@ func headlessCmd() *cobra.Command {
 			"running server. To submit a task to an already-running `amplio serve`," +
 			" use `amplio client submit` instead.",
 	}
-	cmd.AddCommand(runCmd(), resumeCmd())
+	// --no-report: for one-shot runs (an eval harness) whose report nobody reads.
+	var noReport bool
+	cmd.PersistentFlags().BoolVar(&noReport, "no-report", false,
+		"Don't write the run report once the run is at rest (skips the critic's HQ-model calls)")
+	cmd.AddCommand(runCmd(&noReport), resumeCmd(&noReport))
 	return cmd
 }

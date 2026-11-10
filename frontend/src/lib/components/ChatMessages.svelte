@@ -420,6 +420,9 @@
 									{:else}{m.verdict}{/if}
 								</span>
 							</div>
+							{#each m.notes ?? [] as n (n.label + n.text)}
+								<div class="dim small note">{n.label}: {n.text}</div>
+							{/each}
 							<div class="md">{@html renderMarkdown(m.content)}</div>
 							<div class="time dim">{formatTime(m.created_at)}</div>
 						</div>
@@ -995,5 +998,9 @@
 		.tool-modal :global(.tc .block) {
 			padding: var(--sp-1) var(--sp-2);
 		}
+	}
+	/* A child_result note ("left running: …") reads as a sentence. */
+	.note::first-letter {
+		text-transform: uppercase;
 	}
 </style>

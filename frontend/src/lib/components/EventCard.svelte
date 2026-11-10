@@ -43,7 +43,7 @@
 
 <div class="evt {ev.type}">
 	<div class="hd">
-		<span class="type">{ev.type}</span>
+		<span class="type">{ev.type === 'user' && ev.check ? `amplio · ${ev.check}` : ev.type}</span>
 		<span class="dim">step {step}</span>
 	</div>
 	{#if ev.thoughts}
@@ -106,7 +106,9 @@
 		</div>
 	{/if}
 	{#if ev.type === 'child_result'}
-		<div class="dim small">child {ev.child_session_id} → {ev.verdict}</div>
+		<div class="dim small">
+			child {ev.child_session_id} → {ev.verdict}{#if ev.leftover} · left running: {ev.leftover}{/if}{#each ev.notes ?? [] as n (n.kind + n.text)} · {n.kind === 'leftover' ? 'left running' : n.kind}: {n.text}{/each}
+		</div>
 	{/if}
 </div>
 

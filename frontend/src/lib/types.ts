@@ -120,6 +120,9 @@ export interface ChatBubble {
   // verdict is set only for kind==='child_result': the sub-agent's terminal
   // status (concluded | crashed | cancelled).
   verdict?: string;
+  // notes, child_result only: facts about how the sub-agent concluded (e.g. what
+  // it left running), each with its display label.
+  notes?: { label: string; text: string }[];
   step: number;
   created_at: string;
   tool_calls: ChatToolCall[];
@@ -320,6 +323,9 @@ export interface AgentEvent {
   sender_type?: string;
   child_session_id?: string;
   verdict?: string;
+  notes?: { kind: string; text: string }[]; // child_result: facts about how the child concluded
+  leftover?: string; // child_result written before notes existed: what it left running
+  check?: string; // user: set when the harness wrote it (a conclusion check), not the operator
   refusal?: Refusal; // assistant only: the provider declined this turn
 }
 

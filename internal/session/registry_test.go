@@ -16,6 +16,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -130,6 +131,34 @@ func TestRegistry_CancelAll(t *testing.T) {
 	r.CancelAll()
 	if ctx1.Err() == nil || ctx2.Err() == nil {
 		t.Error("both should be cancelled")
+	}
+}
+
+// After CancelAll nothing registers: this process is stopping.
+func TestRegistry_CancelAllCloses(t *testing.T) {
+	r := NewRegistry()
+	_, _, release, ok := r.RegisterAndContext(context.Background(), "s1")
+	if !ok {
+		t.Fatal("register s1")
+	}
+	r.CancelAll()
+	release() // s1's goroutine exits
+	if !r.Closed() {
+		t.Error("Closed() = false after CancelAll")
+	}
+	if _, _, _, ok := r.RegisterAndContext(context.Background(), "s1"); ok {
+		t.Error("RegisterAndContext revived s1 after CancelAll")
+	}
+	if _, _, _, ok := r.RegisterAndContext(context.Background(), "s2"); ok {
+		t.Error("RegisterAndContext started s2 after CancelAll")
+	}
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Register("s3", NewHandle(cancel)); !errors.Is(err, ErrClosed) {
+		t.Errorf("Register after CancelAll: err = %v, want ErrClosed", err)
+	}
+	if !r.IsEmpty() {
+		t.Errorf("registered after CancelAll: %v", r.SessionIDs())
 	}
 }
 

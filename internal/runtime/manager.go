@@ -32,6 +32,7 @@ import (
 	"amplio/internal/eventstream"
 	"amplio/internal/lessons"
 	"amplio/internal/llm"
+	"amplio/internal/proctree"
 	"amplio/internal/session"
 	"amplio/internal/skills"
 	"amplio/internal/util"
@@ -70,6 +71,8 @@ type RunManager struct {
 	chatbotMu sync.Mutex // serializes AddChatbot so concurrent attaches don't double-launch
 
 	ephemeral *EphemeralAgentRegistry // per-run set of in-flight non-session workers (critic, …)
+
+	scanProcs func(runID string) proctree.Snapshot // the run's live processes; proctree.Scan, swapped in tests
 }
 
 // SetBroadcaster installs the live token-stream sink injected into every agent
@@ -142,6 +145,7 @@ func NewRunManager(store db.Store, newProvider ProviderFactory, runReg *RunRegis
 		providers:        make(map[string]llm.Provider),
 		allocators:       make(map[string]*session.NameAllocator),
 		ephemeral:        NewEphemeralAgentRegistry(),
+		scanProcs:        proctree.Scan,
 	}
 }
 
@@ -345,6 +349,9 @@ func (m *RunManager) launchAgent(ctx context.Context, runID, agentType string, p
 	// the slot; already-registered here means a double-launch bug.
 	runCtx, handle, release, ok := registry.RegisterAndContext(ctx, agentCfg.SessionID)
 	if !ok {
+		if registry.Closed() {
+			return fmt.Errorf("start session %q: %w", agentCfg.SessionID, session.ErrClosed)
+		}
 		return fmt.Errorf("session %q already registered", agentCfg.SessionID)
 	}
 	agentCfg.Handle = handle
@@ -494,6 +501,12 @@ func (m *RunManager) RespawnSession(runID, sessionID string) {
 	registry := m.runReg.GetOrCreate(runID)
 	runCtx, handle, release, ok := registry.RegisterAndContext(context.Background(), sessionID)
 	if !ok {
+		if registry.Closed() {
+			// This process is stopping (a headless interrupt). The event that
+			// would have revived the session is stored, so the session sees it
+			// when a later process (a resume) revives it.
+			slog.Info("not reviving a session: this process is stopping", "run_id", runID, "session_id", sessionID)
+		}
 		return // already alive (live goroutine) or claimed by a rival respawn
 	}
 	// Release the claimed slot on any early return below, UNLESS the goroutine is
@@ -599,6 +612,7 @@ func (m *RunManager) RecoverRun(ctx context.Context, runID string) (int, error) 
 	}
 	reg := m.runReg.GetOrCreate(runID)
 	revived := 0
+	var snap *proctree.Snapshot // scanned once, on the first marker that needs it
 	for i := range sessions {
 		s := sessions[i]
 		if reg.IsRegistered(s.SessionID) || !db.IsSpine(s) {
@@ -626,14 +640,63 @@ func (m *RunManager) RecoverRun(ctx context.Context, runID string) (int, error) 
 		// The RecoverEvent is Input-class, so the commit notifier respawns this
 		// cold session through the normal machinery (no direct RespawnSession
 		// here — that would double-respawn).
+		if snap == nil {
+			sc := m.scanProcs(runID)
+			snap = &sc
+		}
+		content := fmt.Sprintf("[RESUMED at %s]\n%s", util.FormatLocalISO(time.Now()),
+			m.recoverFacts(ctx, runID, s.SessionID, *snap))
 		if _, err := m.store.AppendEvent(ctx, runID, s.SessionID, &event.RecoverEvent{
-			Content: fmt.Sprintf("[RESUMED at %s]", util.FormatLocalISO(time.Now())),
+			Content: content,
 		}); err != nil {
 			return revived, fmt.Errorf("recover %s: append RecoverEvent: %w", s.SessionID, err)
 		}
 		revived++
 	}
 	return revived, nil
+}
+
+// maxRecoverJobs bounds the background jobs a recovery marker lists; the rest
+// are counted.
+const maxRecoverJobs = 10
+
+// recoverFacts is what a recovered session still has running, for its
+// RecoverEvent. Without it an agent learns only that its wait was interrupted,
+// not whether the job it was waiting for survived the restart (under a systemd
+// unit with the default KillMode=control-group, a restart kills it). Facts
+// only: the agent decides whether to wait, start the job again, or move on.
+// "Nothing is running" is a fact too, and the one that tells an agent its job
+// is gone.
+func (m *RunManager) recoverFacts(ctx context.Context, runID, sessionID string, snap proctree.Snapshot) string {
+	var lines []string
+	jobs := proctree.JobsOf(snap.Roots, sessionID)
+	for i, j := range jobs {
+		if i == maxRecoverJobs {
+			lines = append(lines, fmt.Sprintf("- and %d more background jobs", len(jobs)-i))
+			break
+		}
+		lines = append(lines, "- background: "+j.Describe())
+	}
+	children, err := m.store.GetChildSessions(ctx, runID, sessionID)
+	if err != nil {
+		slog.Warn("recover: list sub-agents for the recovery marker", "run_id", runID, "session_id", sessionID, "error", err)
+	}
+	for _, c := range children {
+		if c.Status == db.SessionOngoing || c.Status == db.SessionAwaiting {
+			lines = append(lines, fmt.Sprintf("- sub-agent: %s (%s)", c.SessionID, c.Status))
+		}
+	}
+	if !snap.Supported {
+		lines = append(lines, "- background processes: unknown (no process information on this platform)")
+	}
+	if len(lines) == 0 {
+		return "Nothing you started is still running: no background processes, no sub-agents."
+	}
+	out := "Still running from before the restart:\n" + strings.Join(lines, "\n")
+	if len(jobs) > 0 {
+		out += "\nStop a background job with: kill -- -<process group>"
+	}
+	return out
 }
 
 // streamAtRest reports whether the session's current-context tail is a no-tool

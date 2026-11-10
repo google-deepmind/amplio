@@ -18,11 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 
 	"amplio/internal/config"
@@ -60,12 +60,16 @@ func TestExecuteNotify(t *testing.T) {
 	if gotAuth != "Bearer tok" {
 		t.Errorf("auth = %q", gotAuth)
 	}
-	// sender is the --from label plus the caller's pid stamp (so a revived agent
-	// can identify/kill a runaway notifier): "watcher (pid=<ppid>)".
-	if gotBody["content"] != "hello there" ||
-		!strings.HasPrefix(gotBody["sender"], "watcher (pid=") ||
-		!strings.HasSuffix(gotBody["sender"], ")") {
-		t.Errorf("body = %v", gotBody)
+	// sender is the --from label plus the notifier's process group (so a revived
+	// agent can stop a runaway notifier with kill -- -<pgid>), not its parent pid:
+	// a backgrounded notifier's parent is whoever adopted it, possibly
+	// systemd --user.
+	wantSender := "watcher"
+	if pg := notifierGroup(); pg > 1 {
+		wantSender = fmt.Sprintf("watcher (pgid=%d)", pg)
+	}
+	if gotBody["content"] != "hello there" || gotBody["sender"] != wantSender {
+		t.Errorf("body = %v, want sender %q", gotBody, wantSender)
 	}
 
 	// --session overrides the env default. It used to be an optional first

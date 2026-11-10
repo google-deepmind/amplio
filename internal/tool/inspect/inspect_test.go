@@ -451,3 +451,20 @@ func TestFormatOpenPhase_NoToolAssistantExpands(t *testing.T) {
 		t.Errorf("no-tool-call assistant reply should be expanded verbatim\n---\n%s", block)
 	}
 }
+
+// Another agent reading this session's steps (a verifier, a parent) sees a
+// conclusion-check nudge as amplio's, not as the operator's words.
+func TestRenderStepBody_HarnessNudgeLabel(t *testing.T) {
+	var b strings.Builder
+	renderStepBody(&b, []db.EventRecord{
+		{Event: &event.UserEvent{Content: "please also check X"}},
+		{Event: &event.UserEvent{Content: "[system] Before you conclude, these are still running:", Check: event.CheckLeftovers}},
+	})
+	out := b.String()
+	if !strings.Contains(out, "user") || !strings.Contains(out, "amplio") {
+		t.Errorf("want the operator's message labelled user and the nudge labelled amplio:\n%s", out)
+	}
+	if strings.Count(out, "user") != 1 {
+		t.Errorf("the nudge is labelled as the operator's:\n%s", out)
+	}
+}

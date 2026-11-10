@@ -147,6 +147,24 @@ func New(runCtx context.Context, store db.Store, mgr *runtime.RunManager, bus *e
 	return &Server{store: store, mgr: mgr, bus: bus, token: token, defaults: defaults, runCtx: runCtx}
 }
 
+// NotifyHandler serves only the environment-notification endpoint, for a
+// process that hosts runs without the full server (amplio headless), so that
+// agents' background scripts can still reach them with `amplio-notify`. Every
+// other route answers 404 saying so: `amplio client` finds this endpoint through
+// the same server.json.
+func NotifyHandler(store db.Store, token string) http.Handler {
+	s := &Server{store: store, token: token}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/runs/{id}/sessions/{sid}/notify", s.requireAuth(s.handleNotify))
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, http.StatusNotFound, errNotifyOnly)
+	})
+	return mux
+}
+
+// errNotifyOnly is NotifyHandler's answer to every route but notify.
+const errNotifyOnly = "this amplio process is headless and serves only notify; the rest of the API needs `amplio serve`"
+
 // Handler wires the routes. Reads of a run (everything under /api/runs/{id})
 // and the SPA are open: that's the readonly share view, so a run's URL can be
 // sent to anyone on the corp network. Reads that span runs (the list, the

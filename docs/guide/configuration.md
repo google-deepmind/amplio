@@ -196,7 +196,7 @@ What you will find inside:
 | `bin/` | `amplio` and `amplio-notify` shims, prepended to the agent's `$PATH` |
 | `briefings/` | your own briefings (see [prompt context](prompt-context.md)) |
 | `AGENTS.md` | machine-wide operator instructions, if you write one |
-| `server.json` | the running server's address, pid and token — how `amplio client` finds it |
+| `server.json` | the running server's address, pid and token — how `amplio client` and `amplio-notify` find it (a headless process records its notify-only endpoint) |
 | `auth.token`, `lock` | web auth secret; single-owner lock for the directory |
 | `cert.pem`, `key.pem` | TLS material, if you set it up ([tls](../internals/tls.md)) |
 

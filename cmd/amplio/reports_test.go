@@ -16,8 +16,6 @@ package main
 
 import (
 	"context"
-	"net/url"
-	"path/filepath"
 	"testing"
 
 	"amplio/internal/agent/critic"
@@ -85,70 +83,35 @@ func TestBackfillReports(t *testing.T) {
 }
 
 func TestExecuteResume_BackfillsMissingReportForRestingRun(t *testing.T) {
-	ctx := context.Background()
-	dataDir := t.TempDir()
-	config.SetDataDir(dataDir)
-	t.Cleanup(func() { config.SetDataDir("") })
+	if n := resumeRestingRun(t, false); n != 1 {
+		t.Fatalf("resume produced %d reports, want 1", n)
+	}
+}
 
-	dbPath := filepath.Join(dataDir, "amplio.db")
-	store, err := sqlite.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
+func TestExecuteResume_NoReportSkipsTheReport(t *testing.T) {
+	if n := resumeRestingRun(t, true); n != 0 {
+		t.Fatalf("resume --no-report produced %d reports, want 0", n)
 	}
-	if err := store.CreateRun(ctx, db.RunRecord{
-		RunID:  "r",
-		Config: config.RunConfig{Task: "t"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateSession(ctx, db.SessionRecord{
-		RunID: "r", SessionID: config.RootAgentSessionID,
-		AgentType: "standard_agent", Status: db.SessionConcluded,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.AdvanceStep(ctx, "r", config.RootAgentSessionID); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	const providerName = "resume-test"
-	old, hadOld := providerRegistry[providerName]
-	providerRegistry[providerName] = providerEntry{
-		new: func(_ string, _ int, _, _ url.Values) (llm.Provider, error) {
-			return stubHQ{}, nil
-		},
-	}
-	t.Cleanup(func() {
-		if hadOld {
-			providerRegistry[providerName] = old
-		} else {
-			delete(providerRegistry, providerName)
-		}
-	})
-
-	cfg := config.Config{
-		DB:            dbPath,
-		SystemLLMHQ:   providerName + ":hq",
-		SystemLLMFast: providerName + ":fast",
-	}
-	if err := executeResume(cfg, "r"); err != nil {
+// resumeRestingRun resumes a concluded, unreported run and returns how many
+// reports it has afterwards.
+func resumeRestingRun(t *testing.T, noReport bool) int {
+	t.Helper()
+	cfg := restingRunConfig(t, stubHQ{})
+	if err := executeResume(cfg, "r", "", noReport); err != nil {
 		t.Fatalf("executeResume: %v", err)
 	}
 
-	store, err = sqlite.Open(dbPath)
+	store, err := sqlite.Open(cfg.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	reports, err := critic.AllReports(ctx, store, "r")
+	reports, err := critic.AllReports(context.Background(), store, "r")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reports) != 1 {
-		t.Fatalf("resume produced %d reports, want 1", len(reports))
-	}
+	return len(reports)
 }

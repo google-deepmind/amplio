@@ -120,3 +120,38 @@ func TestServer_NotifyFloodCap(t *testing.T) {
 		t.Errorf("after AdvanceStep: status = %d, want 202 (budget resets per step)", code)
 	}
 }
+
+// A headless process serves NotifyHandler alone: notify behind the token, and a
+// 404 that says why for everything else, since `amplio client` finds it too.
+func TestNotifyHandler_ServesOnlyNotify(t *testing.T) {
+	t.Parallel()
+	_, _, store := newTestServer(t)
+	seedRun(t, store, db.SessionOngoing, 1)
+	ts := httptest.NewServer(NotifyHandler(store, "secret"))
+	defer ts.Close()
+
+	notify := ts.URL + "/api/runs/" + testRun + "/sessions/main-agent/notify"
+	if code, _ := doReq(t, "POST", notify+"?token=secret", `{"content":"job done"}`); code != http.StatusAccepted {
+		t.Fatalf("notify status = %d, want 202", code)
+	}
+	if code, _ := doReq(t, "POST", notify+"?token=wrong", `{"content":"job done"}`); code != http.StatusUnauthorized {
+		t.Errorf("notify with a wrong token: status = %d, want 401", code)
+	}
+	if code, _ := doReq(t, "POST", notify, `{"content":"job done"}`); code != http.StatusUnauthorized {
+		t.Errorf("notify without a token: status = %d, want 401", code)
+	}
+	evts, err := store.GetEvents(context.Background(), testRun, "main-agent", db.EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 1 {
+		t.Errorf("got %d events, want only the authorized notification", len(evts))
+	}
+
+	for _, path := range []string{"/api/runs?token=secret", "/api/runs/" + testRun, "/"} {
+		code, body := doReq(t, "GET", ts.URL+path, "")
+		if code != http.StatusNotFound || !strings.Contains(string(body), "serves only notify") {
+			t.Errorf("GET %s = %d %s, want 404 saying only notify is served", path, code, body)
+		}
+	}
+}

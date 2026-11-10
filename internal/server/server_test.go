@@ -1170,7 +1170,8 @@ func TestServer_ChatProjection_ChildResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.FinalizeStep(ctx, testRun, "chatty-bot", 1, []event.Event{
-		&event.ChildResultEvent{ChildSessionID: "worker-3", Verdict: db.SessionConcluded, Content: "found the bug"},
+		&event.ChildResultEvent{ChildSessionID: "worker-3", Verdict: db.SessionConcluded, Content: "found the bug",
+			Notes: []event.ResultNote{{Kind: event.NoteLeftover, Text: "1 background process group"}}},
 		&event.ChildResultEvent{ChildSessionID: "worker-9", Verdict: db.SessionCrashed, Content: "panic: boom"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1188,7 +1189,8 @@ func TestServer_ChatProjection_ChildResult(t *testing.T) {
 	}
 	concluded, crashed := feed.Messages[0], feed.Messages[1]
 	if concluded.Kind != "child_result" || concluded.Verdict != db.SessionConcluded ||
-		concluded.From != "worker-3" || concluded.Content != "found the bug" {
+		concluded.From != "worker-3" || concluded.Content != "found the bug" ||
+		len(concluded.Notes) != 1 || concluded.Notes[0] != (chatNote{Label: "left running", Text: "1 background process group"}) {
 		t.Errorf("concluded bubble = %+v, want child_result concluded from worker-3", concluded)
 	}
 	if crashed.Kind != "child_result" || crashed.Verdict != db.SessionCrashed || crashed.From != "worker-9" {
@@ -2185,5 +2187,44 @@ func TestServer_RunDetail_SessionModels(t *testing.T) {
 		if w := want[s.SessionID]; s.LLM != w[0] || s.LLMName != w[1] {
 			t.Errorf("%s: llm=%q llm_name=%q, want %q %q", s.SessionID, s.LLM, s.LLMName, w[0], w[1])
 		}
+	}
+}
+
+// Harness-written user messages (conclusion-check nudges, including ones stored
+// before Check existed) appear as amplio's, not as the operator's.
+func TestServer_ChatProjection_HarnessNudges(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, db.SessionRecord{RunID: testRun, SessionID: "worker", AgentType: "standard_agent", Status: db.SessionOngoing}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvanceStep(ctx, testRun, "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeStep(ctx, testRun, "worker", 1, []event.Event{
+		&event.UserEvent{Content: "please also check X"},
+		&event.UserEvent{Content: "[system] Before you conclude, these are still running:", Check: event.CheckLeftovers},
+		&event.UserEvent{Content: "[system] Your previous turn produced no tool calls and no message text"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	_, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/worker/chat?token=secret", "")
+	var feed chatFeed
+	if err := json.Unmarshal(body, &feed); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, m := range feed.Messages {
+		kinds = append(kinds, m.Kind+"/"+m.From)
+	}
+	want := []string{"operator/user", "environment/amplio", "environment/amplio"}
+	if strings.Join(kinds, " ") != strings.Join(want, " ") {
+		t.Errorf("bubbles = %v, want %v", kinds, want)
 	}
 }

@@ -120,21 +120,23 @@ func executeNotify(ctx context.Context, msgArg, session, from string) error {
 		base = info.URL
 	}
 
-	// Stamp the caller's parent pid onto the sender so a revived agent can
-	// identify (and kill) the background script that notified it. os.Getppid() is
-	// the process that invoked `amplio notify` — for any "launched a watcher
-	// script/loop" pattern this is the long-running job the agent can kill (it
-	// matches the `$!` the launch printed). The exception is an inline
-	// fire-and-forget where notify is the LAST command in a backgrounded subshell
-	// (`( sleep 10; notify ) &`): bash exec-optimizes it, so notify replaces the
-	// subshell and is reparented to init (ppid=1). Skip the annotation there — it
-	// would be both wrong and useless (there's no persistent script to kill).
+	// Stamp the notifier's process group onto the sender so a revived agent can
+	// identify (and stop) the background job that notified it: `kill -- -<pgid>`
+	// stops the script and everything it started. Not the parent pid: once the
+	// shell that launched the job exits (always, for the backgrounded subshell
+	// of the canonical recipe, where bash execs notify as the subshell's last
+	// command), the parent is whoever adopted it: init, or `systemd --user` when
+	// amplio runs under a systemd unit, which an agent must never be told to kill.
+	// A process group outlives its leader. Every bash-tool call starts a new
+	// group (Setsid), so this is that call's group, or the job's own if it ran
+	// `setsid` itself; never amplio's. $AMPLIO_RUN_ID being required above means
+	// this only ever runs under an agent's bash call, not an operator's terminal.
 	sender := from
 	if sender == "" {
 		sender = "environment"
 	}
-	if ppid := os.Getppid(); ppid > 1 {
-		sender = fmt.Sprintf("%s (pid=%d)", sender, ppid)
+	if pgid := notifierGroup(); pgid > 1 {
+		sender = fmt.Sprintf("%s (pgid=%d)", sender, pgid)
 	}
 	body, _ := json.Marshal(map[string]string{"content": msg, "sender": sender})
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)

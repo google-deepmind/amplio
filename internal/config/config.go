@@ -47,6 +47,7 @@ const (
 	EnvSkillDirs     = "AMPLIO_SKILL_DIRS"    // OS path-list separated (filepath.SplitList)
 	EnvLessonSearch  = "AMPLIO_LESSON_SEARCH" // boolean; false = agents can't search lessons
 	EnvSessionID     = "AMPLIO_SESSION_ID"    // bash subprocess: the agent's own session (notify default target)
+	EnvBashCall      = "AMPLIO_BASH_CALL"     // bash subprocess: the bash call that started it (finds what a call left running)
 	EnvNotify        = "AMPLIO_NOTIFY"        // DEPRECATED: the whole binary, kept for scripts/agents already using it
 )
 

@@ -76,7 +76,7 @@ func Scan(runID string) Snapshot {
 		byPID[p.PID] = p
 	}
 	snap.Total = len(byPID)
-	snap.Roots = forest(byPID)
+	snap.Roots = forest(byPID, os.Getpid())
 	snap.TakenAt = time.Now()
 	snap.ScanMillis = time.Since(start).Milliseconds()
 	return snap
@@ -99,12 +99,21 @@ func inspect(pid, uid int, runID string, uptime float64) *Process {
 	if run == "" || (runID != "" && run != runID) {
 		return nil
 	}
-	p := &Process{PID: pid, RunID: run, SessionID: envValue(env, config.EnvSessionID)}
+	p := &Process{PID: pid, RunID: run, SessionID: envValue(env, config.EnvSessionID), Call: envValue(env, config.EnvBashCall)}
 	if !readStat(dir, p, uptime) {
 		return nil // exited between the readdir and here; not an error
 	}
 	p.Cmdline = readCmdline(dir)
 	return p
+}
+
+// Outputs reports where a live process's stdout and stderr point (the targets
+// of /proc/<pid>/fd/1 and fd/2), "" where unreadable.
+func Outputs(pid int) (stdout, stderr string) {
+	dir := "/proc/" + strconv.Itoa(pid) + "/fd/"
+	stdout, _ = os.Readlink(dir + "1")
+	stderr, _ = os.Readlink(dir + "2")
+	return stdout, stderr
 }
 
 // envValue pulls one NUL-separated KEY=value out of a /proc environ blob.
@@ -193,10 +202,13 @@ func readPIDs() []int {
 }
 
 // forest links each process to its parent WITHIN the matched set. A process
-// whose parent is missing is a root: either its launching shell has exited (the
-// interesting case — it was reparented and outlived its call) or the parent is
-// amplio itself.
-func forest(byPID map[int]*Process) []*Process {
+// whose parent is missing is a root: either the parent is amplio itself (self:
+// the bash tool's shell for a call still running), or its launching shell has
+// exited and it was reparented — the interesting case, an orphan that outlived
+// its call. Who adopts an orphan depends on the host: init, but also the nearest
+// subreaper, e.g. `systemd --user` when amplio runs under a systemd unit, or a
+// container's init. So "orphan" is "parent is not amplio", not "parent is 1".
+func forest(byPID map[int]*Process, self int) []*Process {
 	// Non-nil even when empty: the JSON must be [] rather than null, so the UI
 	// renders "nothing running" instead of special-casing a missing list.
 	roots := make([]*Process, 0, len(byPID))
@@ -205,7 +217,7 @@ func forest(byPID map[int]*Process) []*Process {
 			parent.Children = append(parent.Children, p)
 			continue
 		}
-		p.Orphan = p.PPID == 1
+		p.Orphan = p.PPID != self
 		roots = append(roots, p)
 	}
 	sortTree(roots)

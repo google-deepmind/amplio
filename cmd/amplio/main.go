@@ -206,7 +206,8 @@ func exitCodeFor(err error) int {
 	return 1
 }
 
-func runCmd() *cobra.Command {
+// runCmd is `headless run`; noReport is the parent's --no-report.
+func runCmd(noReport *bool) *cobra.Command {
 	var (
 		task      string
 		workspace string
@@ -228,7 +229,7 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return executeRun(cfg, task, workspace, llmSpec, agentType)
+			return executeRun(cfg, task, workspace, llmSpec, agentType, *noReport)
 		},
 	}
 	cmd.Flags().StringVar(&task, "task", "", "Task description (or pass as a positional arg)")
@@ -238,7 +239,7 @@ func runCmd() *cobra.Command {
 	return cmd
 }
 
-func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string) error {
+func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string, noReport bool) error {
 	if task == "" {
 		return fmt.Errorf("a task is required (positional arg or --task)")
 	}
@@ -268,6 +269,8 @@ func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string) e
 	}
 	defer sysEnv.cleanup(ctx)
 	mgr, fin := sysEnv.mgr, sysEnv.fin
+	stopNotify := startHeadlessNotify(dataDir, sysEnv.store)
+	defer stopNotify()
 
 	// Resolve the workspace spec to a concrete path (creation sentinels run
 	// their side effects here — the sole fresh-vs-resume difference) and snapshot
@@ -295,11 +298,15 @@ func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string) e
 	// Deterministically produce the run report for this headless run: the observer
 	// may exit before processing the conclude. No-op if not autonomous / already
 	// reported. Best-effort summaries (the critic falls back to raw events).
-	fin.OnMainAgentConcluded(ctx, runID)
+	if !noReport {
+		fin.OnMainAgentConcluded(ctx, runID)
+	}
 	return nil
 }
 
-func resumeCmd() *cobra.Command {
+// resumeCmd is `headless resume`; noReport is the parent's --no-report.
+func resumeCmd(noReport *bool) *cobra.Command {
+	var message string
 	cmd := &cobra.Command{
 		Use:   "resume <run-id>",
 		Short: "Resume a previously interrupted run (headless)",
@@ -309,13 +316,15 @@ func resumeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return executeResume(cfg, args[0])
+			return executeResume(cfg, args[0], message, *noReport)
 		},
 	}
+	cmd.Flags().StringVar(&message, "message", "",
+		"Give the root agent this message (as user input) and resume it, even if it had concluded")
 	return cmd
 }
 
-func executeResume(cfg config.Config, runID string) error {
+func executeResume(cfg config.Config, runID, message string, noReport bool) error {
 	dataDir := config.DataDir()
 
 	lock, err := lockDataDir(dataDir)
@@ -339,24 +348,89 @@ func executeResume(cfg config.Config, runID string) error {
 	}
 	defer sysEnv.cleanup(ctx)
 	store, mgr, fin := sysEnv.store, sysEnv.mgr, sysEnv.fin
+	stopNotify := startHeadlessNotify(dataDir, store)
+	defer stopNotify()
 
 	run, err := store.GetRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("run %q not found: %w", runID, err)
 	}
 
+	// User input revives even a concluded root, which RecoverRun leaves at rest.
+	// The commit notifier respawns the root inside AppendEvent, so it is
+	// registered before RecoverRun runs, which then leaves it alone (and does
+	// not count it).
+	var posted *postedMessage
+	if message != "" {
+		root, err := store.GetSession(ctx, runID, config.RootAgentSessionID)
+		if err != nil {
+			return fmt.Errorf("run %q has no %s to give the message to: %w", runID, config.RootAgentSessionID, err)
+		}
+		id, err := store.AppendEvent(ctx, runID, config.RootAgentSessionID, &event.UserEvent{Content: message})
+		if err != nil {
+			return fmt.Errorf("post resume message: %w", err)
+		}
+		posted = &postedMessage{eventID: id, before: *root}
+	}
 	revived, err := mgr.RecoverRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("recover run: %w", err)
 	}
-	if revived == 0 {
+	if revived == 0 && message == "" {
 		slog.Info("run is already at rest; nothing to resume", "run_id", runID)
-		fin.OnMainAgentConcluded(ctx, runID)
-		return nil
+	} else {
+		slog.Info("run resumed", "run_id", runID, "sessions", revived, "with_message", message != "", "model", run.Config.LLM)
 	}
-	slog.Info("run resumed", "run_id", runID, "sessions", revived, "model", run.Config.LLM)
-	waitForRun(ctx, mgr, runID)
-	fin.OnMainAgentConcluded(ctx, runID) // deterministic report for this headless resume
+	waitForRun(ctx, mgr, runID) // returns at once if nothing was revived
+	if !noReport {
+		fin.OnMainAgentConcluded(ctx, runID) // deterministic report for this headless resume
+	}
+	if posted != nil && ctx.Err() == nil { // an interrupt is a deliberate stop
+		return checkMessageOutcome(ctx, store, runID, *posted)
+	}
+	return nil
+}
+
+// postedMessage is a resume --message: its event, and the root as it was
+// before.
+type postedMessage struct {
+	eventID string
+	before  db.SessionRecord
+}
+
+// checkMessageOutcome runs once the run is at rest. As for `run`, the exit code
+// says whether the command did its job, and the run's outcome is in its state:
+// a message that revived nothing (the root couldn't be respawned; the reason is
+// in the log) is an error, while a root that ran but didn't reply (it crashed,
+// say) is a warning, its status already recorded.
+func checkMessageOutcome(ctx context.Context, store db.Store, runID string, m postedMessage) error {
+	root, err := store.GetSession(ctx, runID, config.RootAgentSessionID)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", config.RootAgentSessionID, err)
+	}
+	events, err := store.GetEvents(ctx, runID, config.RootAgentSessionID, db.EventFilter{})
+	if err != nil {
+		return fmt.Errorf("read %s's events: %w", config.RootAgentSessionID, err)
+	}
+	// A revived root changes status (a non-ongoing one goes ongoing first) or
+	// records a crash. RecoverRun's marker is not the root's doing.
+	revived := root.Status != m.before.Status || root.StatusChangedAt.After(m.before.StatusChangedAt)
+	after := false
+	for _, e := range events {
+		switch ev := e.Event.(type) {
+		case *event.AssistantEvent:
+			if after {
+				return nil // it replied
+			}
+		case *event.SystemEvent:
+			revived = revived || (after && ev.Marker == event.MarkerError)
+		}
+		after = after || e.EventID == m.eventID
+	}
+	if !revived {
+		return fmt.Errorf("the message did not revive %s; see the log for why", config.RootAgentSessionID)
+	}
+	slog.Warn("main-agent did not respond to the message", "run_id", runID, "status", root.Status)
 	return nil
 }
 
@@ -407,22 +481,31 @@ func startObserver(ctx context.Context, store db.Store, fast, hq llm.Provider, f
 	return obs
 }
 
-// waitForRun blocks until the run goes inactive, cancelling it on interrupt.
+// waitForRun blocks until none of the run's agents is running, then logs "run
+// at rest": every headless run and resume passes here, so a supervising
+// harness can key on that line. Past it the process only finalizes (the run
+// report) and drains the observer's summaries, which can take minutes. On
+// interrupt it cancels the run instead and logs no rest; until this process
+// exits, nothing starts the run's sessions again (a later resume does).
 func waitForRun(ctx context.Context, mgr *runtime.RunManager, runID string) {
 	reg := mgr.RunRegistry()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	for {
+	// Sessions register synchronously as they are started or revived, so a
+	// run with none registered is already at rest.
+	for reg.IsRunActive(runID) {
 		select {
 		case <-ctx.Done():
 			slog.Info("interrupted, cancelling run")
+			// CancelAll also closes the registry, in memory. A notification
+			// arriving before this process exits (from a background job, or a
+			// harness) is stored for a later resume, but must not revive the
+			// root here.
 			reg.CancelAll()
 			time.Sleep(time.Second)
 			return
 		case <-ticker.C:
-			if !reg.IsRunActive(runID) {
-				return
-			}
 		}
 	}
+	slog.Info("run at rest", "run_id", runID)
 }

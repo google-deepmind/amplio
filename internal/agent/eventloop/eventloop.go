@@ -364,7 +364,7 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 			a.logger.Debug("resume: at-rest turn hit output limit; nudging instead of concluding",
 				"nudge", a.outputLimitNudges, "stop_reason", tail.StopReason)
 			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-				&event.UserEvent{Content: outputLimitNudgeText}); aErr != nil {
+				&event.UserEvent{Content: outputLimitNudgeText, Check: event.CheckOutputLimit}); aErr != nil {
 				return false, false, fmt.Errorf("append resume output-limit nudge: %w", aErr)
 			}
 			return false, true, nil
@@ -385,8 +385,19 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 			a.concludeNudges++
 			a.logger.Debug("resume: at-rest turn is empty; nudging instead of concluding", "nudge", a.concludeNudges)
 			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-				&event.UserEvent{Content: concludeNudgeText}); aErr != nil {
+				&event.UserEvent{Content: concludeNudgeText, Check: event.CheckEmptyTurn}); aErr != nil {
 				return false, false, fmt.Errorf("append resume conclude nudge: %w", aErr)
+			}
+			return false, true, nil
+		}
+		// Conclusion checks, on the RECOVERY path: the same checks as the live
+		// loop, so a final answer interrupted by a restart is still checked (e.g.
+		// reminded of work that survived it). Appending also makes the tail a
+		// user event.
+		if hold := a.conclusionCheck(ctx, events[:len(events)-1]); hold != nil {
+			a.logger.Debug("resume: conclusion held by a check", "check", hold.Check)
+			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID, hold); aErr != nil {
+				return false, false, fmt.Errorf("append resume %s check: %w", hold.Check, aErr)
 			}
 			return false, true, nil
 		}
@@ -922,7 +933,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 				a.logger.Debug("output-limited no-tool turn; nudging instead of concluding",
 					"nudge", a.outputLimitNudges, "stop_reason", resp.StopReason)
 				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-					&event.UserEvent{Content: outputLimitNudgeText}); err != nil {
+					&event.UserEvent{Content: outputLimitNudgeText, Check: event.CheckOutputLimit}); err != nil {
 					return a.recordFailure(ctx, fmt.Errorf("append output-limit nudge: %w", err))
 				}
 				continue
@@ -943,8 +954,17 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 				a.concludeNudges++
 				a.logger.Debug("empty no-tool turn; nudging instead of concluding", "nudge", a.concludeNudges)
 				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-					&event.UserEvent{Content: concludeNudgeText}); err != nil {
+					&event.UserEvent{Content: concludeNudgeText, Check: event.CheckEmptyTurn}); err != nil {
 					return a.recordFailure(ctx, fmt.Errorf("append conclude nudge: %w", err))
+				}
+				continue
+			}
+			// Conclusion checks (leftovers.go): one may hold the conclusion for a
+			// turn with a message of its own.
+			if hold := a.conclusionCheck(ctx, events); hold != nil {
+				a.logger.Debug("conclusion held by a check", "check", hold.Check)
+				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID, hold); err != nil {
+					return a.recordFailure(ctx, fmt.Errorf("append %s check: %w", hold.Check, err))
 				}
 				continue
 			}
@@ -1343,9 +1363,15 @@ func (a *EventLoopAgent) loadAttachments(refs []event.Attachment) []llm.Attachme
 // the result to the parent. Uses a background context so a late ctx cancellation
 // can't tear down the terminal write.
 func (a *EventLoopAgent) conclude(result string) error {
+	// What it leaves running rides on the parent's child_result (not in the
+	// result text, which is the agent's own words).
+	var notes []event.ResultNote
+	if a.cfg.ParentID != "" {
+		notes = a.runningWork(context.Background()).notes()
+	}
 	a.cascadeCancelChildren("parent " + a.cfg.SessionID + " concluded")
 	return a.env.Store.TerminateAndNotifyParent(
-		context.Background(), a.env.RunID, a.cfg.SessionID, a.cfg.ParentID, db.SessionConcluded, result, nil, -1)
+		context.Background(), a.env.RunID, a.cfg.SessionID, a.cfg.ParentID, db.SessionConcluded, result, notes, nil, -1)
 }
 
 // cascadeCancelChildren canceller-drives a recursive cancel of each active child
@@ -1387,7 +1413,7 @@ func (a *EventLoopAgent) recordFailure(ctx context.Context, err error) error {
 		return err
 	}
 	_ = a.env.Store.TerminateAndNotifyParent(context.Background(), a.env.RunID, a.cfg.SessionID,
-		a.cfg.ParentID, db.SessionCrashed, err.Error(),
+		a.cfg.ParentID, db.SessionCrashed, err.Error(), nil,
 		&event.SystemEvent{Content: err.Error(), Marker: event.MarkerError}, a.callStep)
 	return err
 }

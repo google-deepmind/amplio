@@ -209,3 +209,30 @@ func TestScan_ElapsedTracksWallClock(t *testing.T) {
 		t.Fatal("no process survived both scans; the test proved nothing")
 	}
 }
+
+// An orphan is a root whose parent is not amplio: init adopts orphans on some
+// hosts, but a subreaper (systemd --user under a systemd unit, a container's
+// init) does on others, and "parent is 1" missed those.
+func TestForest_OrphanMeansParentIsNotAmplio(t *testing.T) {
+	const self = 100
+	byPID := map[int]*Process{
+		10: {PID: 10, PPID: self}, // the shell of a bash call still running
+		11: {PID: 11, PPID: 1},    // outlived its call; adopted by init
+		12: {PID: 12, PPID: 4242}, // outlived its call; adopted by a subreaper
+		13: {PID: 13, PPID: 10},   // a child inside the matched set: not a root
+	}
+	roots := forest(byPID, self)
+	got := map[int]bool{}
+	for _, r := range roots {
+		got[r.PID] = r.Orphan
+	}
+	want := map[int]bool{10: false, 11: true, 12: true}
+	if len(got) != len(want) {
+		t.Fatalf("roots = %v, want pids 10, 11, 12", got)
+	}
+	for pid, orphan := range want {
+		if got[pid] != orphan {
+			t.Errorf("pid %d: orphan = %v, want %v", pid, got[pid], orphan)
+		}
+	}
+}

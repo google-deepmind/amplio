@@ -78,6 +78,13 @@ Amplio is designed to be robust to server restarts: on-going tool calls will
 be canceled. The agents receive tool call cancelation feedback and decide
 to re-issue them (or not). The harness never auto retry tool calls.
 
+Background jobs that agents started (builds, evals, watchers) are separate
+processes and outlive a restart, unless the service manager kills them. When
+amplio runs under a systemd unit, the default `KillMode=control-group` stops
+every process in the unit's cgroup, agents' jobs included. Set
+`KillMode=process` to stop only amplio itself. Either way, each revived agent
+is told which of its background processes and sub-agents are still running.
+
 ## Disk, backups and cleanup
 
 Everything lives under the data directory:

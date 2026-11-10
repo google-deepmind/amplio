@@ -705,7 +705,7 @@ func (s *sqliteStore) UpdateSessionStatus(ctx context.Context, runID, sessionID,
 	return nil
 }
 
-func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, selfEvent event.Event, selfEventStep int) error {
+func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, selfEvent event.Event, selfEventStep int) error {
 	notify := parentID != ""
 	var notifyEvt event.Event
 	transitioned := false
@@ -775,7 +775,7 @@ func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessi
 			).Scan(&pStep, &pGen); err != nil {
 				return fmt.Errorf("read parent step: %w", err)
 			}
-			evt := &event.ChildResultEvent{ChildSessionID: sessionID, Verdict: status, Content: content}
+			evt := &event.ChildResultEvent{ChildSessionID: sessionID, Verdict: status, Content: content, Notes: notes}
 			data, err := event.Marshal(evt)
 			if err != nil {
 				return fmt.Errorf("marshal child result: %w", err)

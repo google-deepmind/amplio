@@ -171,7 +171,7 @@ func makeExecutor(env *agent.Env, parentSessionID string) tool.Executor {
 					// childEnv (not env) for consistency — they share Store/RunID today,
 					// but only childEnv is guaranteed to describe the child.
 					_ = childEnv.Store.TerminateAndNotifyParent(context.Background(),
-						childEnv.RunID, sessionID, parentSessionID, db.SessionCrashed, msg,
+						childEnv.RunID, sessionID, parentSessionID, db.SessionCrashed, msg, nil,
 						&event.SystemEvent{Content: msg, Marker: event.MarkerError}, -1)
 				}
 			}()

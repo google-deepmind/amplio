@@ -169,8 +169,8 @@ func (t *taggedStore) UpdateSessionStatus(ctx context.Context, runID, sessionID,
 	return tag(t.s.UpdateSessionStatus(ctx, runID, sessionID, status))
 }
 
-func (t *taggedStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, selfEvent event.Event, selfEventStep int) error {
-	return tag(t.s.TerminateAndNotifyParent(ctx, runID, sessionID, parentID, status, content, selfEvent, selfEventStep))
+func (t *taggedStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, selfEvent event.Event, selfEventStep int) error {
+	return tag(t.s.TerminateAndNotifyParent(ctx, runID, sessionID, parentID, status, content, notes, selfEvent, selfEventStep))
 }
 
 func (t *taggedStore) MergeSessionMetadata(ctx context.Context, runID, sessionID string, updates map[string]any) error {

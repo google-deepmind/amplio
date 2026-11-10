@@ -1101,7 +1101,7 @@ func TestTerminateAndNotifyParent(t *testing.T) {
 	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "parent", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
 	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "child", ParentID: "parent", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
 
-	if err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionConcluded, "the result", nil, -1); err != nil {
+	if err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionConcluded, "the result", nil, nil, -1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1127,7 +1127,7 @@ func TestTerminateAndNotifyParent(t *testing.T) {
 	// Root (no parent): status flips, selfEvent lands on its own stream, no
 	// child_result anywhere.
 	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "root", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
-	if err := s.TerminateAndNotifyParent(ctx, runID, "root", "", db.SessionCrashed, "boom",
+	if err := s.TerminateAndNotifyParent(ctx, runID, "root", "", db.SessionCrashed, "boom", nil,
 		&event.SystemEvent{Content: "boom", Marker: event.MarkerError}, -1); err != nil {
 		t.Fatal(err)
 	}
@@ -1148,7 +1148,7 @@ func TestTerminateAndNotifyParent(t *testing.T) {
 
 	// Dedupe: terminating an already-terminal session is a no-op — status stays,
 	// and no second child_result is written to the parent.
-	if err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionCancelled, "again", nil, -1); err != nil {
+	if err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionCancelled, "again", nil, nil, -1); err != nil {
 		t.Fatal(err)
 	}
 	child, _ = s.GetSession(ctx, runID, "child")
@@ -1181,7 +1181,7 @@ func TestTerminateSelfEventStep(t *testing.T) {
 	_, _ = s.AdvanceStep(ctx, runID, "a") // -> 2 (current_step)
 
 	const pinned = 1
-	if err := s.TerminateAndNotifyParent(ctx, runID, "a", "", db.SessionCrashed, "boom",
+	if err := s.TerminateAndNotifyParent(ctx, runID, "a", "", db.SessionCrashed, "boom", nil,
 		&event.SystemEvent{Content: "boom", Marker: event.MarkerError}, pinned); err != nil {
 		t.Fatal(err)
 	}

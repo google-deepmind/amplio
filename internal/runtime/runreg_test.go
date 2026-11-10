@@ -112,3 +112,30 @@ func TestRegisterAndContext_KeepsRegistryFromBeingOrphaned_Concurrent(t *testing
 		}
 	}
 }
+
+// CancelAll closes the registries of every run, including one created after
+// it: a session whose run's registry was dropped when its goroutine exited
+// must not start again in a fresh one.
+func TestRunRegistry_CancelAllClosesLaterRegistries(t *testing.T) {
+	runReg := NewRunRegistry()
+	ctx, _, release, ok := runReg.GetOrCreate("r1").RegisterAndContext(context.Background(), "s")
+	if !ok {
+		t.Fatal("register r1/s")
+	}
+	runReg.CancelAll()
+	if ctx.Err() == nil {
+		t.Error("r1/s not cancelled")
+	}
+	release()
+	if !runReg.RemoveIfEmpty("r1") {
+		t.Fatal("r1's registry not dropped once empty")
+	}
+	for _, runID := range []string{"r1", "r2"} {
+		if _, _, _, ok := runReg.GetOrCreate(runID).RegisterAndContext(context.Background(), "s"); ok {
+			t.Errorf("%s/s started after CancelAll", runID)
+		}
+		if runReg.IsRunActive(runID) {
+			t.Errorf("%s active after CancelAll", runID)
+		}
+	}
+}
