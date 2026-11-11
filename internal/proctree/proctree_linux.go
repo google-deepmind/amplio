@@ -38,6 +38,23 @@ import (
 // machine, and more than that buys latency back only at rising CPU cost.
 const scanWorkers = 8
 
+// A process in the middle of execve reads as having no environ and no
+// cmdline: the kernel installs the new address space before it sets the
+// argument and environment ranges in it. The window is short (a median of
+// about 0.6 ms and at most 1.4 ms for /bin/sleep on an idle machine, longer
+// under load), but a scan that lands in it would miss a marked process
+// entirely, or name it "pid N". So an empty read of a live process is retried
+// a few times; a zombie's stays empty and isn't. A process that really has an
+// empty environment costs execRetries waits per scan.
+const (
+	execRetries   = 10
+	execRetryWait = time.Millisecond
+)
+
+// readProcFile reads a /proc file; a var so tests can stand in a process
+// caught mid-exec.
+var readProcFile = os.ReadFile
+
 var clockTick = int64(100) // _SC_CLK_TCK; 100 on every Linux port Go supports
 
 // Scan samples the live processes carrying an AMPLIO_RUN_ID marker. A non-empty
@@ -91,8 +108,8 @@ func inspect(pid, uid int, runID string, uptime float64) *Process {
 	if err := syscall.Stat(dir, &st); err != nil || int(st.Uid) != uid {
 		return nil
 	}
-	env, err := os.ReadFile(filepath.Join(dir, "environ"))
-	if err != nil || len(env) == 0 {
+	env := readSettled(dir, "environ")
+	if len(env) == 0 {
 		return nil
 	}
 	run := envValue(env, config.EnvRunID)
@@ -157,11 +174,42 @@ func readStat(dir string, p *Process, uptime float64) bool {
 	return true
 }
 
+// readSettled reads a /proc file of a process, retrying an empty read while
+// the process may be in the middle of an exec (see execRetries). nil if the
+// process is gone, or the file stays empty.
+func readSettled(dir, name string) []byte {
+	path := filepath.Join(dir, name)
+	for i := 0; ; i++ {
+		b, err := readProcFile(path)
+		if err != nil {
+			return nil // gone, or not ours to read
+		}
+		if len(b) > 0 || i == execRetries || zombie(dir) {
+			return b
+		}
+		time.Sleep(execRetryWait)
+	}
+}
+
+// zombie reports whether the process has exited and awaits reaping (or is
+// unreadable): its environ and cmdline are empty for good.
+func zombie(dir string) bool {
+	b, err := readProcFile(filepath.Join(dir, "stat"))
+	if err != nil {
+		return true
+	}
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 || i+2 >= len(b) {
+		return true
+	}
+	return b[i+2] == 'Z' || b[i+2] == 'X'
+}
+
 // readCmdline returns the argv with NULs turned into spaces. Empty for a kernel
 // thread or a zombie, where the caller shows comm-less rows rather than lying.
 func readCmdline(dir string) string {
-	b, err := os.ReadFile(filepath.Join(dir, "cmdline"))
-	if err != nil || len(b) == 0 {
+	b := readSettled(dir, "cmdline")
+	if len(b) == 0 {
 		return ""
 	}
 	b = bytes.TrimRight(b, "\x00")

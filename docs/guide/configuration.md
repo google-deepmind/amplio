@@ -42,7 +42,8 @@ below). Other useful configs:
 | `[bridge.<name>]` | — | a named LLM bridge endpoint ([models](models.md)) |
 | `[response_rewrite]` | off | plain-prose restatement of chat conclusions (below) |
 
-Spec syntax for LLM models is in [models](models.md).
+Spec syntax for LLM models is in [models](models.md). Example skills, such as one that coordinates
+many runs through a shared to-do list, are in `examples/skills`.
 
 ### Rewriting chat conclusions
 

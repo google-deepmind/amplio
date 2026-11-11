@@ -18,8 +18,16 @@
 	import type { SessionDTO } from '$lib/types';
 	import { timeAgo } from '$lib/time';
 	import StatusBadge from './StatusBadge.svelte';
-	import { AndroidLogoIcon, ChatTeardropIcon, CubeIcon, LinkIcon, PathIcon } from 'phosphor-svelte';
+	import {
+		AndroidLogoIcon,
+		CaretDownIcon,
+		ChatTeardropIcon,
+		CubeIcon,
+		LinkIcon,
+		PathIcon
+	} from 'phosphor-svelte';
 	import { iconForName } from '$lib/sessionIcon';
+	import { viewport } from '$lib/viewport.svelte';
 
 	// One row per session, echoing the run card's visual language (identity icon
 	// · name · task fade · workspace chip · status · step+time). The name is the
@@ -67,6 +75,26 @@
 	// not (B's workspace equals A's), even though both differ from the root. A
 	// root session inherits the run's workspace (shown in the run header), so it
 	// never shows a chip.
+	// Phone, card variant: a big tree would push everything after it screens
+	// down, so show the first rows in tree order and let "All N sessions"
+	// expand the rest in place (the session view's selector does the same).
+	// A prefix of the depth-first order always includes each row's ancestors.
+	const COLLAPSED_ROWS = 5;
+	const collapsible = $derived(
+		viewport.isPhone && !compact && sessions.length > COLLAPSED_ROWS + 1
+	);
+	let showAll = $state(false);
+	const shownIds = $derived.by(() => {
+		const order: string[] = [];
+		const walk = (s: SessionDTO) => {
+			order.push(s.session_id);
+			childrenOf(s.session_id).forEach(walk);
+		};
+		roots.forEach(walk);
+		return new Set(order.slice(0, COLLAPSED_ROWS));
+	});
+	const hidden = (s: SessionDTO) => collapsible && !showAll && !shownIds.has(s.session_id);
+
 	const wsById = $derived(new Map(sessions.map((s) => [s.session_id, s.workspace ?? ''])));
 	function ownsWorkspace(s: SessionDTO): boolean {
 		const ws = s.workspace ?? '';
@@ -88,7 +116,7 @@
 
 {#snippet node(s: SessionDTO)}
 	{@const AnimalIcon = iconForName(s.session_id)}
-	<div class="node">
+	<div class="node" class:hidden={hidden(s)}>
 		<a
 			class="sess"
 			class:card={!compact}
@@ -159,6 +187,12 @@
 {#each roots as r (r.session_id)}
 	{@render node(r)}
 {/each}
+{#if collapsible}
+	<button type="button" class="more" aria-expanded={showAll} onclick={() => (showAll = !showAll)}>
+		{showAll ? 'Fewer sessions' : `All ${sessions.length} sessions`}
+		<CaretDownIcon size={12} weight="bold" />
+	</button>
+{/if}
 
 <style>
 	/* Row-density override of the global .card padding (bg/border/radius come
@@ -326,6 +360,30 @@
 			padding: 0 var(--sp-3);
 			margin-bottom: 0;
 			gap: var(--sp-2);
+		}
+		.node.hidden {
+			display: none;
+		}
+		.more {
+			display: inline-flex;
+			align-items: center;
+			gap: var(--sp-1);
+			position: relative;
+			height: 30px;
+			min-height: 0;
+			padding: 0 var(--sp-3);
+			border: 0;
+			background: none;
+			color: var(--text-dim);
+			font-size: var(--fs-sm);
+		}
+		.more[aria-expanded='true'] > :global(svg) {
+			transform: rotate(180deg);
+		}
+		.more::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
 		}
 		/* One 12px step per level; right edges stay on the gutter. */
 		.child {

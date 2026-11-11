@@ -31,8 +31,11 @@
 	import { getRunStore } from '$lib/runContext.svelte';
 	import { formatElapsed } from '$lib/time';
 	import type { ProcessNode, ProcessSnapshot } from '$lib/types';
+	import { viewport } from '$lib/viewport.svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import {
 		ArrowClockwiseIcon,
+		CaretDownIcon,
 		ClockIcon,
 		CpuIcon,
 		HashIcon,
@@ -144,6 +147,29 @@
 		const h = Math.floor(sec / 3600);
 		return `${h}h${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}m`;
 	}
+	// Phone only: the command is clamped to three lines and touch cannot show
+	// the title tooltip, so a clamped command gets a toggle to show all of it.
+	const clamped = new SvelteSet<number>();
+	const expanded = new SvelteSet<number>();
+	function watchClamp(node: HTMLElement, pid: number) {
+		const ro = new ResizeObserver(() => {
+			if (node.scrollHeight > node.clientHeight + 1) clamped.add(pid);
+			else if (!expanded.has(pid)) clamped.delete(pid);
+		});
+		ro.observe(node);
+		return {
+			destroy() {
+				ro.disconnect();
+				clamped.delete(pid);
+				expanded.delete(pid);
+			}
+		};
+	}
+	function toggle(pid: number) {
+		if (expanded.has(pid)) expanded.delete(pid);
+		else expanded.add(pid);
+	}
+
 	// Only the states worth a second look get a word; S (sleeping) is the normal
 	// resting state of nearly everything and labelling it would be noise.
 	function stateLabel(s: string): string {
@@ -207,7 +233,25 @@
 			</span>
 		{/if}
 		{#if label && p.state !== 'R'}<span class="tag warn">{label}</span>{/if}
-		<code class="cmd" title={p.cmdline}>{p.cmdline || '(no command line)'}</code>
+		<code
+			class="cmd"
+			class:open={expanded.has(p.pid)}
+			id="cmd-{p.pid}"
+			title={p.cmdline}
+			use:watchClamp={p.pid}>{p.cmdline || '(no command line)'}</code
+		>
+		{#if viewport.isPhone && clamped.has(p.pid)}
+			<button
+				type="button"
+				class="more"
+				aria-expanded={expanded.has(p.pid)}
+				aria-controls="cmd-{p.pid}"
+				onclick={() => toggle(p.pid)}
+			>
+				{expanded.has(p.pid) ? 'Show less' : 'Show full command'}
+				<CaretDownIcon size={12} weight="bold" />
+			</button>
+		{/if}
 		<!-- Three numbers, two of them durations: without the icons "3h04m · 2m58s ·
 		     412M" is unreadable. Elapsed beside CPU time is the useful pair — a
 		     process whose CPU time tracks its age is spinning, one whose CPU time
@@ -396,6 +440,32 @@
 			-webkit-box-orient: vertical;
 			mask-image: none;
 			-webkit-mask-image: none;
+		}
+		.cmd.open {
+			-webkit-line-clamp: unset;
+			line-clamp: none;
+		}
+		.more {
+			order: 2;
+			display: inline-flex;
+			align-items: center;
+			gap: var(--sp-1);
+			position: relative;
+			height: 24px;
+			min-height: 0;
+			padding: 0;
+			border: 0;
+			background: none;
+			color: var(--text-dim);
+			font-size: var(--fs-sm);
+		}
+		.more[aria-expanded='true'] > :global(svg) {
+			transform: rotate(180deg);
+		}
+		.more::after {
+			content: '';
+			position: absolute;
+			inset: calc((100% - var(--tap)) / 2) 0;
 		}
 		/* Desktop's aligned columns cost 150px of a 390px row; on phone the
 		   metrics share line one with the pid and ride its right edge. */

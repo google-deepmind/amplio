@@ -20,6 +20,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -234,5 +238,85 @@ func TestForest_OrphanMeansParentIsNotAmplio(t *testing.T) {
 		if got[pid] != orphan {
 			t.Errorf("pid %d: orphan = %v, want %v", pid, got[pid], orphan)
 		}
+	}
+}
+
+// readsOf stands in readProcFile for the test, counting reads of path's base
+// name per pid and returning empty for the first `empty` of each listed file.
+func readsOf(t *testing.T, pid int, empty map[string]int) map[string]int {
+	t.Helper()
+	counts := map[string]int{}
+	var mu sync.Mutex
+	orig := readProcFile
+	readProcFile = func(path string) ([]byte, error) {
+		if filepath.Dir(path) == "/proc/"+strconv.Itoa(pid) {
+			name := filepath.Base(path)
+			mu.Lock()
+			counts[name]++
+			n := counts[name]
+			mu.Unlock()
+			if n <= empty[name] {
+				return []byte{}, nil
+			}
+		}
+		return orig(path)
+	}
+	t.Cleanup(func() { readProcFile = orig })
+	return counts
+}
+
+// A process caught in the middle of an exec reads as having no environ and no
+// cmdline for a moment. The scan retries, so it still finds the process, with
+// its command line.
+func TestInspect_RetriesAProcessCaughtMidExec(t *testing.T) {
+	runID := fmt.Sprintf("tstexec%d", os.Getpid())
+	pid := startMarked(t, runID, "worker", "sleep 30")
+	waitFor(t, "the marked process", func() bool { return len(Scan(runID).Roots) == 1 })
+
+	counts := readsOf(t, pid, map[string]int{"environ": 3, "cmdline": 3})
+	p := inspect(pid, os.Getuid(), runID, uptimeSeconds())
+	if p == nil {
+		t.Fatal("a process caught mid-exec was missed")
+	}
+	if !strings.Contains(p.Cmdline, "sleep 30") {
+		t.Errorf("cmdline = %q, want the command once the exec settles", p.Cmdline)
+	}
+	if counts["environ"] != 4 || counts["cmdline"] != 4 {
+		t.Errorf("reads = %v, want 4 of environ and of cmdline (3 empty, then the real one)", counts)
+	}
+}
+
+// An environ that stays empty is given up on after execRetries retries.
+func TestInspect_GivesUpOnAnEmptyEnviron(t *testing.T) {
+	runID := fmt.Sprintf("tstempty%d", os.Getpid())
+	pid := startMarked(t, runID, "worker", "sleep 30")
+	waitFor(t, "the marked process", func() bool { return len(Scan(runID).Roots) == 1 })
+
+	counts := readsOf(t, pid, map[string]int{"environ": 1 << 30})
+	if p := inspect(pid, os.Getuid(), runID, uptimeSeconds()); p != nil {
+		t.Fatalf("found a process whose environ never had the marker: %+v", p)
+	}
+	if counts["environ"] != execRetries+1 {
+		t.Errorf("environ read %d times, want %d", counts["environ"], execRetries+1)
+	}
+}
+
+// A zombie's cmdline is empty for good: no retries. (Its environ can't be read
+// at all, so inspect already drops it there.)
+func TestInspect_DoesNotRetryAZombie(t *testing.T) {
+	runID := fmt.Sprintf("tstzombie%d", os.Getpid())
+	pid := startMarked(t, runID, "worker", "exit 0") // unreaped until cleanup
+	dir := "/proc/" + strconv.Itoa(pid)
+	waitFor(t, "the process to exit", func() bool { return zombie(dir) })
+
+	counts := readsOf(t, pid, nil)
+	if p := inspect(pid, os.Getuid(), runID, uptimeSeconds()); p != nil {
+		t.Fatalf("found a zombie: %+v", p)
+	}
+	if got := readCmdline(dir); got != "" {
+		t.Errorf("zombie cmdline = %q, want empty", got)
+	}
+	if counts["environ"] != 1 || counts["cmdline"] != 1 {
+		t.Errorf("reads = %v, want one of environ and one of cmdline (no retries for a zombie)", counts)
 	}
 }
