@@ -265,6 +265,18 @@ func readsOf(t *testing.T, pid int, empty map[string]int) map[string]int {
 	return counts
 }
 
+// waitSettled waits until the run's one marked process, started as `bash -c
+// "exec sleep 30"`, runs sleep. A scan can find it first as bash, before that
+// exec; a test that stubs /proc reads afterwards must not race the real exec
+// (which reads as mid-exec while it lasts).
+func waitSettled(t *testing.T, runID string) {
+	t.Helper()
+	waitFor(t, "the marked process to run sleep 30", func() bool {
+		roots := Scan(runID).Roots
+		return len(roots) == 1 && roots[0].Cmdline == "sleep 30"
+	})
+}
+
 // midExecFor stands in readProcFile so that pid reads as a process mid-exec,
 // its environ and its cmdline both empty, for the first n reads of either; the
 // kernel sets both at the same moment, so they settle together.
@@ -295,8 +307,8 @@ func midExecFor(t *testing.T, pid, n int) {
 // its command line.
 func TestInspect_RetriesAProcessCaughtMidExec(t *testing.T) {
 	runID := fmt.Sprintf("tstexec%d", os.Getpid())
-	pid := startMarked(t, runID, "worker", "sleep 30")
-	waitFor(t, "the marked process", func() bool { return len(Scan(runID).Roots) == 1 })
+	pid := startMarked(t, runID, "worker", "exec sleep 30")
+	waitSettled(t, runID)
 
 	// 1 and 2: the exec settles while the scan checks whether it is mid-exec.
 	for _, n := range []int{1, 2, 3, 6} {
@@ -318,8 +330,8 @@ func TestInspect_RetriesAProcessCaughtMidExec(t *testing.T) {
 // out.
 func TestInspect_WaitsOutALongExec(t *testing.T) {
 	runID := fmt.Sprintf("tstlong%d", os.Getpid())
-	pid := startMarked(t, runID, "worker", "sleep 30")
-	waitFor(t, "the marked process", func() bool { return len(Scan(runID).Roots) == 1 })
+	pid := startMarked(t, runID, "worker", "exec sleep 30")
+	waitSettled(t, runID)
 
 	midExecFor(t, pid, 60) // the idle-machine window shows a handful at most
 	start := time.Now()
@@ -336,8 +348,8 @@ func TestInspect_WaitsOutALongExec(t *testing.T) {
 // mid-exec, so the scan doesn't wait on it.
 func TestInspect_EmptyEnvironIsNotWaitedOn(t *testing.T) {
 	runID := fmt.Sprintf("tstempty%d", os.Getpid())
-	pid := startMarked(t, runID, "worker", "sleep 30")
-	waitFor(t, "the marked process", func() bool { return len(Scan(runID).Roots) == 1 })
+	pid := startMarked(t, runID, "worker", "exec sleep 30")
+	waitSettled(t, runID)
 
 	counts := readsOf(t, pid, map[string]int{"environ": 1 << 30})
 	start := time.Now()
@@ -356,8 +368,8 @@ func TestInspect_EmptyEnvironIsNotWaitedOn(t *testing.T) {
 // timeout.
 func TestInspect_GivesUpAfterTheSettleTimeout(t *testing.T) {
 	runID := fmt.Sprintf("tststuck%d", os.Getpid())
-	pid := startMarked(t, runID, "worker", "sleep 30")
-	waitFor(t, "the marked process", func() bool { return len(Scan(runID).Roots) == 1 })
+	pid := startMarked(t, runID, "worker", "exec sleep 30")
+	waitSettled(t, runID)
 
 	orig := execSettleTimeout
 	execSettleTimeout = 60 * time.Millisecond
