@@ -298,6 +298,7 @@ export interface EventDTO {
   created_at: string;
   event: AgentEvent;
   stop_notice?: StopNotice; // assistant turn that stopped abnormally
+  unknown?: boolean; // a type this server doesn't know (a newer amplio's), as stored
 }
 
 // Attachment is a tool-result binary artifact (today, view_file images). The
@@ -536,6 +537,11 @@ export interface AboutInfo {
   owner: string;
   auth_on: boolean;
   caller_authed: boolean;
+}
+
+// ServerSettings is GET /api/settings.
+export interface ServerSettings {
+  timezone: string; // IANA name of the server's zone; timestamps render in it
 }
 
 // TestLLMResult is the outcome of the About page's LLM pre-flight test.

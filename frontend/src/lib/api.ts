@@ -34,6 +34,7 @@ import type {
   ArtifactListing,
   ArtifactAllListing,
   AboutInfo,
+  ServerSettings,
   TestLLMResult,
   BriefingInfo,
   ProcessSnapshot,
@@ -382,6 +383,8 @@ export const api = {
   getSessionTools: (id: string, sid: string) =>
     req<SessionTools>(`/runs/${id}/sessions/${sid}/tools`),
   getAbout: () => req<AboutInfo>("/about"),
+  // The server's settings (its time zone). Open read.
+  getSettings: () => req<ServerSettings>("/settings"),
   // One-time login code for "Open on phone" (requires auth; see pair.go).
   mintPairCode: () =>
     req<{ code: string; expires_at: string; expires_in: number }>(

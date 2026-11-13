@@ -203,7 +203,7 @@ func TestNoInlineSchemaDescription(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		data, rerr := os.ReadFile(path)
+		data, rerr := os.ReadFile(path) //nolint:gosec // G122: this repository's own source tree
 		if rerr != nil {
 			return rerr
 		}

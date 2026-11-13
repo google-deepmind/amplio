@@ -123,7 +123,7 @@ func DataDir() string {
 	}
 	if override := os.Getenv(EnvDataDir); override != "" {
 		override = expandTilde(override)
-		_ = os.MkdirAll(override, 0o755)
+		_ = os.MkdirAll(override, 0o755) //nolint:gosec // G703: the operator chooses the data dir
 		return override
 	}
 	home, _ := os.UserHomeDir()

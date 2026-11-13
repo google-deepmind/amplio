@@ -386,11 +386,44 @@ func (*RecoverEvent) EventType() string { return "recover" }
 
 func (e *RecoverEvent) ToText() string { return banner("recover", nil, e.Content) }
 
+// UnknownEvent stands in for a stored event whose type this binary doesn't
+// know: one written by a newer amplio, read after a downgrade. Reading it
+// rather than failing keeps the session readable. It is kept in the stream and
+// marshals back to the stored JSON, but nothing projects it: not the model's
+// context, the chat, the inspect and search tools, or the summaries. It
+// classifies as a Notice and wakes nothing.
+//
+// Unmarshal produces it for an unknown type. A newer binary can also add a
+// value or a field to a type this one knows; that is each type's decoder to
+// handle (unknown fields are ignored; an unknown value of a field that drives
+// behaviour, such as an action, can read as this placeholder too).
+type UnknownEvent struct {
+	ColumnFields
+	Type string          // the stored "type"
+	Raw  json.RawMessage // the stored JSON, verbatim
+}
+
+func (*UnknownEvent) eventTag()           {}
+func (e *UnknownEvent) EventType() string { return e.Type }
+
+// ToText names the type only: the content is a newer binary's, not this one's
+// to interpret.
+func (e *UnknownEvent) ToText() string { return banner("unknown", []string{"type=" + e.Type}, "") }
+
+// IsUnknown reports whether e is an UnknownEvent placeholder.
+func IsUnknown(e Event) bool {
+	_, ok := e.(*UnknownEvent)
+	return ok
+}
+
 // --- Serialization ---
 
 // Marshal converts an Event to a JSON blob with a "type" discriminator.
 // Column fields (Step, Generation, CreatedAt) are NOT included (json:"-").
 func Marshal(e Event) ([]byte, error) {
+	if u, ok := e.(*UnknownEvent); ok {
+		return u.Raw, nil // already carries its "type"
+	}
 	data, err := json.Marshal(e)
 	if err != nil {
 		return nil, err
@@ -404,8 +437,9 @@ func Marshal(e Event) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// Unmarshal parses a JSON blob into a typed Event. The caller must set
-// ColumnFields (Step, Generation, CreatedAt) separately from DB columns.
+// Unmarshal parses a JSON blob into a typed Event, or an UnknownEvent for a
+// type this binary doesn't know. The caller must set ColumnFields (Step,
+// Generation, CreatedAt) separately from DB columns.
 func Unmarshal(data []byte) (Event, error) {
 	var probe struct {
 		Type string `json:"type"`
@@ -466,6 +500,6 @@ func Unmarshal(data []byte) (Event, error) {
 	case "":
 		return nil, fmt.Errorf("event unmarshal: missing 'type' field")
 	default:
-		return nil, fmt.Errorf("event unmarshal: unknown type %q", probe.Type)
+		return &UnknownEvent{Type: probe.Type, Raw: append(json.RawMessage(nil), data...)}, nil
 	}
 }

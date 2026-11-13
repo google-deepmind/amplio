@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build embed-table dev test test-race test-integration lint fmt vuln cover frontend-build notices clean
+.PHONY: build embed-table dev test test-race test-integration vet lint fmt vuln cover frontend-build notices clean
 
 # Build tags applied to every go invocation. The internal tag switches in
 # environment-specific implementations (workspace backend, credential probe,
@@ -68,9 +68,13 @@ test-race:
 test-integration:
 	go test -race $(INTEGRATION_TAGS) ./...
 
+# Vet the tree as the build sees it (TAGS).
+vet:
+	go vet $(TAGS) ./...
+
 # Run linters.
 lint:
-	go tool golangci-lint run ./...
+	go tool -modfile=tools/golangci-lint.mod golangci-lint run ./...
 
 # Format all Go source files.
 fmt:

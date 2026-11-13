@@ -98,7 +98,7 @@ func parseSafetensors(raw []byte) (matrix, error) {
 		return matrix{}, errors.New("safetensors: truncated")
 	}
 	hlen := binary.LittleEndian.Uint64(raw)
-	if hlen > uint64(len(raw)-8) {
+	if hlen > uint64(len(raw))-8 {
 		return matrix{}, errors.New("safetensors: header length past end of file")
 	}
 	var header map[string]json.RawMessage

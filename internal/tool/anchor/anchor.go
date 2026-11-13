@@ -154,7 +154,7 @@ func ParseAnchor(text string) (canonical string, lineHint int, err error) {
 	}
 	stripped = strings.ToLower(stripped)
 	for _, c := range stripped {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return "", -1, fmt.Errorf("%w: anchor %q: hash must be hexadecimal", ErrAnchorParse, text)
 		}
 	}

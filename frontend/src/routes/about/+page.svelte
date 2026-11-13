@@ -19,6 +19,7 @@
 	import { auth } from '$lib/auth.svelte';
 	import { pageTitle } from '$lib/title';
 	import { formatLocalIso } from '$lib/time';
+	import { serverSettings } from '$lib/serverSettings.svelte';
 	import CopyButton from '$lib/components/CopyButton.svelte';
 	import type { AboutInfo, TestLLMResult } from '$lib/types';
 
@@ -49,6 +50,16 @@
 					.join(' · ')
 			: ''
 	);
+
+	// Times show in the server's zone; say so when the browser's differs.
+	const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const zoneLine = $derived.by(() => {
+		const zone = serverSettings.timezone;
+		if (!serverSettings.loaded) return '—';
+		if (!zone) return `unknown to the server; times show in this browser's (${browserZone})`;
+		if (!serverSettings.displayZone) return `${zone} (unknown to this browser; times show in ${browserZone})`;
+		return zone === browserZone ? zone : `${zone} (this browser: ${browserZone})`;
+	});
 
 	// --- LLM tester ---
 	let spec = $state('');
@@ -93,6 +104,8 @@
 				<dd class="mono">{info.owner || '—'}</dd>
 				<dt>auth</dt>
 				<dd class="mono">{info.auth_on ? 'token required for writes' : 'open (no token)'}</dd>
+				<dt>time zone</dt>
+				<dd class="mono">{zoneLine}</dd>
 			</dl>
 		</section>
 

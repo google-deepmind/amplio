@@ -45,7 +45,7 @@ func (m Mock) Embed(_ context.Context, texts []string) ([][]float32, error) {
 		for _, w := range strings.Fields(strings.ToLower(t)) {
 			h := fnv.New32a()
 			_, _ = h.Write([]byte(w))
-			v[h.Sum32()%uint32(d)]++
+			v[h.Sum32()%uint32(d)]++ //nolint:gosec // G115: d is a positive embedding width, far below 2^32
 		}
 		out[i] = v
 	}

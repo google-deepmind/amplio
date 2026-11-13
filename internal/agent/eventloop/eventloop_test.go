@@ -699,7 +699,9 @@ func TestEventLoop_FirstMessageRunsImmediately(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
 }
 
 // An interactive (chatbot) agent parks idle on a no-tool turn, wakes on a user
@@ -754,7 +756,9 @@ func TestEventLoop_ParkThenWake(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
 }
 
 // Autonomous agent: tool call, then a no-tool turn → concluded. Verifies the
@@ -866,7 +870,9 @@ func TestEventLoop_ChatbotNoTask(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
 }
 
 // A canceller-driven cancel of a live, parked session stops it (status cancelled,
@@ -904,7 +910,10 @@ func TestEventLoop_CancelStopsLiveSession(t *testing.T) {
 	}
 
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
@@ -976,7 +985,9 @@ func TestEventLoop_RestartIdleSession(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
 }
 
 // An autonomous child ends with a no-tool turn → concluded, posting its result
@@ -1162,6 +1173,73 @@ func TestEventLoop_ResumeAtRestAutonomous(t *testing.T) {
 	}
 }
 
+// newerEvent is a stored event of a type this binary doesn't know (as a newer
+// binary would write it); the store reads it back as an UnknownEvent.
+func newerEvent() *event.UnknownEvent {
+	return &event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","action":"set","criteria":"VERIFY-CRITERIA"}`)}
+}
+
+// A newer binary's event after the final reply doesn't hide it: the agent still
+// resumes at rest and concludes without calling the LLM (which would also
+// reject a trailing assistant message).
+func TestEventLoop_ResumeAtRestBehindUnknownEvent(t *testing.T) {
+	store, runID, registry := testSetup(t)
+	ctx := context.Background()
+
+	_ = store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "agent", Status: db.SessionOngoing})
+	_ = store.AppendEventAtStep(ctx, runID, "agent", 1, &event.AssistantEvent{Content: "final answer"})
+	_ = store.AppendEventAtStep(ctx, runID, "agent", 1, newerEvent())
+	seedResumeStep(t, store, runID, "agent")
+
+	mock := &llm.MockProvider{Model: "test", Responses: []llm.Response{{Content: "SHOULD NOT BE CALLED"}}}
+	ag := newT(testCfg{
+		RunID: runID, SessionID: "agent", LLM: mock, Store: store,
+		Registry: registry, Tools: []*tool.Tool{}, Workspace: plain.New("/tmp"),
+	})
+	if err := ag.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if mock.CallCount() != 0 {
+		t.Errorf("LLM called %d times, want 0 (at-rest finalize)", mock.CallCount())
+	}
+	if sess, _ := store.GetSession(ctx, runID, "agent"); sess.Status != db.SessionConcluded {
+		t.Errorf("status: %q, want concluded", sess.Status)
+	}
+}
+
+// A newer binary's event in the context reaches the model in no form.
+func TestEventLoop_UnknownEventNotSentToModel(t *testing.T) {
+	store, runID, registry := testSetup(t)
+	ctx := context.Background()
+
+	_ = store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "agent", Status: db.SessionOngoing})
+	_ = store.AppendEventAtStep(ctx, runID, "agent", 1, &event.UserEvent{Content: "do X"})
+	_ = store.AppendEventAtStep(ctx, runID, "agent", 1, newerEvent())
+	seedResumeStep(t, store, runID, "agent") // resumes mid-LLM at step 1
+
+	mock := &llm.MockProvider{Model: "test", Responses: []llm.Response{{Content: "answer", StopReason: "end_turn"}}}
+	ag := newT(testCfg{
+		RunID: runID, SessionID: "agent", LLM: mock, Store: store,
+		Registry: registry, Tools: []*tool.Tool{}, Workspace: plain.New("/tmp"),
+	})
+	if err := ag.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reqs := mock.Recorded()
+	if len(reqs) != 1 {
+		t.Fatalf("LLM called %d times, want 1", len(reqs))
+	}
+	msgs := reqs[0].Messages
+	if len(msgs) != 1 || msgs[0].Role != llm.RoleUser || msgs[0].Content != "do X" {
+		t.Errorf("messages = %+v, want only the user's \"do X\"", msgs)
+	}
+	if strings.Contains(reqs[0].SystemPrompt, "verify") {
+		t.Errorf("system prompt mentions the newer event:\n%s", reqs[0].SystemPrompt)
+	}
+}
+
 // Same crash for an interactive agent: it resumes at rest, parks idle (no
 // duplicate LLM call), and waits for the next message.
 func TestEventLoop_ResumeAtRestInteractive(t *testing.T) {
@@ -1189,7 +1267,9 @@ func TestEventLoop_ResumeAtRestInteractive(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
 }
 
 // Bootstrap persists the session's own workspace into Session.Metadata so a
@@ -1665,8 +1745,11 @@ func TestEventLoop_CancelBeforeRun_FreshSession(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- ag.Run(ctx) }()
 	select {
-	case <-done:
+	case err := <-done:
 		// Exited promptly on the pre-cancelled ctx — good.
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v, want nil or context.Canceled", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run() did not exit promptly on a pre-cancelled ctx")
 	}
@@ -1702,7 +1785,10 @@ func TestEventLoop_CancelBeforeRun_ExistingTerminalSession(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- ag.Run(runCtx) }()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v, want nil or context.Canceled", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run() did not exit promptly on a pre-cancelled ctx for a terminal session")
 	}

@@ -158,12 +158,12 @@ func ParseTable(b []byte) (*Table, error) {
 	t := &Table{Header: h, Vocab: make([]string, h.Vocab)}
 	for i := range t.Vocab {
 		n, k := binary.Uvarint(b[off:])
-		if k <= 0 || n > uint64(len(b)-off-k) {
+		if k <= 0 || n > uint64(len(b[off+k:])) {
 			return nil, errTruncated
 		}
 		off += k
-		t.Vocab[i] = string(b[off : off+int(n)])
-		off += int(n)
+		t.Vocab[i] = string(b[off:][:n])
+		off += len(t.Vocab[i])
 	}
 	nv := h.Vocab * h.Dims
 	if len(b)-off != nv+4*h.Vocab {

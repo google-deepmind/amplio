@@ -20,6 +20,10 @@
 //
 // Serialization: events round-trip through JSON via Marshal/Unmarshal.
 // The "type" discriminator field is written by Marshal and read by Unmarshal.
+// A type this binary doesn't know (a newer binary's) reads as an UnknownEvent
+// placeholder, so adding an event type doesn't make the store unreadable after
+// a downgrade. New values and fields of a known type are up to that type's
+// decoder (see UnknownEvent).
 // Column-derived fields (Step, Generation, CreatedAt) are NOT included in the
 // JSON blob — they are set by the caller after deserialization from DB column
 // values.

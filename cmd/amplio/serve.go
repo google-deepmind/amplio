@@ -188,7 +188,7 @@ func executeServe(cfg config.Config, listenOverride, lendOverride string) error 
 	go sys.Run(ctx)
 
 	// Bind first: a port conflict should fail before we recover runs or print a URL.
-	ln, err := net.Listen("tcp", cfg.Listen)
+	ln, err := new(net.ListenConfig).Listen(ctx, "tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
@@ -426,7 +426,7 @@ func serveLending(addr string, cfg config.Config, srv *server.Server, embedder e
 	// fast. A run builds one provider and uses it for hours.
 	handler := srv.LendingHandler(token, llm.CacheProviders(createProvider), lentEmbedder(embedder))
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := new(net.ListenConfig).Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen for lending on %s: %w", addr, err)
 	}

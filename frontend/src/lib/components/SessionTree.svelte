@@ -16,7 +16,7 @@
 
 <script lang="ts">
 	import type { SessionDTO } from '$lib/types';
-	import { timeAgo } from '$lib/time';
+	import { timeAgo, formatLocale } from '$lib/time';
 	import StatusBadge from './StatusBadge.svelte';
 	import {
 		AndroidLogoIcon,
@@ -170,7 +170,7 @@
 				class="meta dim"
 				title={compact
 					? undefined
-					: `step ${s.current_step} · ${new Date(s.status_changed_at).toLocaleString()}`}
+					: `step ${s.current_step} · ${formatLocale(s.status_changed_at)}`}
 			>
 				<PathIcon size={12} weight="bold" />
 				{s.current_step}{#if !compact}

@@ -40,16 +40,19 @@ const scanWorkers = 8
 
 // A process in the middle of execve reads as having no environ and no
 // cmdline: the kernel installs the new address space before it sets the
-// argument and environment ranges in it. The window is short (a median of
-// about 0.6 ms and at most 1.4 ms for /bin/sleep on an idle machine, longer
-// under load), but a scan that lands in it would miss a marked process
-// entirely, or name it "pid N". So an empty read of a live process is retried
-// a few times; a zombie's stays empty and isn't. A process that really has an
-// empty environment costs execRetries waits per scan.
-const (
-	execRetries   = 10
-	execRetryWait = time.Millisecond
-)
+// argument and environment ranges in it. The window is short on an idle
+// machine (a median of about 0.6 ms and at most 1.4 ms for /bin/sleep), but a
+// busy one can deschedule the process inside it for tens of milliseconds, and
+// a scan that lands there would miss a marked process entirely, or name it
+// "pid N". So a scan waits, with growing pauses up to execSettleTimeout, while
+// a live process reads empty in both: only a process mid-exec does. A zombie's
+// stay empty, and so do a kernel thread's (it has no user address space; a
+// scan running as root reads them), and a process with a genuinely empty
+// environment still has a cmdline, so none of those is waited on.
+var execSettleTimeout = 500 * time.Millisecond
+
+// execMaxPause caps one pause of that wait.
+const execMaxPause = 20 * time.Millisecond
 
 // readProcFile reads a /proc file; a var so tests can stand in a process
 // caught mid-exec.
@@ -166,7 +169,7 @@ func readStat(dir string, p *Process, uptime float64) bool {
 	p.PGID = int(num(2))
 	p.SID = int(num(3))
 	p.CPUMillis = (num(11) + num(12)) * 1000 / clockTick // utime + stime
-	p.StartTime = uint64(num(19))
+	p.StartTime, _ = strconv.ParseUint(string(f[19]), 10, 64)
 	p.RSSBytes = num(21) * int64(os.Getpagesize())
 	if uptime > 0 {
 		p.Elapsed = max(0, uptime-float64(p.StartTime)/float64(clockTick))
@@ -174,35 +177,79 @@ func readStat(dir string, p *Process, uptime float64) bool {
 	return true
 }
 
-// readSettled reads a /proc file of a process, retrying an empty read while
-// the process may be in the middle of an exec (see execRetries). nil if the
+// readSettled reads a /proc file of a process, waiting out an empty read while
+// the process is in the middle of an exec (see execSettleTimeout). nil if the
 // process is gone, or the file stays empty.
 func readSettled(dir, name string) []byte {
 	path := filepath.Join(dir, name)
-	for i := 0; ; i++ {
+	deadline := time.Now().Add(execSettleTimeout)
+	pause := time.Millisecond
+	for {
 		b, err := readProcFile(path)
 		if err != nil {
 			return nil // gone, or not ours to read
 		}
-		if len(b) > 0 || i == execRetries || zombie(dir) {
+		if len(b) > 0 || time.Now().After(deadline) {
 			return b
 		}
-		time.Sleep(execRetryWait)
+		if !midExec(dir) {
+			// Empty for good, or the exec settled since the read: read once more.
+			if b, err = readProcFile(path); err != nil {
+				return nil
+			}
+			return b
+		}
+		time.Sleep(pause)
+		pause = min(2*pause, execMaxPause)
 	}
+}
+
+// midExec reports whether a process looks caught in the middle of an exec: it
+// is alive, not a kernel thread, and both its environ and its cmdline read
+// empty.
+func midExec(dir string) bool {
+	state, flags, ok := statOf(dir)
+	if !ok || state == 'Z' || state == 'X' || flags&pfKThread != 0 {
+		return false
+	}
+	for _, name := range []string{"environ", "cmdline"} {
+		if b, err := readProcFile(filepath.Join(dir, name)); err != nil || len(b) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // zombie reports whether the process has exited and awaits reaping (or is
 // unreadable): its environ and cmdline are empty for good.
 func zombie(dir string) bool {
+	state, _, ok := statOf(dir)
+	return !ok || state == 'Z' || state == 'X'
+}
+
+// pfKThread is the kernel's PF_KTHREAD task flag, set on kernel threads.
+const pfKThread = 0x00200000
+
+// statOf reads a process's state and task flags (fields 3 and 9 of
+// /proc/<pid>/stat); ok is false if the file can't be read or parsed.
+func statOf(dir string) (state byte, flags uint64, ok bool) {
 	b, err := readProcFile(filepath.Join(dir, "stat"))
 	if err != nil {
-		return true
+		return 0, 0, false
 	}
 	i := bytes.LastIndexByte(b, ')')
 	if i < 0 || i+2 >= len(b) {
-		return true
+		return 0, 0, false
 	}
-	return b[i+2] == 'Z' || b[i+2] == 'X'
+	f := bytes.Fields(b[i+2:]) // f[0] is field 3 (state)
+	if len(f) < 7 {
+		return 0, 0, false
+	}
+	flags, err = strconv.ParseUint(string(f[6]), 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return f[0][0], flags, true
 }
 
 // readCmdline returns the argv with NULs turned into spaces. Empty for a kernel

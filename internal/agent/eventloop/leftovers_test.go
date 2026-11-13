@@ -268,7 +268,9 @@ func TestEndOfRun_InteractiveNotReminded(t *testing.T) {
 	go func() { done <- ag.Run(ctx) }()
 	waitForIdle(t, store, runID, "bot")
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
 	if n := len(reminders(t, store, runID, "bot")); n != 0 {
 		t.Errorf("interactive agent got %d reminders", n)
 	}

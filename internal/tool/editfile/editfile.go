@@ -770,7 +770,7 @@ func resolveAnchorEdit(content string, i int, edit Edit, lines, anchors []string
 		if newText != "" && !strings.HasSuffix(newText, "\n") {
 			insertingAtEOF := targetLine == nLines
 			fileHasTrailingNL := strings.HasSuffix(content, "\n")
-			if !(insertingAtEOF && !fileHasTrailingNL) {
+			if !insertingAtEOF || fileHasTrailingNL {
 				newText += "\n"
 			}
 		}

@@ -105,7 +105,9 @@ func (t *spawnTransport) post(ctx context.Context, path string, body []byte) (*h
 // postTo issues one protocol request. Shared by every transport: only the client
 // and the URL differ.
 func postTo(ctx context.Context, client *http.Client, url string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	// G704 (below, twice): the request goes to the private socket of a bridge
+	// this process spawned.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body)) //nolint:gosec // G704
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +115,7 @@ func postTo(ctx context.Context, client *http.Client, url string, body []byte) (
 	req.Header.Set(protocolVersionHeader, protocolVersion)
 	// Ownership of the response body transfers to the caller (closed in Call's
 	// defer or subStream.Close).
-	return client.Do(req) //nolint:bodyclose
+	return client.Do(req) //nolint:bodyclose,gosec // G704
 }
 
 // Shutdown kills every running bridge and removes its socket dir. Call on
@@ -248,7 +250,9 @@ func (p *proc) startLocked() (err error) {
 	socket := filepath.Join(tmpDir, "bridge.sock")
 
 	// G204: the bridge path is operator-supplied via the LLM spec, by design.
-	cmd := exec.Command(p.binary, "--socket", socket) //nolint:gosec
+	// No cancellable context: the bridge outlives the request that starts it,
+	// and stopLocked owns its lifetime.
+	cmd := exec.CommandContext(context.Background(), p.binary, "--socket", socket) //nolint:gosec
 	cmd.Env = append(os.Environ(), "AMPLIO_BRIDGE_SPEC="+p.specQuery)
 	cmd.Env = append(cmd.Env, extraSpawnEnv...)
 	setDeathSig(cmd)

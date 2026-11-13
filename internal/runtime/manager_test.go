@@ -121,6 +121,41 @@ func TestRecoverRun(t *testing.T) {
 	}
 }
 
+// A newer binary's event after the final reply leaves the stream at rest, so
+// Recover respawns it to conclude rather than appending a RecoverEvent.
+func TestStreamAtRest_IgnoresUnknownEvents(t *testing.T) {
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	runID := "run-newer"
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: runID}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, NewRunRegistry(), plain.Factory)
+	newer := func() event.Event {
+		return &event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","action":"set"}`)}
+	}
+	for _, tc := range []struct {
+		sid  string
+		tail event.Event
+		want bool
+	}{
+		{"answered", &event.AssistantEvent{Content: "done"}, true},
+		{"working", &event.UserEvent{Content: "ctx"}, false},
+	} {
+		_ = store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: tc.sid, Status: db.SessionOngoing})
+		_ = store.AppendEventAtStep(ctx, runID, tc.sid, 1, tc.tail)
+		_ = store.AppendEventAtStep(ctx, runID, tc.sid, 1, newer())
+		got, err := mgr.streamAtRest(ctx, runID, tc.sid)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: streamAtRest = %v, %v; want %v", tc.sid, got, err, tc.want)
+		}
+	}
+}
+
 // StartRun resolves the agent provider from each run's RunConfig.LLM via the
 // injected factory, and caches one provider per distinct spec.
 func TestStartRun_PerRunProviderCached(t *testing.T) {

@@ -37,6 +37,7 @@
 	import RefusalNotice from './Refusal.svelte';
 	import StopNoticeView from './StopNotice.svelte';
 	import { renderMarkdown } from '$lib/markdown';
+	import { formatTimestamp } from '$lib/time';
 	import {
 		CircleNotchIcon,
 		TerminalIcon,
@@ -247,20 +248,6 @@
 			closeToolDetail();
 		}
 	});
-
-	// Full local timestamp with timezone, e.g. "2026-06-05 22:24:44 PDT".
-	function formatTime(t: string | number): string {
-		const d = new Date(t);
-		const p = (n: number) => String(n).padStart(2, '0');
-		const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-		const time = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-		const tz =
-			new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
-				.formatToParts(d)
-				.find((x) => x.type === 'timeZoneName')?.value ?? '';
-		return `${date} ${time}${tz ? ' ' + tz : ''}`;
-	}
-
 </script>
 
 			<!-- Chatbot output, rendered inline (no bubble) so its width is stable;
@@ -370,7 +357,7 @@
 							     in this template source doesn't render as a
 							     leading space/newline inside the user message. -->
 							<span class="content">{m.content}</span>
-							<div class="time dim">{formatTime(m.created_at)}</div>
+							<div class="time dim">{formatTimestamp(m.created_at)}</div>
 						</div>
 					</div>
 				{:else if m.kind === 'environment'}
@@ -379,7 +366,7 @@
 							<span class="bubble-copy"><CopyButton text={m.content} /></span>
 							<div class="ihead dim small"><TerminalIcon size={13} />{m.from || 'environment'}</div>
 							<pre class="pre">{m.content}</pre>
-							<div class="time dim">{formatTime(m.created_at)}</div>
+							<div class="time dim">{formatTimestamp(m.created_at)}</div>
 						</div>
 					</div>
 				{:else if m.kind === 'agent'}
@@ -396,7 +383,7 @@
 								{/if}
 							</div>
 							<div class="md">{@html renderMarkdown(m.content)}</div>
-							<div class="time dim">{formatTime(m.created_at)}</div>
+							<div class="time dim">{formatTimestamp(m.created_at)}</div>
 						</div>
 					</div>
 				{:else if m.kind === 'child_result'}
@@ -424,7 +411,7 @@
 								<div class="dim small note">{n.label}: {n.text}</div>
 							{/each}
 							<div class="md">{@html renderMarkdown(m.content)}</div>
-							<div class="time dim">{formatTime(m.created_at)}</div>
+							<div class="time dim">{formatTimestamp(m.created_at)}</div>
 						</div>
 					</div>
 				{:else if m.kind === 'compaction'}
@@ -446,7 +433,7 @@
 
 				{#if row.showSep || row.reserved}
 					<div class="sep dim" class:empty={!row.showSep}>
-						{#if row.showSep}{formatTime(m.created_at)}{/if}
+						{#if row.showSep}{formatTimestamp(m.created_at)}{/if}
 					</div>
 				{/if}
 				{#if previewAt === i + 1}{@render previewBubble()}{/if}

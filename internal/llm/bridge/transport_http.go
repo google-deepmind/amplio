@@ -87,7 +87,8 @@ func (t *httpTransport) post(ctx context.Context, path string, body []byte) (*ht
 	// thinking, so the deadline is per-read (see idleReader), not overall: a
 	// generation legitimately runs for many minutes.
 	ctx, cancel := context.WithCancel(ctx)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.base+path, strings.NewReader(string(body)))
+	// G704 (below, twice): t.base is the bridge endpoint the operator configured.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.base+path, strings.NewReader(string(body))) //nolint:gosec // G704
 	if err != nil {
 		cancel()
 		return nil, err
@@ -97,7 +98,7 @@ func (t *httpTransport) post(ctx context.Context, path string, body []byte) (*ht
 	if t.token != "" {
 		req.Header.Set("Authorization", "Bearer "+t.token)
 	}
-	resp, err := t.client.Do(req) //nolint:bodyclose // ownership transfers to the caller
+	resp, err := t.client.Do(req) //nolint:bodyclose,gosec // ownership transfers to the caller; G704
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("bridge %s: %w", t.endpoint, err)

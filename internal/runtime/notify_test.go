@@ -19,6 +19,7 @@ import (
 
 	"amplio/internal/db"
 	"amplio/internal/event"
+	"amplio/internal/session"
 )
 
 // TestCommitNotifier_EnvRevivalGate verifies that an environment notification
@@ -75,5 +76,28 @@ func TestCommitNotifier_NilStatusFuncNoGating(t *testing.T) {
 	notify("run", "sess", &event.MessageEvent{Content: "x", SenderType: event.SenderTypeEnvironment})
 	if len(respawned) != 1 {
 		t.Errorf("nil statusOf must not gate; respawned=%v", respawned)
+	}
+}
+
+// A placeholder for a newer binary's event wakes nothing: not a live session,
+// nor a cold one.
+func TestCommitNotifier_UnknownEventWakesNothing(t *testing.T) {
+	runReg := NewRunRegistry()
+	live := session.NewHandle(func() {})
+	if err := runReg.GetOrCreate("run").Register("live", live); err != nil {
+		t.Fatal(err)
+	}
+	var respawned []string
+	notify := NewCommitNotifier(runReg, func(_, sid string) { respawned = append(respawned, sid) }, nil)
+
+	before := live.Counter()
+	newer := &event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify"}`)}
+	notify("run", "live", newer)
+	notify("run", "cold", newer)
+	if live.Counter() != before {
+		t.Error("the placeholder woke a live session")
+	}
+	if len(respawned) != 0 {
+		t.Errorf("the placeholder respawned %v", respawned)
 	}
 }

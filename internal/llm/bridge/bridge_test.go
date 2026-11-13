@@ -299,7 +299,7 @@ func init() {
 }
 
 func serveTestBridge(socket string) {
-	_ = os.Remove(socket)
+	_ = os.Remove(socket) //nolint:gosec // G703: the socket path the test passed in --socket
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		os.Stderr.WriteString("test-bridge: listen: " + err.Error() + "\n")

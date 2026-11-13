@@ -412,6 +412,9 @@ type eventDTO struct {
 	// StopNotice is set on an assistant turn that stopped abnormally (see
 	// stopNoticeFor), so the trajectory can flag it without knowing providers.
 	StopNotice *stopNotice `json:"stop_notice,omitempty"`
+	// Unknown marks an event of a type this binary doesn't know (a newer
+	// amplio's; see event.UnknownEvent), so the trajectory can say so.
+	Unknown bool `json:"unknown,omitempty"`
 }
 
 func toEventDTO(r db.EventRecord) (eventDTO, error) {
@@ -419,7 +422,7 @@ func toEventDTO(r db.EventRecord) (eventDTO, error) {
 	if err != nil {
 		return eventDTO{}, err
 	}
-	dto := eventDTO{Step: r.Step, Generation: r.Generation, CreatedAt: r.CreatedAt, Event: data}
+	dto := eventDTO{Step: r.Step, Generation: r.Generation, CreatedAt: r.CreatedAt, Event: data, Unknown: event.IsUnknown(r.Event)}
 	if a, ok := r.Event.(*event.AssistantEvent); ok {
 		dto.StopNotice = stopNoticeFor(a)
 	}

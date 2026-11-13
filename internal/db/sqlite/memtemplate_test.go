@@ -46,7 +46,7 @@ func schemaDump(t *testing.T, path string) string {
 	}
 	defer sqlDB.Close() //nolint:errcheck
 	sqlDB.SetMaxOpenConns(1)
-	if err := initSchema(sqlDB, path); err != nil {
+	if err := initSchema(t.Context(), sqlDB, path); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := sqlDB.Query(`SELECT type, name, tbl_name, ifnull(sql, '') FROM sqlite_master ORDER BY type, name`)

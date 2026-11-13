@@ -34,7 +34,7 @@ const memoryPath = ":memory:"
 // store per test pays it serially even when the tests run in parallel. Restore a
 // process-cached page image of the finished schema instead; it is produced by
 // running this very DDL once, so the resulting database is identical.
-func initSchema(sqlDB *sql.DB, path string) error {
+func initSchema(ctx context.Context, sqlDB *sql.DB, path string) error {
 	if path == memoryPath {
 		img, err := schemaImage()
 		if err != nil {
@@ -42,10 +42,10 @@ func initSchema(sqlDB *sql.DB, path string) error {
 		}
 		return withRawConn(sqlDB, func(c pageImageConn) error { return c.Deserialize(img) })
 	}
-	if _, err := sqlDB.Exec(schema); err != nil {
+	if _, err := sqlDB.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("sqlite schema: %w", err)
 	}
-	return migrate(sqlDB)
+	return migrate(ctx, sqlDB)
 }
 
 // schemaImage is the page image of an empty, fully migrated database. The bytes
@@ -60,10 +60,11 @@ func buildSchemaImage() ([]byte, error) {
 	}
 	defer sqlDB.Close() //nolint:errcheck // read-only template DB
 	sqlDB.SetMaxOpenConns(1)
-	if _, err := sqlDB.Exec(schema); err != nil {
+	ctx := context.Background()
+	if _, err := sqlDB.ExecContext(ctx, schema); err != nil {
 		return nil, fmt.Errorf("sqlite schema image: %w", err)
 	}
-	if err := migrate(sqlDB); err != nil {
+	if err := migrate(ctx, sqlDB); err != nil {
 		return nil, fmt.Errorf("sqlite schema image: %w", err)
 	}
 	var img []byte

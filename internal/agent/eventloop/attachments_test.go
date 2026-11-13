@@ -161,7 +161,7 @@ func paddedPNG(t *testing.T, w, h, pad int) []byte {
 	t.Helper()
 	img := pngBytes(t, w, h)
 	var chunk bytes.Buffer
-	_ = binary.Write(&chunk, binary.BigEndian, uint32(pad))
+	_ = binary.Write(&chunk, binary.BigEndian, uint32(pad)) //nolint:gosec // G115: test padding, a few MB
 	chunk.WriteString("prVt")
 	chunk.Write(make([]byte, pad))
 	_ = binary.Write(&chunk, binary.BigEndian, crc32.ChecksumIEEE(chunk.Bytes()[4:]))

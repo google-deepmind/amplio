@@ -120,6 +120,23 @@ Deleting a run removes its database rows and its artifact and blob directories.
 Lessons mined from it survive — they are corpus, not run data. Deletion is
 irreversible; archiving is the reversible way to get a run out of your list.
 
+## Time zone
+
+Times are in the server's time zone: the times agents see (when their session
+started, when a message arrived, recovery markers) and every timestamp in the
+web UI, whatever zone your browser is in. The About page shows the zone. It is
+the `serve` process's: `TZ` if set (an unknown name means UTC), otherwise the
+system's (`/etc/localtime`). The UI needs the zone's name: when `/etc/localtime`
+is a copy rather than a link (a bind mount in a container, say) or `TZ` names a
+file, the server finds the name by matching the file against the system's zone
+files. If none matches and the zone isn't UTC, the UI shows times in your
+browser's zone, and the About page says the server's is unknown. To use another
+zone, start the server with it:
+
+```bash
+TZ=Europe/Zurich amplio serve
+```
+
 ## Logs
 
 One file per `serve`, named for its start time, under `<data-dir>/logs/`. Raise

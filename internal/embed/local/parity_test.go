@@ -62,7 +62,7 @@ func TestParityWithReference(t *testing.T) {
 	texts := make([]string, len(golden.Cases))
 	for i, c := range golden.Cases {
 		texts[i] = c.Text
-		if got := e.m.tok.tokenize(c.Text); !slices.Equal(got, c.IDs) && !(len(got) == 0 && len(c.IDs) == 0) {
+		if got := e.m.tok.tokenize(c.Text); !slices.Equal(got, c.IDs) && (len(got) != 0 || len(c.IDs) != 0) {
 			t.Errorf("case %d %.40q: token ids differ from the reference\n got  %v\n want %v", i, c.Text, got, c.IDs)
 		}
 	}

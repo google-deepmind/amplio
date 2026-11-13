@@ -20,7 +20,7 @@
 	import { beforeNavigate, goto } from '$app/navigation';
 	import { updates } from '$lib/updates.svelte';
 	import { auth } from '$lib/auth.svelte';
-	import { timeAgo } from '$lib/time';
+	import { timeAgo, formatLocale } from '$lib/time';
 	import type { RunSummary } from '$lib/types';
 	import StatusBadge from './StatusBadge.svelte';
 	import {
@@ -480,7 +480,7 @@
 	     spells it out, since an icon alone is not self-describing. -->
 	<span
 		class="meta dim"
-		title="step {run.root_step} · {new Date(lastChange).toLocaleString()}"
+		title="step {run.root_step} · {formatLocale(lastChange)}"
 	>
 		{#if showSteps}<PathIcon size={12} weight="bold" />{/if}
 		{metaText}

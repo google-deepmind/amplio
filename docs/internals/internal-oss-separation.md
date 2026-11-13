@@ -17,8 +17,9 @@ new files.
   the OSS subset and is the safety fallback for anyone bypassing the Makefile.
 
 The Copybara mirror drops the build-tagged `*_internal*.go` files, overlays OSS
-replacements for the internal Svelte components, and rewrites `Makefile` and
-`.golangci.yml` to drop `-tags=internal`. It also **excludes** the internal-only
+replacements for the internal Svelte components, and rewrites `Makefile` to drop
+`-tags=internal` and `.golangci.yml` to drop its `run` block, which sets the
+`internal` build tag for the linter. It also **excludes** the internal-only
 `.github/workflows/nightly.yml` outright, so the OSS mirror ships source only and
 carries no binary-release CI. The OSS Makefile target therefore reduces to plain
 `go build`.
@@ -90,6 +91,7 @@ behavior is genuinely "do nothing" with no return value to stub.
 Verify both configurations build cleanly before submitting:
 - `make build` — internal tag set (default workflow)
 - `go build ./...` — no tags, OSS path
+- `make lint` — lints with the internal tag (from `.golangci.yml`)
 
 ## Frontend convention
 

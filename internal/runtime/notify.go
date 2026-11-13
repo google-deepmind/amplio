@@ -66,6 +66,9 @@ func NewCommitNotifier(runReg *RunRegistry, respawn RespawnFunc, statusOf Status
 		if _, ok := evt.(*event.ToolResultEvent); ok {
 			return
 		}
+		if event.IsUnknown(evt) {
+			return // a placeholder for a newer binary's event wakes nothing
+		}
 		reg := runReg.Get(runID)
 		if reg != nil && reg.Notify(sessionID) {
 			return // woke a live session

@@ -48,7 +48,7 @@ func (s *cancelAtCheck) FinalizeStep(ctx context.Context, runID, sessionID strin
 	s.once.Do(func() {
 		// current_step is already bumped here, so this lands at exactly the step
 		// the during-generation check looks at.
-		_, _ = s.Store.AppendEvent(context.Background(), s.runID, s.sessionID,
+		_, _ = s.AppendEvent(context.Background(), s.runID, s.sessionID,
 			&event.ChildResultEvent{ChildSessionID: "child-1", Verdict: db.SessionCrashed})
 		s.cancel()
 	})

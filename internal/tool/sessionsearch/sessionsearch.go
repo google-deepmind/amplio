@@ -56,12 +56,7 @@ func New(store db.Store, runID string) *tool.Tool {
 			if limit > 100 {
 				limit = 100
 			}
-			results, err := store.SearchEvents(ctx, rid, params.Query, db.SearchOpts{
-				SessionID: params.SessionID,
-				StepMin:   params.StepMin,
-				StepMax:   params.StepMax,
-				Limit:     limit,
-			})
+			results, err := search(ctx, store, rid, params, limit)
 			if err != nil {
 				return &tool.Result{Content: fmt.Sprintf("Error: %s", err), IsError: true}, nil
 			}
@@ -81,5 +76,30 @@ func New(store db.Store, runID string) *tool.Tool {
 			}
 			return &tool.Result{Content: b.String()}, nil
 		},
+	}
+}
+
+// maxSearchRows bounds how many matches search reads to fill limit.
+const maxSearchRows = 5000
+
+// search returns the best limit matches this binary knows. The full-text
+// index covers a newer binary's events too (it indexes the raw JSON), so when
+// some of the matches are those, it reads further until limit known ones are
+// found or the matches run out.
+func search(ctx context.Context, store db.Store, runID string, p *Params, limit int) ([]db.EventRecord, error) {
+	for fetch := limit; ; fetch *= 2 {
+		recs, err := store.SearchEvents(ctx, runID, p.Query, db.SearchOpts{
+			SessionID: p.SessionID,
+			StepMin:   p.StepMin,
+			StepMax:   p.StepMax,
+			Limit:     fetch,
+		})
+		if err != nil {
+			return nil, err
+		}
+		known := db.KnownEvents(recs)
+		if len(known) >= limit || len(recs) < fetch || fetch >= maxSearchRows {
+			return known[:min(limit, len(known))], nil
+		}
 	}
 }

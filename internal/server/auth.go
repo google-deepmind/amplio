@@ -93,6 +93,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
+		//nolint:gosec // G124: Secure follows TLS, as the doc comment says
 		http.SetCookie(w, &http.Cookie{
 			Name:     s.cookieKey(),
 			Value:    s.token,

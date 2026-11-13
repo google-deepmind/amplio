@@ -15,6 +15,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 
 	"amplio/internal/event"
@@ -35,6 +36,7 @@ func TestClassify(t *testing.T) {
 		{"child crashed", &event.ChildResultEvent{Verdict: SessionCrashed}, ClassNotice},
 		{"recover", &event.RecoverEvent{}, ClassInput},
 		{"self/system write", &event.AssistantEvent{Content: "thinking"}, ClassNotice},
+		{"newer binary's event", &event.UnknownEvent{Type: "verify"}, ClassNotice},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -45,6 +47,21 @@ func TestClassify(t *testing.T) {
 				t.Errorf("IsInput(%s) = %v, want %v", tt.name, got, tt.want == ClassInput)
 			}
 		})
+	}
+}
+
+func TestKnownEvents(t *testing.T) {
+	recs := []EventRecord{
+		{EventID: "a", Event: &event.UserEvent{Content: "hi"}},
+		{EventID: "b", Event: &event.UnknownEvent{Type: "verify"}},
+		{EventID: "c", Event: &event.AssistantEvent{Content: "done"}},
+	}
+	var ids []string
+	for _, r := range KnownEvents(recs) {
+		ids = append(ids, r.EventID)
+	}
+	if got := strings.Join(ids, ","); got != "a,c" {
+		t.Errorf("KnownEvents kept %q, want a,c", got)
 	}
 }
 

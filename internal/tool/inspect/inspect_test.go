@@ -468,3 +468,30 @@ func TestRenderStepBody_HarnessNudgeLabel(t *testing.T) {
 		t.Errorf("the nudge is labelled as the operator's:\n%s", out)
 	}
 }
+
+// Another agent inspecting a session sees nothing of a newer binary's events:
+// not in session_steps, session_peek or session_summary, and no step header for
+// a step that holds only such an event.
+func TestInspect_SkipsUnknownEvents(t *testing.T) {
+	s := openMem(t)
+	ctx := context.Background()
+	runID, sid := seedSession(t, s)
+	_, err := s.AdvanceStep(ctx, runID, sid) // step 6: only the newer event
+	must(t, err)
+	must(t, appended(s.AppendEvent(ctx, runID, sid,
+		&event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","criteria":"VERIFY-CRITERIA"}`)})))
+	deps := &Deps{Store: s, RunID: runID}
+
+	for name, out := range map[string]string{
+		"session_steps":   SessionSteps(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content,
+		"session_peek":    SessionPeek(deps).ParseAndExecute(ctx, `{"session_id":"s1","last_n_steps":3}`).Content,
+		"session_summary": SessionSummary(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content,
+	} {
+		if !strings.Contains(out, "raw tail message") {
+			t.Errorf("%s lost the session's own events:\n%s", name, out)
+		}
+		if strings.Contains(out, "verify") || strings.Contains(out, "unknown") || strings.Contains(out, "step 6") {
+			t.Errorf("%s shows the newer event:\n%s", name, out)
+		}
+	}
+}

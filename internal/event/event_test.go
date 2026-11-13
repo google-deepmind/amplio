@@ -215,14 +215,36 @@ func TestRoundTrip_ToolResultEvent_IsError(t *testing.T) {
 	}
 }
 
+// A type from a newer binary reads as a placeholder that marshals back to the
+// stored JSON byte for byte.
 func TestUnmarshal_UnknownType(t *testing.T) {
-	data := []byte(`{"type":"alien","content":"hello"}`)
-	_, err := Unmarshal(data)
-	if err == nil {
-		t.Fatal("expected error for unknown type")
+	stored := `{"type":"verify","action":"set","criteria":"tests pass","max_rounds":3}`
+	data := []byte(stored)
+	e, err := Unmarshal(data)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
-	if !strings.Contains(err.Error(), "alien") {
-		t.Errorf("error should mention unknown type: %v", err)
+	u, ok := e.(*UnknownEvent)
+	if !ok {
+		t.Fatalf("got %T, want *UnknownEvent", e)
+	}
+	if u.Type != "verify" || u.EventType() != "verify" || !IsUnknown(e) {
+		t.Errorf("Type = %q, EventType = %q, IsUnknown = %v; want verify, verify, true", u.Type, u.EventType(), IsUnknown(e))
+	}
+	copy(data, "XXXXXXXX") // the caller may reuse its buffer
+	out, err := Marshal(e)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(out) != stored {
+		t.Errorf("Marshal = %s, want the stored %s", out, stored)
+	}
+	again, err := Unmarshal(out)
+	if err != nil || again.EventType() != "verify" || !IsUnknown(again) {
+		t.Errorf("re-read = %T %v, err %v; want a verify placeholder", again, again, err)
+	}
+	if IsUnknown(&UserEvent{Content: "hi"}) {
+		t.Error("IsUnknown(UserEvent) = true")
 	}
 }
 
@@ -307,6 +329,10 @@ func TestToText_AllTypes(t *testing.T) {
 		{
 			&RecoverEvent{Content: "bye"},
 			"recover", []string{"bye"},
+		},
+		{
+			&UnknownEvent{Type: "verify", Raw: json.RawMessage(`{"type":"verify","criteria":"secret"}`)},
+			"unknown", []string{"type=verify"},
 		},
 	}
 	for _, tt := range tests {

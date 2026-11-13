@@ -297,6 +297,8 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 	if err != nil {
 		return false, false, fmt.Errorf("load events: %w", err)
 	}
+	// A newer binary's event must not hide a final answer at the tail.
+	events = db.KnownEvents(events)
 
 	// Each retry nudge is already durable in the event stream. Reconstruct the
 	// counter so a cold restart cannot reset the output-limit retry budget.
@@ -1181,6 +1183,8 @@ func (a *EventLoopAgent) eventToMessage(evt event.Event) *llm.Message {
 		return &llm.Message{Role: llm.RoleUser, Content: e.ToText()}
 	case *event.RecoverEvent:
 		return &llm.Message{Role: llm.RoleUser, Content: e.ToText()}
+	case *event.UnknownEvent:
+		return nil // a newer binary's event: not ours to show the model
 	default:
 		return nil
 	}

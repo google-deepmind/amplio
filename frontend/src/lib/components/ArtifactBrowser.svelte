@@ -26,6 +26,7 @@
 	import { api, artifactFileUrl, artifactRawUrl, errorText } from '$lib/api';
 	import { renderMarkdown, highlightFile } from '$lib/markdown';
 	import { fuzzyFilter } from '$lib/fuzzy';
+	import { formatLocale } from '$lib/time';
 	import { isPdfPath, splitAnchor, PDF_MAGIC } from '$lib/pdf';
 	import type { ArtifactEntry, ArtifactFile } from '$lib/types';
 	import {
@@ -177,8 +178,7 @@
 		return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 	}
 	function fmtTime(s: string): string {
-		const d = new Date(s);
-		return isNaN(d.getTime()) ? s : d.toLocaleString();
+		return formatLocale(s) || s;
 	}
 
 	const crumbs = $derived(path ? path.split('/').filter(Boolean) : []);

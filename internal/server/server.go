@@ -199,6 +199,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
 	mux.HandleFunc("GET /api/sysstat", s.handleSysStat)
 	mux.HandleFunc("GET /api/models", s.handleListModels)
+	mux.HandleFunc("GET /api/settings", s.handleSettings)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/chat", s.handleChat)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/tools", s.handleSessionTools)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/trajectory", s.handleTrajectory)

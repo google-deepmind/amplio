@@ -79,6 +79,7 @@ const (
 //   - ChildResultEvent verdict concluded → Input; crashed/cancelled → Notice
 //     (a failing child must not hammer a dormant parent back to life).
 //   - RecoverEvent (produced only by Recover) → Input.
+//   - UnknownEvent (a newer binary's type) → Notice: it revives nothing.
 //   - all other (self/system writes) → Notice.
 func Classify(evt event.Event) EventClass {
 	switch e := evt.(type) {
@@ -97,6 +98,8 @@ func Classify(evt event.Event) EventClass {
 		return ClassNotice
 	case *event.RecoverEvent:
 		return ClassInput
+	case *event.UnknownEvent:
+		return ClassNotice
 	default:
 		return ClassNotice
 	}
@@ -205,6 +208,18 @@ type EventRecord struct {
 	Generation int
 	Event      event.Event
 	CreatedAt  time.Time
+}
+
+// KnownEvents returns recs without UnknownEvent placeholders (a newer binary's
+// events), for readers that reason about the stream's shape, such as its tail.
+func KnownEvents(recs []EventRecord) []EventRecord {
+	out := make([]EventRecord, 0, len(recs))
+	for _, r := range recs {
+		if !event.IsUnknown(r.Event) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // SummarizationFailedPrefix marks a step_summary whose LLM summarization failed:

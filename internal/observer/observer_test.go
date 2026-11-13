@@ -289,3 +289,18 @@ func TestObserver_FinalizeHookSkipsOngoingAndNonRoot(t *testing.T) {
 		t.Fatalf("finalizer calls = %v, want none", calls)
 	}
 }
+
+// Step and phase summaries neither show nor count a newer binary's events.
+func TestSummaries_SkipUnknownEvents(t *testing.T) {
+	user := &event.UserEvent{Content: "hi"}
+	newer := &event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","criteria":"secret"}`)}
+	if got := renderStep([]event.Event{user, newer}, 4, "in chunk"); strings.Contains(got, "verify") || !strings.Contains(got, "hi") {
+		t.Errorf("renderStep shows the newer event or lost the user's:\n%s", got)
+	}
+	if got, want := renderStep([]event.Event{newer}, 4, "in chunk"), renderStep(nil, 4, "in chunk"); got != want {
+		t.Errorf("a step with only a newer event renders %q, want %q", got, want)
+	}
+	if got, want := eventsCharCount([]event.Event{user, newer}), eventsCharCount([]event.Event{user}); got != want {
+		t.Errorf("eventsCharCount = %d, want %d (the newer event uncounted)", got, want)
+	}
+}

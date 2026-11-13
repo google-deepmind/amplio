@@ -538,11 +538,12 @@ func (s *anthropicStream) Next() bool {
 
 	switch evt.Type {
 	case "content_block_delta":
-		if evt.Delta.Type == "text_delta" {
+		switch evt.Delta.Type {
+		case "text_delta":
 			s.current.DeltaText = evt.Delta.Text
-		} else if evt.Delta.Type == "thinking_delta" {
+		case "thinking_delta":
 			s.current.DeltaThoughts = evt.Delta.Thinking
-		} else if evt.Delta.Type == "input_json_delta" {
+		case "input_json_delta":
 			s.current.ToolCallDelta = &llm.ToolCallDelta{
 				ArgumentsDelta: evt.Delta.PartialJSON,
 			}

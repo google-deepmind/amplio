@@ -403,6 +403,69 @@ func TestEventAppendAndRead(t *testing.T) {
 	}
 }
 
+// A session holding an event type from a newer binary (written straight to the
+// table, as that binary would) still reads: the row comes back as a placeholder
+// with its column fields, from every read path.
+func TestGetEvents_UnknownTypeReadsAsPlaceholder(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "newer.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	runID := db.NewRunID()
+	_ = s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()})
+	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "s1", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
+	if _, err := s.AppendEvent(ctx, runID, "s1", &event.UserEvent{Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	stored := `{"type":"verify","action":"set","criteria":"flux tests pass"}`
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO Event (run_id, session_id, event_id, step, generation, data, created_at)
+		 VALUES (?, 's1', 'newer-1', 3, 0, ?, '2030-01-01T00:00:00.000Z')`, runID, stored); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(what string, rec *db.EventRecord) {
+		t.Helper()
+		u, ok := rec.Event.(*event.UnknownEvent)
+		if !ok {
+			t.Fatalf("%s: got %T, want *event.UnknownEvent", what, rec.Event)
+		}
+		if u.Type != "verify" || u.Step != 3 || u.CreatedAt.IsZero() {
+			t.Errorf("%s: placeholder = {Type %q, Step %d, CreatedAt %v}; want verify at step 3 with a time", what, u.Type, u.Step, u.CreatedAt)
+		}
+		if out, _ := event.Marshal(u); string(out) != stored {
+			t.Errorf("%s: Marshal = %s, want the stored %s", what, out, stored)
+		}
+	}
+	events, err := s.GetEvents(ctx, runID, "s1", db.EventFilter{})
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	check("GetEvents", &events[1])
+	tail, err := s.GetTailEvent(ctx, runID, "s1")
+	if err != nil || tail == nil {
+		t.Fatalf("GetTailEvent = %v, %v", tail, err)
+	}
+	check("GetTailEvent", tail)
+	found, err := s.SearchEvents(ctx, runID, "flux", db.SearchOpts{})
+	if err != nil || len(found) != 1 {
+		t.Fatalf("SearchEvents = %d results, %v; want 1", len(found), err)
+	}
+	check("SearchEvents", &found[0])
+}
+
 func TestAdvanceStepAndCurrentContext(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -1418,7 +1481,7 @@ func TestMigrateDropsLegacyUserColumn(t *testing.T) {
 	if _, err := raw.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrate(raw); err != nil {
+	if err := migrate(t.Context(), raw); err != nil {
 		t.Fatalf("migrate on legacy DB: %v", err)
 	}
 

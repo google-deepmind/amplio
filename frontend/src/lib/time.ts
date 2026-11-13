@@ -14,17 +14,93 @@
  * limitations under the License.
  */
 
-// Local-timezone ISO-ish absolute format (YYYY-MM-DD HH:MM:SS). Used in
-// metadata cards and tooltips where users want a sortable, unambiguous
-// timestamp without locale guesswork. Date.toISOString() returns UTC so
-// we hand-assemble from the local components.
+import { serverSettings } from './serverSettings.svelte';
+
+// Absolute times render in the server's time zone, the one the agents see
+// (serverSettings.displayZone; the browser's until it is known). Formatters are
+// cached: chat logs format hundreds of timestamps.
+const formatters = new Map<string, Intl.DateTimeFormat>();
+function formatter(locale: string | undefined, opts: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+	const timeZone = serverSettings.displayZone;
+	const key = JSON.stringify([locale, timeZone, opts]);
+	let f = formatters.get(key);
+	if (!f) {
+		f = new Intl.DateTimeFormat(locale, { ...opts, timeZone });
+		formatters.set(key, f);
+	}
+	return f;
+}
+
+const NUMERIC: Intl.DateTimeFormatOptions = {
+	year: 'numeric',
+	month: '2-digit',
+	day: '2-digit',
+	hour: '2-digit',
+	minute: '2-digit',
+	second: '2-digit',
+	hourCycle: 'h23'
+};
+
+// numericParts are d's date and time fields (and with zoneName, the zone's
+// short name) in the server's zone.
+function numericParts(d: Date, zoneName = false): Record<string, string> {
+	const f = formatter('en-US', zoneName ? { ...NUMERIC, timeZoneName: 'short' } : NUMERIC);
+	const out: Record<string, string> = {};
+	for (const p of f.formatToParts(d)) out[p.type] = p.value;
+	return out;
+}
+
+function toDate(t: string | number): Date | null {
+	const d = new Date(t);
+	return isNaN(d.getTime()) ? null : d;
+}
+
+// ISO-ish absolute format (YYYY-MM-DD HH:MM:SS). Used in metadata cards and
+// tooltips where users want a sortable, unambiguous timestamp without locale
+// guesswork.
 export function formatLocalIso(iso: string): string {
-	const d = new Date(iso);
-	if (isNaN(d.getTime())) return '';
-	const pad = (n: number) => String(n).padStart(2, '0');
-	const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-	const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-	return `${date} ${time}`;
+	const d = toDate(iso);
+	if (!d) return '';
+	const p = numericParts(d);
+	return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+}
+
+// The same with the zone's short name, e.g. "2026-06-05 22:24:44 PDT".
+export function formatTimestamp(t: string | number): string {
+	const d = toDate(t);
+	if (!d) return '';
+	const p = numericParts(d, true);
+	const tz = p.timeZoneName ? ' ' + p.timeZoneName : '';
+	return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}${tz}`;
+}
+
+// To the minute (YYYY-MM-DD HH:MM).
+export function formatMinute(iso: string): string {
+	const d = toDate(iso);
+	if (!d) return '';
+	const p = numericParts(d);
+	return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+}
+
+// The browser's locale format, as Date.toLocaleString() and
+// toLocaleDateString() write it.
+export function formatLocale(t: string | number): string {
+	const d = toDate(t);
+	if (!d) return '';
+	return formatter(undefined, {
+		year: 'numeric',
+		month: 'numeric',
+		day: 'numeric',
+		hour: 'numeric',
+		minute: 'numeric',
+		second: 'numeric'
+	}).format(d);
+}
+
+export function formatLocaleDate(t: string | number): string {
+	const d = toDate(t);
+	if (!d) return '';
+	return formatter(undefined, { year: 'numeric', month: 'numeric', day: 'numeric' }).format(d);
 }
 
 // Compact relative time for list rows ("just now", "3m", "5h", "2d", then a
@@ -41,7 +117,7 @@ export function timeAgo(iso: string, compact = false): string {
 	if (h < 24) return `${h}h`;
 	const d = Math.floor(h / 24);
 	if (d < 7) return `${d}d`;
-	if (!compact) return new Date(t).toLocaleDateString();
+	if (!compact) return formatLocaleDate(t);
 	if (d < 30) return `${Math.floor(d / 7)}w`;
 	if (d < 365) return `${Math.floor(d / 30)}mo`;
 	return `${Math.floor(d / 365)}y`;

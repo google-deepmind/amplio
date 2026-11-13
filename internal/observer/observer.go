@@ -282,10 +282,22 @@ func (o *Observer) warn(ctx context.Context, msg string, key sessionKey, step in
 
 func eventsCharCount(events []event.Event) int {
 	n := 0
-	for _, ev := range events {
+	for _, ev := range knownEvents(events) {
 		n += len(ev.ToText())
 	}
 	return n
+}
+
+// knownEvents drops UnknownEvent placeholders (a newer binary's events), which
+// summaries neither show nor count.
+func knownEvents(events []event.Event) []event.Event {
+	out := make([]event.Event, 0, len(events))
+	for _, ev := range events {
+		if !event.IsUnknown(ev) {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func stepSummaryObsID(sessionID string, step int) string {

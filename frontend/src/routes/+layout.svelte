@@ -21,6 +21,8 @@
 	import { auth } from '$lib/auth.svelte';
 	import { api } from '$lib/api';
 	import { sysstat } from '$lib/sysstat.svelte';
+	import { serverSettings } from '$lib/serverSettings.svelte';
+	import { serverHealth } from '$lib/serverHealth.svelte';
 	import { updates } from '$lib/updates.svelte';
 	import { runsStore } from '$lib/runsStore.svelte';
 	import { setFavicon } from '$lib/favicon';
@@ -45,6 +47,13 @@
 		const noop = () => {};
 		document.addEventListener('touchstart', noop, { passive: true });
 		return () => document.removeEventListener('touchstart', noop);
+	});
+
+	// The server's settings (the zone timestamps render in): loaded at mount,
+	// and, if that failed, retried with backoff and as soon as the server is
+	// reachable again.
+	$effect(() => {
+		if (serverHealth.state === 'ok') untrack(() => void serverSettings.load());
 	});
 
 	// The top-banner counters come from the run counts and the all-runs stream,

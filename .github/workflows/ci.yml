@@ -1,0 +1,87 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Tests for every pull request and every push to main: the same checks the
+# nightly gates its release on, on the same kind of runner, so a test that
+# only fails on CI's machines (a timing window, a different system setup)
+# fails before merging rather than in the next nightly.
+name: ci
+
+on:
+  pull_request:   # every PR, whatever its base (stacked PRs included)
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same PR or branch makes an older run moot.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Same discriminator as the nightly: depot.code.corp.goog has only
+    # self-hosted runners, github.com has `ubuntu-latest`.
+    runs-on: ${{ github.server_url == 'https://depot.code.corp.goog' && 'self-hosted' || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend unit tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Frontend type check
+        working-directory: frontend
+        run: npm run check
+
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Embedding table
+        # So the table-dependent parity tests run instead of skipping.
+        run: make embed-table
+
+      # The make targets apply the edition's build tags (the internal tag in
+      # the internal repo, none in the OSS mirror), so this file is the same
+      # in both.
+      - name: Go vet
+        run: make vet
+
+      - name: Go tests
+        run: make test-race
+
+      - name: Lint
+        run: make lint

@@ -707,6 +707,7 @@ func (m *RunManager) streamAtRest(ctx context.Context, runID, sessionID string) 
 	if err != nil {
 		return false, err
 	}
+	events = db.KnownEvents(events)
 	if len(events) == 0 {
 		return false, nil
 	}

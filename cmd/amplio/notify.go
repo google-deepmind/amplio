@@ -142,14 +142,16 @@ func executeNotify(ctx context.Context, msgArg, session, from string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	url := fmt.Sprintf("%s/api/runs/%s/sessions/%s/notify", base, runID, sid)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	// G704 (below, twice): the URL is the local server's own, which it wrote to
+	// server.json in the data dir.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body)) //nolint:gosec // G704
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+info.Token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704
 	if err != nil {
 		return unreachErr(fmt.Sprintf("contact server at %s: %v", base, err))
 	}

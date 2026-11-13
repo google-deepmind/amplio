@@ -22,7 +22,7 @@
 	import { api, errorText } from '$lib/api';
 	import { renderMarkdown } from '$lib/markdown';
 	import { parseCitation, stepHref } from '$lib/citations';
-	import { formatLocalIso, formatElapsed } from '$lib/time';
+	import { formatLocalIso, formatElapsed, formatLocale } from '$lib/time';
 	import { pageTitle } from '$lib/title';
 	import type { RunReport } from '$lib/types';
 	import { gradeSpecByRank } from '$lib/components/GradePicker.svelte';
@@ -469,7 +469,7 @@
 												onclick={(e) => pickIteration(r, e)}
 											>
 												<span class="iter-v">v{r.version}</span>
-												<span class="iter-when">{new Date(r.created_at).toLocaleString()}</span>
+												<span class="iter-when">{formatLocale(r.created_at)}</span>
 												{#if gs}
 													<span class="iter-grade" style="color:{gs.color}" title="Critic grade: {gs.label}">
 														<gs.icon size={16} weight="duotone" />
@@ -489,7 +489,7 @@
 									type="button"
 									class="tab"
 									class:on={displayed?.version === r.version}
-									title="Iteration {r.version} — {new Date(r.created_at).toLocaleString()}"
+									title="Iteration {r.version} — {formatLocale(r.created_at)}"
 									onclick={() => selectIteration(r)}
 								>
 									v{r.version}{r === latest ? ' · latest' : ''}
@@ -565,7 +565,7 @@
 				{@const gs = gradeSpecByRank(displayed.grade)}
 				<div class="report">
 					<p class="dim ver">
-						iteration {displayed.version} · {new Date(displayed.created_at).toLocaleString()}
+						iteration {displayed.version} · {formatLocale(displayed.created_at)}
 						{#if gs}
 							<span class="report-grade" style="color:{gs.color}" title="Critic grade: {gs.label}">
 								· <gs.icon size={15} weight="duotone" />

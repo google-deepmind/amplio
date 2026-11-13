@@ -111,18 +111,19 @@ func Open(path string) (db.Store, error) {
 	if path == memoryPath {
 		sqlDB.SetMaxOpenConns(1)
 	}
+	ctx := context.Background()
 	// WAL mode for concurrent reads during writes.
 	for _, pragma := range []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA foreign_keys=ON",
 	} {
-		if _, err := sqlDB.Exec(pragma); err != nil {
+		if _, err := sqlDB.ExecContext(ctx, pragma); err != nil {
 			sqlDB.Close()
 			return nil, fmt.Errorf("sqlite pragma %q: %w", pragma, err)
 		}
 	}
-	if err := initSchema(sqlDB, path); err != nil {
+	if err := initSchema(ctx, sqlDB, path); err != nil {
 		sqlDB.Close()
 		return nil, err
 	}
@@ -137,7 +138,7 @@ func Open(path string) (db.Store, error) {
 
 // migrate applies additive schema changes that CREATE TABLE IF NOT EXISTS can't
 // make to a pre-existing table. Idempotent: safe to run on every Open.
-func migrate(sqlDB *sql.DB) error {
+func migrate(ctx context.Context, sqlDB *sql.DB) error {
 	// Add the observer step cursors to older Session tables. SQLite lacks ADD
 	// COLUMN IF NOT EXISTS, so tolerate the duplicate-column error on fresh DBs
 	// that already have them via CREATE TABLE.
@@ -175,14 +176,14 @@ func migrate(sqlDB *sql.DB) error {
 		`ALTER TABLE SkillEmbedding ADD COLUMN path TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE SkillEmbedding ADD COLUMN body TEXT NOT NULL DEFAULT ''`,
 	} {
-		if _, err := sqlDB.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		if _, err := sqlDB.ExecContext(ctx, stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("sqlite migrate: %w", err)
 		}
 	}
 	// Backfill Lesson.updated_at for rows that predate the column (the lesson
 	// scan reads it as a non-null string, so a bare NULL would break listing).
 	// Idempotent: a no-op once every row has a value.
-	if _, err := sqlDB.Exec(`UPDATE Lesson SET updated_at = created_at WHERE updated_at IS NULL`); err != nil {
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE Lesson SET updated_at = created_at WHERE updated_at IS NULL`); err != nil {
 		return fmt.Errorf("sqlite migrate: backfill lesson updated_at: %w", err)
 	}
 	// Backfill Run.last_seen_at for rows that predate the column. The semantics
@@ -196,7 +197,7 @@ func migrate(sqlDB *sql.DB) error {
 	// Deliberately now(), not created_at — created_at would mark every finished old
 	// run as updated at once (the flood we want to avoid). Idempotent: only NULL/
 	// empty rows are touched, and stamping makes them non-NULL.
-	if _, err := sqlDB.Exec(
+	if _, err := sqlDB.ExecContext(ctx,
 		`UPDATE Run SET last_seen_at = ? WHERE last_seen_at IS NULL OR last_seen_at = ''`,
 		formatTime(time.Now()),
 	); err != nil {
@@ -208,7 +209,7 @@ func migrate(sqlDB *sql.DB) error {
 	// had the column, so DROP fails with "no such column" — which we ignore.
 	// (DROP COLUMN needs SQLite >= 3.35; the bundled modernc.org/sqlite is far
 	// newer.)
-	if _, err := sqlDB.Exec(`ALTER TABLE Run DROP COLUMN user`); err != nil && !strings.Contains(err.Error(), "no such column") {
+	if _, err := sqlDB.ExecContext(ctx, `ALTER TABLE Run DROP COLUMN user`); err != nil && !strings.Contains(err.Error(), "no such column") {
 		return fmt.Errorf("sqlite migrate: drop Run.user: %w", err)
 	}
 	// Partial indexes over the dirty sets; created after the columns exist. Each
@@ -221,7 +222,7 @@ func migrate(sqlDB *sql.DB) error {
 		// Serves the default dashboard listing (non-archived, newest first).
 		`CREATE INDEX IF NOT EXISTS idx_run_active ON Run(created_at DESC) WHERE archived = 0`,
 	} {
-		if _, err := sqlDB.Exec(stmt); err != nil {
+		if _, err := sqlDB.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("sqlite migrate index: %w", err)
 		}
 	}
@@ -501,7 +502,7 @@ func (s *sqliteStore) ListRuns(ctx context.Context, opts db.ListRunsOpts) ([]db.
 		args = append(args, bt, bt, opts.BeforeRunID)
 	}
 	if len(wheres) > 0 {
-		query += " WHERE " + strings.Join(wheres, " AND ")
+		query += " WHERE " + strings.Join(wheres, " AND ") //nolint:gosec // G202: static fragments; values are bound params
 	}
 	// Newest-first, with run_id as a stable tiebreaker so the ordering is TOTAL
 	// (required for the keyset cursor above to be gap/dup-free). Starred runs are
@@ -1444,6 +1445,8 @@ func columnFields(evt event.Event) *event.ColumnFields {
 	case *event.ChildResultEvent:
 		return &e.ColumnFields
 	case *event.RecoverEvent:
+		return &e.ColumnFields
+	case *event.UnknownEvent:
 		return &e.ColumnFields
 	}
 	return nil

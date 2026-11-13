@@ -42,6 +42,7 @@ import (
 	"amplio/internal/lessons"
 	"amplio/internal/llm"
 	"amplio/internal/runtime"
+	"amplio/internal/util"
 	"amplio/internal/workspace/plain"
 
 	// Register agent types so StartRun can resolve them.
@@ -147,6 +148,7 @@ func TestServer_Auth(t *testing.T) {
 		"/api/runs/" + testRun + "/report",
 		"/api/about",
 		"/api/models",
+		"/api/settings",
 		"/api/sysstat",
 		"/api/auth",
 	} {
@@ -2226,5 +2228,69 @@ func TestServer_ChatProjection_HarnessNudges(t *testing.T) {
 	want := []string{"operator/user", "environment/amplio", "environment/amplio"}
 	if strings.Join(kinds, " ") != strings.Join(want, " ") {
 		t.Errorf("bubbles = %v, want %v", kinds, want)
+	}
+}
+
+// A session holding a newer binary's event still renders: the chat leaves the
+// event out, and the trajectory's event list carries it as stored.
+func TestServer_UnknownEventSkippedInChatKeptInEvents(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, db.SessionRecord{RunID: testRun, SessionID: "worker", AgentType: "standard_agent", Status: db.SessionOngoing}); err != nil {
+		t.Fatal(err)
+	}
+	stored := `{"type":"verify","action":"set","criteria":"tests pass"}`
+	for _, e := range []event.Event{
+		&event.UserEvent{Content: "do X"},
+		&event.UnknownEvent{Type: "verify", Raw: []byte(stored)},
+		&event.AssistantEvent{Content: "done"},
+	} {
+		if _, err := store.AppendEvent(ctx, testRun, "worker", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	code, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/worker/chat?token=secret", "")
+	var feed chatFeed
+	if err := json.Unmarshal(body, &feed); err != nil || code != http.StatusOK {
+		t.Fatalf("chat: %d %s (%v)", code, body, err)
+	}
+	var kinds []string
+	for _, m := range feed.Messages {
+		kinds = append(kinds, m.Kind)
+	}
+	if got := strings.Join(kinds, " "); got != "operator chatbot" {
+		t.Errorf("chat bubbles = %q, want \"operator chatbot\"", got)
+	}
+
+	code, body = doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/worker/events?token=secret", "")
+	var evs []eventDTO
+	if err := json.Unmarshal(body, &evs); err != nil || code != http.StatusOK {
+		t.Fatalf("events: %d %s (%v)", code, body, err)
+	}
+	if len(evs) != 3 || string(evs[1].Event) != stored || !evs[1].Unknown || evs[0].Unknown || evs[2].Unknown {
+		t.Errorf("events = %s, want 3 with the stored verify event second, marked unknown", body)
+	}
+}
+
+// The UI renders timestamps in the zone the server reports.
+func TestServer_SettingsReportsTimezone(t *testing.T) {
+	t.Parallel()
+	srv, _, _ := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	code, body := doReq(t, http.MethodGet, ts.URL+"/api/settings", "")
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil || code != http.StatusOK {
+		t.Fatalf("GET /api/settings: %d %s (%v)", code, body, err)
+	}
+	if zone, ok := got["timezone"]; !ok || zone != util.LocalZoneName() {
+		t.Errorf("timezone = %v (present %v), want %q", zone, ok, util.LocalZoneName())
 	}
 }

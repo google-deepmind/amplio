@@ -304,6 +304,7 @@ func FormatOpenPhase(ctx context.Context, store db.Store, runID, sessionID strin
 	if err != nil {
 		return "", 0, err
 	}
+	events = db.KnownEvents(events) // no step headers for a newer binary's events
 
 	// floor: everything at or below the latest compaction is subsumed by its
 	// summary, so the open phase never reaches below it.
@@ -548,7 +549,7 @@ func SessionSteps(deps *Deps) *tool.Tool {
 			}
 			fmt.Fprintln(&b, ":")
 
-			for _, e := range events {
+			for _, e := range db.KnownEvents(events) {
 				content := e.Event.ToText()
 				if len(content) > 200 {
 					content = content[:200] + "..."
@@ -611,7 +612,7 @@ func SessionPeek(deps *Deps) *tool.Tool {
 
 			var b strings.Builder
 			fmt.Fprintf(&b, "Recent events in %s (steps %d-%d):\n", params.SessionID, startStep, sess.CurrentStep)
-			for _, e := range events {
+			for _, e := range db.KnownEvents(events) {
 				content := e.Event.ToText()
 				if len(content) > 500 {
 					content = content[:500] + "..."

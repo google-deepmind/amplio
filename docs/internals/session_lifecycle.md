@@ -76,13 +76,26 @@ should revive a *dormant* session:
 
 | Class | Revives a dormant session? | Examples |
 |---|---|---|
-| **Notice** | no — persists; only a live `awaiting` session reacts | `ChildResultEvent` verdict `crashed`/`cancelled`; self/system writes (Assistant, ToolResult, Compaction, `SystemEvent` markers) |
+| **Notice** | no — persists; only a live `awaiting` session reacts | `ChildResultEvent` verdict `crashed`/`cancelled`; self/system writes (Assistant, ToolResult, Compaction, `SystemEvent` markers); `UnknownEvent` (below) |
 | **Input** | yes — restarts any non-`ongoing` session (but see the environment-notification exception below) | `UserEvent` (operator/user input); `MessageEvent` — agent (`send_message`) **or** environment (`$AMPLIO_NOTIFY`); `ChildResultEvent` verdict `concluded`; `RecoverEvent` |
 
 **Every event is written to the session's stream regardless of the target's
 state** — the class only decides whether it *revives* a dormant session. A
 `Notice` to a terminal session just persists (seen only if the session is later
 restarted).
+
+**Events from a newer binary.** After a downgrade (a rollback, or an older
+pinned binary on the same data dir), a session can hold an event type this
+binary doesn't know. The store reads it as an `UnknownEvent` placeholder rather
+than failing the read. It stays in the stream, and the trajectory shows it as
+stored, labelled as a newer amplio's, but nothing else uses it: not the model's
+context, the chat, the inspect and search tools, the summaries, or the checks
+on a stream's tail (a final answer followed by one is still at rest). It is a
+`Notice` and wakes nothing. This covers new event *types*. A newer binary can
+also add a value or a field to a type this one knows, which is up to that
+type's decoder: unknown fields are dropped on read, and a type whose behaviour
+turns on a value (an action, say) should read a value it doesn't know as the
+placeholder too, rather than misread it.
 
 **Environment notifications (`$AMPLIO_NOTIFY`) are `Input`-class, but do NOT
 revive a *terminal* session.** They revive a *parked* recipient (`idle`/

@@ -12,21 +12,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# golangci-lint v2. Run it with `make lint`: the linter is a tool of its own
+# module, tools/golangci-lint.mod (which says why).
+version: "2"
+
 linters:
+  # The v2 default set (errcheck, govet, ineffassign, staticcheck, unused) is
+  # on; listed here are the ones it has, plus the extras.
   enable:
     - exhaustive    # missing cases in type switches (critical for Event types)
     - errcheck      # unchecked error returns
     - govet         # suspicious constructs, mutex copy detection
-    - staticcheck   # advanced analysis (deprecated APIs, impossible conditions)
+    - staticcheck   # advanced analysis (deprecated APIs, impossible conditions); v2 folds gosimple and stylecheck into it
     - gosec         # security issues (SQL injection, hardcoded creds)
     - ineffassign   # dead assignments from refactoring
     - unparam       # unused function parameters
     - bodyclose     # unclosed HTTP response bodies (LLM/API clients)
-    - noctx         # HTTP calls without context.Context
+    - noctx         # calls without a context.Context (HTTP, database/sql, exec, net.Listen)
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: false
+  # v1's default exclusions, which v2 makes opt-in: without them v2 reports
+  # what v1 never did (e.g. unchecked errors from Close and fmt.Fprint*).
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # A test's database/sql, exec.Command, net.Listen and httptest.NewRequest
+      # calls end with the test; a context on each would be noise.
+      - path: _test\.go
+        linters:
+          - noctx
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
-linters-settings:
-  exhaustive:
-    default-signifies-exhaustive: false
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
-run:
-  timeout: 5m

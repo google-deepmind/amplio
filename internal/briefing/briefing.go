@@ -130,7 +130,9 @@ func collect(root string) ([]Briefing, error) {
 		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(path), ".md") {
 			return nil //nolint:nilerr // one unreadable entry must not stop the scan
 		}
-		raw, err := os.ReadFile(path)
+		// G122: the briefings dir is the operator's own, and a symlink they put
+		// there is meant to be followed, so no os.Root.
+		raw, err := os.ReadFile(path) //nolint:gosec // G122
 		if err != nil {
 			slog.Warn("briefings: unreadable file", "path", path, "error", err)
 			return nil

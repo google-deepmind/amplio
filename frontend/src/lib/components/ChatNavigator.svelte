@@ -34,6 +34,7 @@
 	import type { ChatBubble } from '$lib/types';
 	import { SparkleIcon, GraphIcon, ChatCircleIcon, BellIcon } from 'phosphor-svelte';
 	import { viewport } from '$lib/viewport.svelte';
+	import { formatMinute } from '$lib/time';
 
 	let {
 		messages,
@@ -513,12 +514,6 @@
 	function firstLine(s: string, max = 480) {
 		return (s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 	}
-	function timeLabel(iso: string) {
-		const d = new Date(iso);
-		if (Number.isNaN(+d)) return '';
-		const p = (n: number) => String(n).padStart(2, '0');
-		return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-	}
 </script>
 
 {#if segments.length > 1}
@@ -601,7 +596,7 @@
 		<div class="sc-hdr">
 			{[
 				`${cardIdx! + 1} / ${segments.length}`,
-				timeLabel(card.at).slice(5),
+				formatMinute(card.at).slice(5),
 				card.steps ? `${card.steps} step${card.steps > 1 ? 's' : ''}` : ''
 			]
 				.filter(Boolean)
@@ -624,7 +619,7 @@
 		onmouseleave={close}
 	>
 		<div class="hdr">
-			<span>{timeLabel(shown.at)}</span>
+			<span>{formatMinute(shown.at)}</span>
 			<span>
 				{#if shown.steps}{shown.steps} step{shown.steps > 1 ? 's' : ''}{/if}
 				{#if shown.steps && shown.tools} · {/if}

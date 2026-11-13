@@ -101,6 +101,7 @@ func buildStepUserPrompt(sessionID string, step int, events []event.Event) strin
 // renderStep renders a step's events under a header supplying the temporal
 // context that Event.ToText() deliberately omits.
 func renderStep(events []event.Event, step int, banner string) string {
+	events = knownEvents(events)
 	if len(events) == 0 {
 		return fmt.Sprintf("=== STEP %d (%s) ===\n(no events)", step, banner)
 	}
