@@ -161,6 +161,22 @@ func waitForIdle(t *testing.T, store db.Store, runID, sessionID string) {
 	t.Fatalf("session %s did not reach idle (got %q)", sessionID, got)
 }
 
+// waitReparked waits until an interactive session has made its calls-th LLM
+// call and parked idle again. The count is read before the status: the loop
+// marks the session ongoing before it calls the model, so idle read after the
+// count moved is the re-park. Read the other way round, the idle the turn
+// started from passes for it while the turn is still running.
+func waitReparked(t *testing.T, store db.Store, runID, sessionID string, mock *llm.MockProvider, calls int) {
+	t.Helper()
+	waitFor(t, "the LLM call and the re-park after it", func() bool {
+		if mock.CallCount() < calls {
+			return false
+		}
+		s, _ := store.GetSession(context.Background(), runID, sessionID)
+		return s != nil && s.Status == db.SessionIdle
+	})
+}
+
 // An autonomous agent that finishes a task ends a bare no-tool turn → concluded.
 func TestEventLoop_WorkThenConclude(t *testing.T) {
 	store, runID, registry := testSetup(t)
@@ -743,10 +759,7 @@ func TestEventLoop_ParkThenWake(t *testing.T) {
 	// Wait for the wake-run-park cycle rather than sleeping a fixed 500ms. Back
 	// at idle the loop is parked, so a further LLM call would need a new input
 	// event — the exact-count assertion below still catches a spurious one.
-	waitFor(t, "follow-up turn to finish and re-park", func() bool {
-		s, _ := store.GetSession(ctx, runID, "main-agent")
-		return mock.CallCount() >= 2 && s != nil && s.Status == db.SessionIdle
-	})
+	waitReparked(t, store, runID, "main-agent", mock, 2)
 	sess, _ := store.GetSession(ctx, runID, "main-agent")
 	if sess.Status != db.SessionIdle {
 		t.Errorf("after follow-up: status %q, want idle", sess.Status)
@@ -853,10 +866,7 @@ func TestEventLoop_ChatbotNoTask(t *testing.T) {
 
 	// Wait for the reply turn instead of sleeping a fixed 500ms: the session is
 	// idle both before and after, so the call count is what marks progress.
-	waitFor(t, "reply to the first user message", func() bool {
-		s, _ := store.GetSession(ctx, runID, "chatty-bot")
-		return mock.CallCount() > callsBefore && s != nil && s.Status == db.SessionIdle
-	})
+	waitReparked(t, store, runID, "chatty-bot", mock, callsBefore+1)
 	sess, _ := store.GetSession(ctx, runID, "chatty-bot")
 	if sess.Status != db.SessionIdle {
 		t.Errorf("status: %q, want idle", sess.Status)

@@ -68,12 +68,47 @@ func callFilesIn(t *testing.T, dir string) []string {
 
 var outPathRe = regexp.MustCompile(`Its output goes to (\S+\.out)`)
 
+// newGate makes a FIFO for a background job to wait on with `read -r _ < gate`:
+// the job is then still running when the call's post-call scan looks, however
+// late that is, and goes on when the test calls openGate (or when it ends).
+func newGate(t *testing.T) string {
+	t.Helper()
+	gate := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseGate(gate) })
+	return gate
+}
+
+// releaseGate lets a job blocked opening gate for reading go on (it reads EOF),
+// and reports whether one was there.
+func releaseGate(gate string) bool {
+	f, err := os.OpenFile(gate, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return false // ENXIO: no reader yet
+	}
+	_ = f.Close()
+	return true
+}
+
+// openGate releases the job waiting on gate, once it has got there.
+func openGate(t *testing.T, gate string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !releaseGate(gate); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the background job never opened its gate")
+		}
+	}
+}
+
 // A background job that wasn't redirected keeps writing to the call's stdout
 // file after the call returns: the file is kept, under the run's artifact dir,
 // and the result says so, with the handle to check or stop the job.
 func TestBash_BackgroundOutputIsKept(t *testing.T) {
 	env, bg := runEnv(t)
-	out := run(t, env, `( sleep 1; echo late ) & echo started`)
+	gate := newGate(t)
+	out := run(t, env, `( read -r _ < `+gate+`; echo late ) & echo started`)
 	for _, want := range []string{"started", "BACKGROUND:\nStill running after this call returned:", "- process group ", "kill -0 -- -", "kill -- -"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("result lacks %q:\n%s", want, out)
@@ -83,6 +118,7 @@ func TestBash_BackgroundOutputIsKept(t *testing.T) {
 	if m == nil || !strings.HasPrefix(m[1], bg+string(os.PathSeparator)) {
 		t.Fatalf("result names no kept output file under %s:\n%s", bg, out)
 	}
+	openGate(t, gate)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if b, _ := os.ReadFile(m[1]); strings.Contains(string(b), "late") {
@@ -172,7 +208,7 @@ func TestBash_SymlinkedDataDirKeepsOutput(t *testing.T) {
 	}
 	config.SetDataDir(link)
 	t.Cleanup(func() { config.SetDataDir("") })
-	out := run(t, agentEnv(fmt.Sprintf("tstsym%d", os.Getpid()), "swift-fox"), `( sleep 1; echo late ) & echo started`)
+	out := run(t, agentEnv(fmt.Sprintf("tstsym%d", os.Getpid()), "swift-fox"), `( read -r _ < `+newGate(t)+`; echo late ) & echo started`)
 	if !strings.Contains(out, "Its output goes to") {
 		t.Errorf("output of a job writing through a symlinked data dir was not kept:\n%s", out)
 	}

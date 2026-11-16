@@ -489,7 +489,7 @@ func startObserver(ctx context.Context, store db.Store, fast, hq llm.Provider, f
 // exits, nothing starts the run's sessions again (a later resume does).
 func waitForRun(ctx context.Context, mgr *runtime.RunManager, runID string) {
 	reg := mgr.RunRegistry()
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(runPoll)
 	defer ticker.Stop()
 	// Sessions register synchronously as they are started or revived, so a
 	// run with none registered is already at rest.
@@ -502,10 +502,22 @@ func waitForRun(ctx context.Context, mgr *runtime.RunManager, runID string) {
 			// harness) is stored for a later resume, but must not revive the
 			// root here.
 			reg.CancelAll()
-			time.Sleep(time.Second)
+			// The cancelled sessions record how they stopped as they exit;
+			// give them that long, up to stopGrace.
+			for deadline := time.Now().Add(stopGrace); reg.IsRunActive(runID) && time.Now().Before(deadline); {
+				time.Sleep(runPoll)
+			}
 			return
 		case <-ticker.C:
 		}
 	}
 	slog.Info("run at rest", "run_id", runID)
 }
+
+// runPoll is how often waitForRun checks the run's sessions: a cheap
+// in-memory check, and the delay between a run coming to rest and the harness
+// seeing `run at rest`.
+const runPoll = 20 * time.Millisecond
+
+// stopGrace bounds the wait for interrupted sessions to exit (a var for tests).
+var stopGrace = time.Second

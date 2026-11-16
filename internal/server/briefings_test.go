@@ -48,21 +48,33 @@ func TestListBriefings(t *testing.T) {
 func TestStartRun_Briefings(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name string
-		body string
-		want []string
+		name      string
+		briefings string // the request's "briefings" member; "" leaves it out
+		want      []string
 	}{
-		{"absent → none", `{"task":"t","workspace":"."}`, nil},
-		{"empty → none", `{"task":"t","workspace":".","briefings":[]}`, nil},
-		{"explicit", `{"task":"t","workspace":".","briefings":["second-opinion"]}`, []string{"second-opinion"}},
-		{"unknown dropped", `{"task":"t","workspace":".","briefings":["second-opinion","nope"]}`, []string{"second-opinion"}},
+		{"absent → none", "", nil},
+		{"empty → none", `[]`, nil},
+		{"explicit", `["second-opinion"]`, []string{"second-opinion"}},
+		{"unknown dropped", `["second-opinion","nope"]`, []string{"second-opinion"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			// A temp workspace: "." would be this checkout, which the run's
+			// workspace resolution inspects with jj and git. Made before the
+			// server, so it is removed after the server's cleanup cancels the run.
+			ws := t.TempDir()
 			srv, _, _ := newTestServer(t)
 			h := srv.Handler()
+			body := map[string]any{"task": "t", "workspace": ws}
+			if tc.briefings != "" {
+				body["briefings"] = json.RawMessage(tc.briefings)
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewBufferString(tc.body))
+			req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
 			req.Header.Set("Authorization", "Bearer secret")
 			h.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK && rec.Code != http.StatusCreated && rec.Code != http.StatusAccepted {

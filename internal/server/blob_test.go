@@ -30,6 +30,7 @@ import (
 // Not parallel: config.SetDataDir pins the data dir for the whole process.
 func TestServer_Blob(t *testing.T) {
 	config.SetDataDir(t.TempDir())
+	t.Cleanup(func() { config.SetDataDir("") })
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()

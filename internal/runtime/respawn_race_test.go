@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,7 +47,6 @@ type parkAgent struct {
 func (a *parkAgent) SessionID() string { return a.sid }
 
 func (a *parkAgent) Run(ctx context.Context) error {
-	atomic.AddInt32(a.runs, 1)
 	// Mirror the real eventloop's registration model: the launcher already claimed
 	// the slot (RegisterAndContext) and handed us the handle via Config; ctx is the
 	// slot's cancelable context and Unregister is the launcher's (release's) job.
@@ -62,6 +62,11 @@ func (a *parkAgent) Run(ctx context.Context) error {
 		}
 		defer a.reg.Unregister(a.sid)
 	}
+	// Snapshot the wake counter on entry, as the real loop does before it checks
+	// for pending input: a notify that lands in the window below must still
+	// wake the park, not be missed.
+	before := h.Counter()
+	atomic.AddInt32(a.runs, 1)
 	// Simulate the slow window between the launcher's slot claim and this goroutine
 	// actually parking: wait until the test opens the gate (or ctx is cancelled).
 	select {
@@ -70,12 +75,16 @@ func (a *parkAgent) Run(ctx context.Context) error {
 		return nil
 	}
 	// Park like await_event: block on the waiter until notified or cancelled.
-	before := h.Counter()
-	if _, werr := h.WaitAfter(ctx, before, 2*time.Second); werr == nil {
+	// WaitAfter returns the unchanged counter (and no error) on a timeout, so
+	// only an advanced counter is a wake.
+	if got, werr := h.WaitAfter(ctx, before, parkTimeout); werr == nil && got != before {
 		a.awakened <- a.sid
 	}
 	return nil
 }
+
+// parkTimeout bounds a park; a woken session returns long before it.
+const parkTimeout = 10 * time.Second
 
 // TestRespawnDoesNotRivalLiveParkedSession is the Mechanism-A regression test:
 // a session with a LIVE goroutine parked in await must be WOKEN by an
@@ -85,7 +94,9 @@ func TestRespawnDoesNotRivalLiveParkedSession(t *testing.T) {
 	gate := make(chan struct{})
 	awakened := make(chan string, 8)
 
-	agentType := "park_race_agent"
+	// Agent types register process-wide, once each: a fresh one per run of the
+	// test (-count).
+	agentType := fmt.Sprintf("park_race_agent_%d", time.Now().UnixNano())
 	agent.Register(agentType, func(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		return &parkAgent{
 			sid:      cfg.SessionID,
@@ -153,7 +164,7 @@ func TestRespawnDoesNotRivalLiveParkedSession(t *testing.T) {
 		if got != sid {
 			t.Fatalf("awakened %q, want %q", got, sid)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(parkTimeout):
 		t.Fatal("the live goroutine was never woken by the Input (Notify missed it)")
 	}
 }

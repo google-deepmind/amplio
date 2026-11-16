@@ -196,7 +196,7 @@ func TestStartup_EarlyExitFailsFast(t *testing.T) {
 	if !strings.Contains(err.Error(), "code 7") {
 		t.Errorf("error %q should surface the bridge exit code", err)
 	}
-	// The bridge's own stderr must be IN the error. Everything logPipe writes
+	// The bridge's own stderr must be IN the error. Everything lineLog writes
 	// goes to Debug, which the default level drops, so an error that merely
 	// points at "stderr above" points at nothing.
 	if !strings.Contains(err.Error(), "dying without binding") {
@@ -210,36 +210,46 @@ func TestStartup_EarlyExitFailsFast(t *testing.T) {
 }
 
 // After a failed start, subsequent calls within startCooldown should be gated
-// with a fast cached-error return. After the cooldown elapses, a fresh start
-// attempt is allowed (and also fails, since the binary is still broken — but
-// via a fresh attempt, not the cache).
+// with a cached error and no start attempt. After the cooldown elapses, a fresh
+// start attempt is allowed (and also fails, since the binary is still broken —
+// but via a fresh attempt, not the cache).
 func TestStartCooldown_GatesAndExpires(t *testing.T) {
 	old := startCooldown
-	startCooldown = 250 * time.Millisecond
+	// Long enough that no stall between two calls outlasts it; the test ends
+	// the cooldown by backdating the failure instead of waiting it out.
+	startCooldown = time.Minute
 	t.Cleanup(func() { startCooldown = old })
 
 	p := newProvider(t, "__DIE_STARTUP_COOLDOWN__")
 	if _, err := p.Call(context.Background(), userReq("a")); err == nil {
 		t.Fatal("expected first call to fail")
 	}
+	pr := procOf(t, p)
+	lastFailAt := func() time.Time {
+		pr.mu.Lock()
+		defer pr.mu.Unlock()
+		return pr.lastFailAt
+	}
+	failedAt := lastFailAt()
 
-	// Immediate retry: gated, fast, cached error.
-	t1 := time.Now()
+	// Immediate retry: gated, cached error, no start attempt (an attempt
+	// records its own failure time).
 	_, err := p.Call(context.Background(), userReq("b"))
-	elapsed := time.Since(t1)
 	if err == nil {
 		t.Fatal("expected gated retry to fail with cached error")
 	}
 	if !strings.Contains(err.Error(), "recently failed") {
 		t.Errorf("gated error %q should mention 'recently failed'", err)
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("gated retry took %s; should be near-instant from the cache", elapsed)
+	if !lastFailAt().Equal(failedAt) {
+		t.Error("gated retry attempted a start; it should have answered from the cache")
 	}
 
 	// After cooldown elapses: a fresh start is attempted (still fails, but the
 	// error shape is the live failure, not the cached one).
-	time.Sleep(startCooldown + 50*time.Millisecond)
+	pr.mu.Lock()
+	pr.lastFailAt = pr.lastFailAt.Add(-startCooldown)
+	pr.mu.Unlock()
 	_, err = p.Call(context.Background(), userReq("c"))
 	if err == nil {
 		t.Fatal("expected third call to fail (binary is still broken)")
@@ -250,6 +260,19 @@ func TestStartCooldown_GatesAndExpires(t *testing.T) {
 	if !strings.Contains(err.Error(), "exited during startup") {
 		t.Errorf("post-cooldown error %q should report a fresh startup failure", err)
 	}
+}
+
+// procOf returns the bridge process entry behind p.
+func procOf(t *testing.T, p *provider) *proc {
+	t.Helper()
+	key := p.tr.(*spawnTransport).key
+	defaultManager.mu.Lock()
+	defer defaultManager.mu.Unlock()
+	pr := defaultManager.procs[key]
+	if pr == nil {
+		t.Fatalf("no bridge process registered for %q", key)
+	}
+	return pr
 }
 
 func TestContextCancel(t *testing.T) {

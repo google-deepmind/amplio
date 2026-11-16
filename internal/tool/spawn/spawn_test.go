@@ -33,6 +33,7 @@ import (
 	"amplio/internal/tool"
 	"amplio/internal/workspace"
 	"amplio/internal/workspace/git"
+	"amplio/internal/workspace/vcstest"
 )
 
 type noopAgent struct{ id string }
@@ -53,6 +54,7 @@ func init() {
 
 func gitRepo(t *testing.T) string {
 	t.Helper()
+	vcstest.Hermetic(t)
 	repo := filepath.Join(t.TempDir(), "myrepo")
 	if err := os.Mkdir(repo, 0o755); err != nil {
 		t.Fatal(err)
@@ -65,8 +67,6 @@ func gitRepo(t *testing.T) string {
 		}
 	}
 	run("init")
-	run("config", "user.email", "t@example.com")
-	run("config", "user.name", "tester")
 	if err := os.WriteFile(filepath.Join(repo, "f"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -38,17 +38,19 @@ import (
 // machine, and more than that buys latency back only at rising CPU cost.
 const scanWorkers = 8
 
-// A process in the middle of execve reads as having no environ and no
-// cmdline: the kernel installs the new address space before it sets the
-// argument and environment ranges in it. The window is short on an idle
-// machine (a median of about 0.6 ms and at most 1.4 ms for /bin/sleep), but a
-// busy one can deschedule the process inside it for tens of milliseconds, and
-// a scan that lands there would miss a marked process entirely, or name it
-// "pid N". So a scan waits, with growing pauses up to execSettleTimeout, while
-// a live process reads empty in both: only a process mid-exec does. A zombie's
-// stay empty, and so do a kernel thread's (it has no user address space; a
-// scan running as root reads them), and a process with a genuinely empty
-// environment still has a cmdline, so none of those is waited on.
+// A process in the middle of execve reads as having no environ: the kernel
+// installs the new address space, then copies the arguments into it and then
+// the environment, so for a while the cmdline already reads the new command
+// while the environ is still empty (most of the exec, in fact, since the
+// environment is the longer part). The window is short on an idle machine (a
+// median of about 0.6 ms and at most 1.4 ms for /bin/sleep), but a busy one can
+// deschedule the process inside it for tens of milliseconds, and a scan that
+// lands there would miss a marked process entirely, or name it "pid N". So a
+// scan waits, with growing pauses up to execSettleTimeout, while a live
+// process is mid-exec (see midExec). A zombie's environ stays empty, and so do
+// a kernel thread's (it has no user address space; a scan running as root
+// reads them) and a process's with a genuinely empty environment; none of
+// those is waited on.
 var execSettleTimeout = 500 * time.Millisecond
 
 // execMaxPause caps one pause of that wait.
@@ -56,7 +58,14 @@ const execMaxPause = 20 * time.Millisecond
 
 // readProcFile reads a /proc file; a var so tests can stand in a process
 // caught mid-exec.
-var readProcFile = os.ReadFile
+var readProcFile = readWhole
+
+// settleClock times readSettled's wait; a var so tests that stand in /proc
+// reads can run the wait on virtual time.
+var settleClock = struct {
+	now   func() time.Time
+	sleep func(time.Duration)
+}{time.Now, time.Sleep}
 
 var clockTick = int64(100) // _SC_CLK_TCK; 100 on every Linux port Go supports
 
@@ -137,11 +146,20 @@ func Outputs(pid int) (stdout, stderr string) {
 }
 
 // envValue pulls one NUL-separated KEY=value out of a /proc environ blob.
+// bash, as it imports its environment at startup, splits each entry in place:
+// it writes a NUL over the '=' and puts the '=' back once it has the entry. A
+// scan that reads a bash starting up (a script just put in the background,
+// say) can see KEY and value as two entries, so a bare KEY takes the entry
+// after it.
 func envValue(env []byte, key string) string {
 	want := append([]byte(key), '=')
-	for _, kv := range bytes.Split(env, []byte{0}) {
+	kvs := bytes.Split(env, []byte{0})
+	for i, kv := range kvs {
 		if bytes.HasPrefix(kv, want) {
 			return string(kv[len(want):])
+		}
+		if string(kv) == key && i+1 < len(kvs) {
+			return string(kvs[i+1])
 		}
 	}
 	return ""
@@ -182,14 +200,14 @@ func readStat(dir string, p *Process, uptime float64) bool {
 // process is gone, or the file stays empty.
 func readSettled(dir, name string) []byte {
 	path := filepath.Join(dir, name)
-	deadline := time.Now().Add(execSettleTimeout)
+	deadline := settleClock.now().Add(execSettleTimeout)
 	pause := time.Millisecond
 	for {
 		b, err := readProcFile(path)
 		if err != nil {
 			return nil // gone, or not ours to read
 		}
-		if len(b) > 0 || time.Now().After(deadline) {
+		if len(b) > 0 || settleClock.now().After(deadline) {
 			return b
 		}
 		if !midExec(dir) {
@@ -199,57 +217,63 @@ func readSettled(dir, name string) []byte {
 			}
 			return b
 		}
-		time.Sleep(pause)
+		settleClock.sleep(pause)
 		pause = min(2*pause, execMaxPause)
 	}
 }
 
-// midExec reports whether a process looks caught in the middle of an exec: it
-// is alive, not a kernel thread, and both its environ and its cmdline read
-// empty.
+// midExec reports whether a process is in the middle of an exec: it is alive,
+// not a kernel thread, and its address space has no code yet. The kernel sets
+// the code range (startcode in /proc/<pid>/stat) of the new address space only
+// after it has copied both the arguments and the environment into it, so a
+// zero there, read before the environ or cmdline, means those aren't final
+// yet; once a process runs any program it is non-zero. A process whose
+// environment is genuinely empty has code, so it isn't waited on.
 func midExec(dir string) bool {
-	state, flags, ok := statOf(dir)
-	if !ok || state == 'Z' || state == 'X' || flags&pfKThread != 0 {
-		return false
-	}
-	for _, name := range []string{"environ", "cmdline"} {
-		if b, err := readProcFile(filepath.Join(dir, name)); err != nil || len(b) > 0 {
-			return false
-		}
-	}
-	return true
+	st, ok := statOf(dir)
+	return ok && st.state != 'Z' && st.state != 'X' && st.flags&pfKThread == 0 && st.startCode == 0
 }
 
 // zombie reports whether the process has exited and awaits reaping (or is
 // unreadable): its environ and cmdline are empty for good.
 func zombie(dir string) bool {
-	state, _, ok := statOf(dir)
-	return !ok || state == 'Z' || state == 'X'
+	st, ok := statOf(dir)
+	return !ok || st.state == 'Z' || st.state == 'X'
 }
 
 // pfKThread is the kernel's PF_KTHREAD task flag, set on kernel threads.
 const pfKThread = 0x00200000
 
-// statOf reads a process's state and task flags (fields 3 and 9 of
-// /proc/<pid>/stat); ok is false if the file can't be read or parsed.
-func statOf(dir string) (state byte, flags uint64, ok bool) {
+// procStat is what midExec and zombie need from /proc/<pid>/stat.
+type procStat struct {
+	state     byte   // field 3
+	flags     uint64 // field 9, the task flags
+	startCode uint64 // field 26: 0 without code (mid-exec, a kernel thread, exited); 1 when not ours to read
+}
+
+// statOf reads a process's procStat; ok is false if the file can't be read or
+// parsed.
+func statOf(dir string) (st procStat, ok bool) {
 	b, err := readProcFile(filepath.Join(dir, "stat"))
 	if err != nil {
-		return 0, 0, false
+		return procStat{}, false
 	}
 	i := bytes.LastIndexByte(b, ')')
 	if i < 0 || i+2 >= len(b) {
-		return 0, 0, false
+		return procStat{}, false
 	}
 	f := bytes.Fields(b[i+2:]) // f[0] is field 3 (state)
-	if len(f) < 7 {
-		return 0, 0, false
+	if len(f) < 24 {
+		return procStat{}, false
 	}
-	flags, err = strconv.ParseUint(string(f[6]), 10, 64)
-	if err != nil {
-		return 0, 0, false
+	st.state = f[0][0]
+	if st.flags, err = strconv.ParseUint(string(f[6]), 10, 64); err != nil {
+		return procStat{}, false
 	}
-	return f[0][0], flags, true
+	if st.startCode, err = strconv.ParseUint(string(f[23]), 10, 64); err != nil {
+		return procStat{}, false
+	}
+	return st, true
 }
 
 // readCmdline returns the argv with NULs turned into spaces. Empty for a kernel

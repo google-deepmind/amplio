@@ -15,11 +15,9 @@
 package bridge
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -142,7 +140,7 @@ type proc struct {
 	specQuery string
 
 	// stderrTail keeps the bridge's last few stderr lines so a startup failure or
-	// an unexpected exit can SHOW them: everything logPipe writes goes to Debug,
+	// an unexpected exit can SHOW them: everything lineLog writes goes to Debug,
 	// which the default level drops.
 	stderrTail *ringBuffer
 
@@ -256,32 +254,34 @@ func (p *proc) startLocked() (err error) {
 	cmd.Env = append(os.Environ(), "AMPLIO_BRIDGE_SPEC="+p.specQuery)
 	cmd.Env = append(cmd.Env, extraSpawnEnv...)
 	setDeathSig(cmd)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return fmt.Errorf("subprocess: stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return fmt.Errorf("subprocess: stderr pipe: %w", err)
-	}
+	// Writers, not StdoutPipe/StderrPipe: os/exec then copies the output itself
+	// and Wait returns only once the copy is done, so a bridge that prints its
+	// error and exits has that error in stderrTail by the time died closes. With
+	// pipes read by our own goroutines, Wait closed them under the reader and a
+	// fast exit lost the very stderr the startup error exists to show.
+	stdout := &lineLog{binary: p.binary, stream: "stdout"}
+	stderr := &lineLog{binary: p.binary, stream: "stderr", tail: p.stderrTail}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	// Bounds Wait when a grandchild of the bridge keeps the pipes open after
+	// the bridge itself exited.
+	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("subprocess: start %q: %w", p.binary, err)
 	}
-	go logPipe(p.binary, "stdout", stdout, nil)
-	go logPipe(p.binary, "stderr", stderr, p.stderrTail)
 
 	// died is closed by the wait goroutine when the process exits. waitHealthy
 	// selects on it so an early-exit (e.g. ImportError before binding the
 	// socket) fails the start in milliseconds instead of waiting out
 	// healthTimeout. cmd.Wait completes before the close, so cmd.ProcessState
-	// is safely populated by the time waitHealthy reads it.
+	// and all of the bridge's output are in place by the time waitHealthy
+	// reads them.
 	died := make(chan struct{})
 	client := unixClient(socket)
 	go func() {
 		_ = cmd.Wait()
+		stdout.flush()
+		stderr.flush()
 		close(died)
 		p.markDead(cmd)
 	}()
@@ -349,7 +349,7 @@ func unixClient(socket string) *http.Client {
 // waitHealthy polls the bridge's /health until OK, the process exits, or
 // healthTimeout elapses. On early process exit it returns immediately with a
 // diagnostic that points at the bridge's exit code (stderr is already in the
-// amplio log via logPipe), so a broken bridge fails fast instead of burning the
+// amplio log via lineLog), so a broken bridge fails fast instead of burning the
 // full timeout against a socket that will never appear.
 func waitHealthy(client *http.Client, cmd *exec.Cmd, died <-chan struct{}, tail *ringBuffer) error {
 	deadline := time.Now().Add(healthTimeout)
@@ -399,27 +399,59 @@ func withStderr(tail *ringBuffer) string {
 	return " (the bridge printed nothing to stderr)"
 }
 
-// logPipe forwards a bridge's stdout/stderr to the amplio log at Debug level
-// so bridge diagnostics are AVAILABLE (--log-level=debug surfaces every line)
-// without polluting the default Info stream. Bridges are talkative — they
-// typically log per-RPC HTTP traces, model loading, and retries, often dozens
-// of lines per agent step — and almost all of it is
-// useful only when something's going wrong. Operators who care can flip
-// AMPLIO_LOG_LEVEL=debug for the symptomatic session.
+// lineLog forwards a bridge's stdout or stderr to the amplio log at Debug
+// level, a line per record, so bridge diagnostics are AVAILABLE
+// (--log-level=debug surfaces every line) without polluting the default Info
+// stream. Bridges are talkative — they typically log per-RPC HTTP traces, model
+// loading, and retries, often dozens of lines per agent step — and almost all
+// of it is useful only when something's going wrong. Operators who care can
+// flip AMPLIO_LOG_LEVEL=debug for the symptomatic session.
 //
 // tail, when non-nil, also keeps the last few lines for the failure paths: at
 // the default log level everything here is dropped, so a bridge that dies during
 // startup used to fail with "see stderr above for diagnostics" pointing at
 // output nobody printed.
-func logPipe(binary, stream string, r io.Reader, tail *ringBuffer) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := sc.Text()
-		slog.Debug("bridge", "binary", filepath.Base(binary), "stream", stream, "line", line)
-		if tail != nil {
-			tail.add(line)
+//
+// os/exec calls Write from a single goroutine per stream, and flush only after
+// Wait, so no lock.
+type lineLog struct {
+	binary, stream string
+	tail           *ringBuffer
+	partial        []byte // an unterminated last line
+}
+
+// maxLogLine caps a line, so a bridge writing without newlines cannot grow
+// partial without bound.
+const maxLogLine = 1024 * 1024
+
+func (w *lineLog) Write(b []byte) (int, error) {
+	w.partial = append(w.partial, b...)
+	for {
+		i := bytes.IndexByte(w.partial, '\n')
+		if i < 0 {
+			break
 		}
+		w.line(string(w.partial[:i]))
+		w.partial = w.partial[i+1:]
+	}
+	if len(w.partial) >= maxLogLine {
+		w.flush()
+	}
+	return len(b), nil
+}
+
+// flush emits an unterminated last line, if any.
+func (w *lineLog) flush() {
+	if len(w.partial) > 0 {
+		w.line(string(w.partial))
+		w.partial = nil
+	}
+}
+
+func (w *lineLog) line(line string) {
+	slog.Debug("bridge", "binary", filepath.Base(w.binary), "stream", w.stream, "line", line)
+	if w.tail != nil {
+		w.tail.add(line)
 	}
 }
 

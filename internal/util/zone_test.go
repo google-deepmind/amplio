@@ -74,11 +74,13 @@ func TestLocalZoneName_FollowsTZ(t *testing.T) {
 		}
 		cmd := exec.Command(exe, "-test.run=^TestLocalZoneName_FollowsTZ$")
 		for _, e := range os.Environ() {
-			if !strings.HasPrefix(e, "TZ=") {
+			if !strings.HasPrefix(e, "TZ=") && !strings.HasPrefix(e, "GORACE=") {
 				cmd.Env = append(cmd.Env, e)
 			}
 		}
-		cmd.Env = append(cmd.Env, "AMPLIO_ZONE_CHILD=1")
+		// A race-built child would otherwise sleep a second at exit
+		// (atexit_sleep_ms); it starts no goroutines that could race.
+		cmd.Env = append(cmd.Env, "AMPLIO_ZONE_CHILD=1", "GORACE=atexit_sleep_ms=0")
 		if tz != nil {
 			cmd.Env = append(cmd.Env, "TZ="+*tz)
 		}

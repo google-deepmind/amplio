@@ -179,15 +179,18 @@ func (w *gitWorkspace) worktreeRoot(ctx context.Context) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// run executes a git subcommand in dir, returning combined output. stderr is
-// merged into stdout so error messages survive for diagnosis.
+// run executes a git subcommand in dir and returns its stdout, which callers
+// parse. stderr carries git's warnings and hints, so it goes only into the
+// error, with stdout (where a few commands report their failure).
 func run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
 		return string(out), fmt.Errorf("git %s: %w: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()+"\n"+string(out)))
 	}
 	return string(out), nil
 }

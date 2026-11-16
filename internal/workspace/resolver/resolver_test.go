@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"amplio/internal/workspace/resolver"
+	"amplio/internal/workspace/vcstest"
 )
 
 func TestWrap_NonVCSIsPlain(t *testing.T) {
@@ -34,6 +35,7 @@ func TestWrap_GitRepoIsGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	vcstest.Hermetic(t)
 	repo := filepath.Join(t.TempDir(), "r")
 	if err := os.Mkdir(repo, 0o755); err != nil {
 		t.Fatal(err)

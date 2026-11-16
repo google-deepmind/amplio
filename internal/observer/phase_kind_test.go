@@ -78,13 +78,17 @@ func (c *capturingHQ) phasePrompt(t *testing.T) string {
 	return ""
 }
 
+// Agent types register process-wide and only once, so not in the test body,
+// which -count=N runs N times.
+func init() {
+	agent.Register("phase_kind_interactive", nil, agent.Traits{Interactive: true})
+	agent.Register("phase_kind_autonomous", nil, agent.Traits{})
+}
+
 // TestObserver_PhasePromptFollowsAgentTraits pins the wiring end to end: the
 // clause the summarizer actually receives is chosen by the agent type's
 // registered Interactive trait, not by anything about the session itself.
 func TestObserver_PhasePromptFollowsAgentTraits(t *testing.T) {
-	agent.Register("phase_kind_interactive", nil, agent.Traits{Interactive: true})
-	agent.Register("phase_kind_autonomous", nil, agent.Traits{})
-
 	for _, tc := range []struct {
 		agentType string
 		want      string

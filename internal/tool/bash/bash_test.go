@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -211,16 +212,24 @@ func TestBash_NoControllingTerminal(t *testing.T) {
 // A timeout must reap the whole process group. Killing only the shell leaves its
 // children running: that is how one hung command becomes a permanent orphan.
 func TestBash_TimeoutKillsChildren(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "alive")
-	// The backgrounded child outlives the shell and would keep touching the file.
+	pgidFile := filepath.Join(t.TempDir(), "pgid")
+	// The backgrounded child would outlive the shell. Once running it records
+	// its process group ($$ is the shell, the group's leader), so the check
+	// below can't pass just because the child never started.
 	execute(context.Background(),
-		`( while true; do touch `+marker+`; sleep 0.2; done ) & sleep 30`,
-		t.TempDir(), nil, 1*time.Second, 4096)
-	time.Sleep(300 * time.Millisecond)
-	_ = os.Remove(marker)
-	time.Sleep(700 * time.Millisecond) // long enough for two more touches
-	if _, err := os.Stat(marker); err == nil {
-		t.Error("a child survived the timeout: the process group was not killed")
+		`( echo $$ > `+pgidFile+`; exec sleep 30 ) & sleep 30`,
+		t.TempDir(), nil, 500*time.Millisecond, 4096)
+	b, _ := os.ReadFile(pgidFile)
+	pgid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("the background child never ran before the timeout: pgid file %q", b)
+	}
+	// The group got its SIGKILL before execute returned; its members only have
+	// to finish dying.
+	for deadline := time.Now().Add(5 * time.Second); groupAlive(pgid); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("a child survived the timeout: the process group was not killed")
+		}
 	}
 }
 

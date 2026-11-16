@@ -28,11 +28,25 @@ TAGS ?=
 # `internal` half.
 INTEGRATION_TAGS ?= -tags=integration
 
+# The race runtime sleeps atexit_sleep_ms (default 1000) when a process exits,
+# so that goroutines still running can report a race. Every test binary pays
+# it, and so does every race-built child a test runs: about half of the
+# package time of `make test-race`. 100 ms still catches a race in a goroutine
+# that outlives a package's last test by a moment. Options already in $GORACE
+# come after this one, so they win.
+test-race test-integration: export GORACE := atexit_sleep_ms=100 $(GORACE)
+
 # The built-in embedding table for local recall (internal/embed/local) is
 # derived from a pinned upstream model at build time and never committed.
 # LOCAL_EMBED=0 builds without it: recall then ranks by BM25 only.
 LOCAL_EMBED ?= 1
 EMBED_TABLE := internal/embed/local/data/table.bin
+
+# -race turns on checkptr in every package. modernc.org/sqlite is C translated
+# to Go, unsafe pointers throughout, and there checkptr takes about half the
+# CPU of a test that uses the database. Off for modernc.org only: the race
+# detector stays on there, and checkptr stays on for amplio's own code.
+test-race test-integration: export GOFLAGS := $(GOFLAGS) -gcflags=modernc.org/...=-d=checkptr=0
 
 # Build the amplio binary with embedded frontend and embedding table.
 build: frontend-build embed-table

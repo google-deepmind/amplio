@@ -16,9 +16,14 @@ package agent
 
 import "testing"
 
-func TestIsInteractive(t *testing.T) {
+// Agent types register process-wide and only once, so not in the test body,
+// which -count=N runs N times.
+func init() {
 	Register("traits_interactive", nil, Traits{Interactive: true})
 	Register("traits_autonomous", nil, Traits{})
+}
+
+func TestIsInteractive(t *testing.T) {
 	for name, want := range map[string]bool{
 		"traits_interactive": true,
 		"traits_autonomous":  false,

@@ -119,17 +119,23 @@ func NotifyShimPath() string { return filepath.Join(ShimDir(), NotifyShimName) }
 
 func DataDir() string {
 	if dataDirOverride != "" {
+		refuseLiveDataDir(dataDirOverride)
 		return dataDirOverride
 	}
+	dir := defaultDataDir()
 	if override := os.Getenv(EnvDataDir); override != "" {
-		override = expandTilde(override)
-		_ = os.MkdirAll(override, 0o755) //nolint:gosec // G703: the operator chooses the data dir
-		return override
+		dir = expandTilde(override)
 	}
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".amplio")
-	_ = os.MkdirAll(dir, 0o755)
+	refuseLiveDataDir(dir)
+	_ = os.MkdirAll(dir, 0o755) //nolint:gosec // G703: the operator chooses the data dir
 	return dir
+}
+
+// defaultDataDir is ~/.amplio, the data dir when neither --data-dir nor
+// $AMPLIO_DATA_DIR names one.
+func defaultDataDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".amplio")
 }
 
 func SkillCacheDir() string {

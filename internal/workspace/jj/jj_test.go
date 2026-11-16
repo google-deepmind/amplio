@@ -16,6 +16,7 @@ package jj
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"testing"
 
 	"amplio/internal/workspace"
+	"amplio/internal/workspace/vcstest"
 )
 
 func requireJJ(t *testing.T) {
@@ -49,11 +51,9 @@ func newRepo(t *testing.T, name string) string {
 	if err := os.Mkdir(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	vcstest.Hermetic(t)
 	if _, err := run(ctx, repo, "git", "init"); err != nil {
 		t.Skipf("jj git init unsupported in this jj version: %v", err)
-	}
-	for _, kv := range [][2]string{{"user.email", "t@example.com"}, {"user.name", "tester"}} {
-		_, _ = run(ctx, repo, "config", "set", "--repo", kv[0], kv[1])
 	}
 	return repo
 }
@@ -118,4 +118,50 @@ func TestDescribe(t *testing.T) {
 		!strings.Contains(linked, "jj log") {
 		t.Errorf("linked describe = %q", linked)
 	}
+}
+
+// Callers parse run's output, so what jj prints on stderr (warnings, hints, log
+// lines) must not reach them; a failure must still show it.
+func TestRun_StderrIsNotOutput(t *testing.T) {
+	requireJJ(t)
+	ctx := context.Background()
+	repo := newRepo(t, "noisy")
+	wrapWithStderrNoise(t, "jj")
+
+	ws, ok := Detect(ctx, repo)
+	if !ok {
+		t.Fatal("repo not detected when jj warns on stderr")
+	}
+	child, err := ws.CreateLinked(ctx, "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(filepath.Dir(repo), "noisy-amplio", "worktrees", "agent-1"); child.Root() != want {
+		t.Errorf("child root = %q, want %q", child.Root(), want)
+	}
+
+	_, err = run(ctx, repo, "log", "-r", "no-such-revision")
+	if err == nil || !strings.Contains(err.Error(), stderrNoise) || !strings.Contains(err.Error(), "no-such-revision") {
+		t.Errorf("error should carry jj's stderr: %v", err)
+	}
+}
+
+// stderrNoise is what wrapWithStderrNoise's wrapper warns.
+const stderrNoise = "warning: noise on stderr"
+
+// wrapWithStderrNoise puts a wrapper for tool first on PATH that prints a
+// warning on stderr before running the real one, as a jj build that logs to
+// stderr or a git with an unreadable config does.
+func wrapWithStderrNoise(t *testing.T, tool string) {
+	t.Helper()
+	bin, err := exec.LookPath(tool)
+	if err != nil {
+		t.Skipf("%s not available", tool)
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\necho '%s' >&2\nexec '%s' \"$@\"\n", stderrNoise, bin)
+	if err := os.WriteFile(filepath.Join(dir, tool), []byte(script), 0o755); err != nil { //nolint:gosec // an executable test wrapper
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

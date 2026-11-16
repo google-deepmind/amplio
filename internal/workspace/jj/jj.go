@@ -174,13 +174,18 @@ func (w *jjWorkspace) repoAnchor(_ context.Context, currentRoot string) (mainRoo
 	return filepath.Dir(filepath.Dir(store)), store
 }
 
+// run executes a jj subcommand in dir and returns its stdout, which callers
+// parse. stderr carries jj's warnings, hints and log lines, so it goes only
+// into the error, with stdout.
 func run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "jj", args...)
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
 		return string(out), fmt.Errorf("jj %s: %w: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()+"\n"+string(out)))
 	}
 	return string(out), nil
 }

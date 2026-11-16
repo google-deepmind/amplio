@@ -15,6 +15,7 @@
 package bridge
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -355,13 +357,16 @@ func TestServerPingsWhileWaiting(t *testing.T) {
 	}, 10*time.Millisecond))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
+	// The model answers once the first ping is in; on failure, at the latest
+	// when the test returns, so srv.Close isn't left waiting on the handler.
+	answer := sync.OnceFunc(func() { close(release) })
+	defer answer()
 
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		close(release)
-	}()
-
-	hreq, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+	// The deadline only bounds a regression (no ping ever): the model is held
+	// until one arrives.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		srv.URL+"/generate", strings.NewReader(`{"model":"m"}`))
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -372,12 +377,20 @@ func TestServerPingsWhileWaiting(t *testing.T) {
 		t.Fatalf("post: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
-	if n := strings.Count(string(body), `"type":"ping"`); n == 0 {
-		t.Errorf("no pings in %q; the client cannot distinguish a slow model from a dead link", body)
+	var body strings.Builder
+	pinged := false
+	for sc := bufio.NewScanner(resp.Body); sc.Scan(); {
+		body.WriteString(sc.Text() + "\n")
+		if !pinged && strings.Contains(sc.Text(), `"type":"ping"`) {
+			pinged = true
+			answer()
+		}
 	}
-	if !strings.Contains(string(body), `"type":"final"`) {
-		t.Errorf("stream did not end with a final line: %q", body)
+	if !pinged {
+		t.Errorf("no pings in %q; the client cannot distinguish a slow model from a dead link", body.String())
+	}
+	if !strings.Contains(body.String(), `"type":"final"`) {
+		t.Errorf("stream did not end with a final line: %q", body.String())
 	}
 }
 

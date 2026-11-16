@@ -625,6 +625,7 @@ func TestServer_Models(t *testing.T) {
 
 func TestServer_StartInteractiveRun(t *testing.T) {
 	t.Parallel()
+	ws := t.TempDir() // see TestStartRun_Briefings
 	srv, _, _ := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -639,7 +640,8 @@ func TestServer_StartInteractiveRun(t *testing.T) {
 	}
 
 	// A valid interactive run is created with an empty task (the canonical signal).
-	code, body := doReq(t, http.MethodPost, ts.URL+"/api/runs?token=secret", `{"interactive":true,"message":"hi there"}`)
+	code, body := doReq(t, http.MethodPost, ts.URL+"/api/runs?token=secret",
+		fmt.Sprintf(`{"interactive":true,"message":"hi there","workspace":%q}`, ws))
 	if code != http.StatusCreated {
 		t.Fatalf("interactive start: %d, want 201", code)
 	}

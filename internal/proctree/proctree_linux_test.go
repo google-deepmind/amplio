@@ -175,8 +175,9 @@ func pidsOf(ps []*Process) []int {
 
 // Elapsed is computed against /proc/uptime. Caching that reading for the life of
 // the server (rather than per scan) made every later snapshot wrong — a process
-// started after the cached value got a NEGATIVE elapsed. Two scans a moment
-// apart pin it: the clock has to advance, and never go backwards.
+// started after the cached value got a NEGATIVE elapsed. Later scans pin it: the
+// clock has to advance, and never go backwards. Both readings are 10 ms
+// granular, so it advances within a few polls; a cached uptime never does.
 func TestScan_ElapsedTracksWallClock(t *testing.T) {
 	runID := fmt.Sprintf("el%d", os.Getpid())
 	startMarked(t, runID, "clock", "sleep 30")
@@ -191,27 +192,31 @@ func TestScan_ElapsedTracksWallClock(t *testing.T) {
 			t.Fatalf("pid %d elapsed = %v, want >= 0", p.PID, p.Elapsed)
 		}
 	}
-	time.Sleep(1200 * time.Millisecond)
-
-	second := Scan(runID)
 	before := map[int]float64{}
 	for _, p := range flatten(first.Roots) {
 		before[p.PID] = p.Elapsed
 	}
-	checked := 0
-	for _, p := range flatten(second.Roots) {
-		was, ok := before[p.PID]
-		if !ok {
-			continue
+
+	waitFor(t, "elapsed to advance (stale uptime?)", func() bool {
+		checked, advanced := 0, 0
+		for _, p := range flatten(Scan(runID).Roots) {
+			was, ok := before[p.PID]
+			if !ok {
+				continue
+			}
+			checked++
+			if p.Elapsed < was {
+				t.Fatalf("pid %d elapsed went backwards: %.2f then %.2f", p.PID, was, p.Elapsed)
+			}
+			if p.Elapsed > was {
+				advanced++
+			}
 		}
-		checked++
-		if p.Elapsed <= was {
-			t.Errorf("pid %d elapsed did not advance: %.2f then %.2f (stale uptime?)", p.PID, was, p.Elapsed)
+		if checked == 0 {
+			t.Fatal("no process survived both scans; the test proved nothing")
 		}
-	}
-	if checked == 0 {
-		t.Fatal("no process survived both scans; the test proved nothing")
-	}
+		return advanced == checked
+	})
 }
 
 // An orphan is a root whose parent is not amplio: init adopts orphans on some
@@ -277,51 +282,107 @@ func waitSettled(t *testing.T, runID string) {
 	})
 }
 
-// midExecFor stands in readProcFile so that pid reads as a process mid-exec,
-// its environ and its cmdline both empty, for the first n reads of either; the
-// kernel sets both at the same moment, so they settle together.
-func midExecFor(t *testing.T, pid, n int) {
+// midExecFor stands in readProcFile so that pid reads as a process mid-exec
+// for the first n reads of its environ: the environ empty and the stat line's
+// startcode 0. The cmdline reads empty too unless argsCopied, the later part
+// of an exec, when the kernel has copied the arguments but not yet the
+// environment. n < 0 keeps it mid-exec for good.
+func midExecFor(t *testing.T, pid, n int, argsCopied bool) {
 	t.Helper()
 	var mu sync.Mutex
 	reads := 0
 	orig := readProcFile
 	readProcFile = func(path string) ([]byte, error) {
-		if filepath.Dir(path) == "/proc/"+strconv.Itoa(pid) {
-			if name := filepath.Base(path); name == "environ" || name == "cmdline" {
-				mu.Lock()
-				reads++
-				empty := reads <= n
-				mu.Unlock()
-				if empty {
-					return []byte{}, nil
-				}
+		if filepath.Dir(path) != "/proc/"+strconv.Itoa(pid) {
+			return orig(path)
+		}
+		name := filepath.Base(path)
+		mu.Lock()
+		if name == "environ" {
+			reads++
+		}
+		mid := n < 0 || reads <= n
+		mu.Unlock()
+		switch {
+		case !mid:
+		case name == "environ", name == "cmdline" && !argsCopied:
+			return []byte{}, nil
+		case name == "stat":
+			b, err := orig(path)
+			if err != nil {
+				return nil, err
 			}
+			return withStartCode(t, b, 0), nil
 		}
 		return orig(path)
 	}
 	t.Cleanup(func() { readProcFile = orig })
 }
 
-// A process caught in the middle of an exec reads as having no environ and no
-// cmdline for a moment. The scan waits, so it still finds the process, with
-// its command line.
+// withStartCode returns a /proc/<pid>/stat line with its startcode (field 26)
+// replaced.
+func withStartCode(t *testing.T, stat []byte, v uint64) []byte {
+	t.Helper()
+	i := strings.LastIndexByte(string(stat), ')')
+	f := strings.Fields(string(stat[i+2:]))
+	if len(f) < 24 {
+		t.Fatalf("short stat line %q", stat)
+	}
+	f[23] = strconv.FormatUint(v, 10)
+	return []byte(string(stat[:i+2]) + strings.Join(f, " ") + "\n")
+}
+
+// virtualClock runs readSettled's wait on virtual time for the test: a pause
+// advances the clock instantly, so what a test with stand-in /proc reads checks
+// is the wait's budget, not how promptly a loaded machine wakes the scan. It
+// returns the time paused so far.
+func virtualClock(t *testing.T) (paused func() time.Duration) {
+	t.Helper()
+	var mu sync.Mutex
+	var total time.Duration
+	start := time.Now()
+	orig := settleClock
+	settleClock.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return start.Add(total)
+	}
+	settleClock.sleep = func(d time.Duration) {
+		mu.Lock()
+		total += d
+		mu.Unlock()
+	}
+	t.Cleanup(func() { settleClock = orig })
+	return func() time.Duration {
+		mu.Lock()
+		defer mu.Unlock()
+		return total
+	}
+}
+
+// A process caught in the middle of an exec reads as having no environ for a
+// moment: early on with no cmdline either, later with the new command's
+// cmdline while the kernel copies the environment. The scan waits, so it still
+// finds the process, with its command line.
 func TestInspect_RetriesAProcessCaughtMidExec(t *testing.T) {
 	runID := fmt.Sprintf("tstexec%d", os.Getpid())
 	pid := startMarked(t, runID, "worker", "exec sleep 30")
 	waitSettled(t, runID)
 
-	// 1 and 2: the exec settles while the scan checks whether it is mid-exec.
-	for _, n := range []int{1, 2, 3, 6} {
-		t.Run(fmt.Sprintf("%d_empty_reads", n), func(t *testing.T) {
-			midExecFor(t, pid, n)
-			p := inspect(pid, os.Getuid(), runID, uptimeSeconds())
-			if p == nil {
-				t.Fatal("a process caught mid-exec was missed")
-			}
-			if !strings.Contains(p.Cmdline, "sleep 30") {
-				t.Errorf("cmdline = %q, want the command once the exec settles", p.Cmdline)
-			}
-		})
+	for _, argsCopied := range []bool{false, true} {
+		for _, n := range []int{1, 2, 3, 6} {
+			t.Run(fmt.Sprintf("%d_empty_reads_args_copied_%v", n, argsCopied), func(t *testing.T) {
+				virtualClock(t)
+				midExecFor(t, pid, n, argsCopied)
+				p := inspect(pid, os.Getuid(), runID, uptimeSeconds())
+				if p == nil {
+					t.Fatal("a process caught mid-exec was missed")
+				}
+				if !strings.Contains(p.Cmdline, "sleep 30") {
+					t.Errorf("cmdline = %q, want the command once the exec settles", p.Cmdline)
+				}
+			})
+		}
 	}
 }
 
@@ -333,30 +394,29 @@ func TestInspect_WaitsOutALongExec(t *testing.T) {
 	pid := startMarked(t, runID, "worker", "exec sleep 30")
 	waitSettled(t, runID)
 
-	midExecFor(t, pid, 60) // the idle-machine window shows a handful at most
-	start := time.Now()
+	// 20 empty reads, about 330 ms of pauses; the idle-machine window shows a
+	// handful at most.
+	paused := virtualClock(t)
+	midExecFor(t, pid, 20, true)
 	p := inspect(pid, os.Getuid(), runID, uptimeSeconds())
 	if p == nil || !strings.Contains(p.Cmdline, "sleep 30") {
-		t.Fatalf("a process held in its exec was missed or unnamed: %+v", p)
-	}
-	if d := time.Since(start); d > execSettleTimeout {
-		t.Errorf("took %v, more than the settle timeout %v", d, execSettleTimeout)
+		t.Fatalf("a process held in its exec was missed or unnamed after %v of pauses: %+v", paused(), p)
 	}
 }
 
-// A process with a genuinely empty environment still has a cmdline: it isn't
-// mid-exec, so the scan doesn't wait on it.
+// A process with a genuinely empty environment has code (a non-zero startcode):
+// it isn't mid-exec, so the scan doesn't wait on it.
 func TestInspect_EmptyEnvironIsNotWaitedOn(t *testing.T) {
 	runID := fmt.Sprintf("tstempty%d", os.Getpid())
 	pid := startMarked(t, runID, "worker", "exec sleep 30")
 	waitSettled(t, runID)
 
+	paused := virtualClock(t)
 	counts := readsOf(t, pid, map[string]int{"environ": 1 << 30})
-	start := time.Now()
 	if p := inspect(pid, os.Getuid(), runID, uptimeSeconds()); p != nil {
 		t.Fatalf("found a process whose environ never had the marker: %+v", p)
 	}
-	if d := time.Since(start); d > 50*time.Millisecond {
+	if d := paused(); d != 0 {
 		t.Errorf("waited %v on a process that isn't mid-exec", d)
 	}
 	if counts["environ"] > 3 {
@@ -364,23 +424,20 @@ func TestInspect_EmptyEnvironIsNotWaitedOn(t *testing.T) {
 	}
 }
 
-// A process that keeps reading empty in both is given up on after the settle
+// A process that keeps reading as mid-exec is given up on after the settle
 // timeout.
 func TestInspect_GivesUpAfterTheSettleTimeout(t *testing.T) {
 	runID := fmt.Sprintf("tststuck%d", os.Getpid())
 	pid := startMarked(t, runID, "worker", "exec sleep 30")
 	waitSettled(t, runID)
 
-	orig := execSettleTimeout
-	execSettleTimeout = 60 * time.Millisecond
-	t.Cleanup(func() { execSettleTimeout = orig })
-	readsOf(t, pid, map[string]int{"environ": 1 << 30, "cmdline": 1 << 30})
-	start := time.Now()
+	paused := virtualClock(t)
+	midExecFor(t, pid, -1, false)
 	if p := inspect(pid, os.Getuid(), runID, uptimeSeconds()); p != nil {
 		t.Fatalf("found a process whose environ never had the marker: %+v", p)
 	}
-	if d := time.Since(start); d < execSettleTimeout || d > execSettleTimeout+time.Second {
-		t.Errorf("gave up after %v, want just past %v", d, execSettleTimeout)
+	if d := paused(); d < execSettleTimeout || d > execSettleTimeout+execMaxPause {
+		t.Errorf("gave up after %v of pauses, want just past %v", d, execSettleTimeout)
 	}
 }
 
@@ -404,10 +461,14 @@ func TestInspect_DoesNotRetryAZombie(t *testing.T) {
 	}
 }
 
-// fakeProc stands in readProcFile for a process directory that doesn't exist:
-// its stat line carries flags, and its environ and cmdline read empty.
-func fakeProc(t *testing.T, dir string, flags uint64) {
+// fakeProcDir is a process directory that doesn't exist, for fakeProc.
+const fakeProcDir = "/proc/4242424242"
+
+// fakeProc stands in readProcFile for fakeProcDir: its stat line carries flags
+// and startCode, and its environ and cmdline read empty.
+func fakeProc(t *testing.T, flags, startCode uint64) {
 	t.Helper()
+	dir := fakeProcDir
 	orig := readProcFile
 	readProcFile = func(path string) ([]byte, error) {
 		if filepath.Dir(path) != dir {
@@ -415,7 +476,7 @@ func fakeProc(t *testing.T, dir string, flags uint64) {
 		}
 		switch filepath.Base(path) {
 		case "stat":
-			return []byte(fmt.Sprintf("4242 (kworker/0:1) I 2 0 0 0 -1 %d 0 0 0 0 0 0 0 0 20 0 1 0 100 0 0", flags)), nil
+			return []byte(fmt.Sprintf("4242 (kworker/0:1) I 2 0 0 0 -1 %d 0 0 0 0 0 0 0 0 20 0 1 0 100 0 0 0 %d 0 0", flags, startCode)), nil
 		case "environ", "cmdline":
 			return []byte{}, nil
 		}
@@ -425,25 +486,33 @@ func fakeProc(t *testing.T, dir string, flags uint64) {
 }
 
 // A kernel thread reads empty in environ and cmdline for good (a scan running
-// as root reads them): it isn't mid-exec, so nothing waits on it. A user
-// process in the same state is.
+// as root reads them), and has no code: it isn't mid-exec, so nothing waits on
+// it. A user process without code is.
 func TestMidExec_NotAKernelThread(t *testing.T) {
-	dir := "/proc/4242424242"
-	fakeProc(t, dir, pfKThread|0x8040)
+	dir := fakeProcDir
+	fakeProc(t, pfKThread|0x8040, 0)
 	if midExec(dir) {
 		t.Error("a kernel thread read as mid-exec")
 	}
-	start := time.Now()
+	paused := virtualClock(t)
 	if b := readSettled(dir, "environ"); len(b) != 0 {
 		t.Errorf("environ = %q", b)
 	}
-	if d := time.Since(start); d > 50*time.Millisecond {
+	if d := paused(); d != 0 {
 		t.Errorf("waited %v on a kernel thread", d)
 	}
 
-	fakeProc(t, dir, 0x400000)
+	fakeProc(t, 0x400000, 0)
 	if !midExec(dir) {
-		t.Error("a user process reading empty in both didn't read as mid-exec")
+		t.Error("a user process without code didn't read as mid-exec")
+	}
+	fakeProc(t, 0x400000, 0x55d0c0de0000)
+	if midExec(dir) {
+		t.Error("a user process with code read as mid-exec")
+	}
+	fakeProc(t, 0x400000, 1) // the kernel's placeholder when not ours to read
+	if midExec(dir) {
+		t.Error("a process not ours to read read as mid-exec")
 	}
 }
 
@@ -454,10 +523,53 @@ func TestStatOf_KernelThreadFlag(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(comm)) != "kthreadd" {
 		t.Skip("no kthreadd at pid 2 (e.g. in a container)")
 	}
-	if _, flags, ok := statOf("/proc/2"); !ok || flags&pfKThread == 0 {
-		t.Errorf("kthreadd: flags %#x, ok %v; want PF_KTHREAD", flags, ok)
+	if st, ok := statOf("/proc/2"); !ok || st.flags&pfKThread == 0 || st.startCode != 0 {
+		t.Errorf("kthreadd: %+v, ok %v; want PF_KTHREAD and no code", st, ok)
 	}
-	if _, flags, ok := statOf("/proc/self"); !ok || flags&pfKThread != 0 {
-		t.Errorf("this process: flags %#x, ok %v; want no PF_KTHREAD", flags, ok)
+	if st, ok := statOf("/proc/self"); !ok || st.flags&pfKThread != 0 || st.startCode == 0 {
+		t.Errorf("this process: %+v, ok %v; want no PF_KTHREAD, and code", st, ok)
 	}
+}
+
+// The real kernel, racing real execs: a scan started the moment a marked
+// process begins its exec finds it, with its command line. A large
+// environment stretches the part of the exec where the cmdline already reads
+// the new command but the environ is still empty, so most rounds land there.
+// It also checks what midExec relies on: once the stat line shows code, the
+// environ is final.
+func TestInspect_FindsAProcessStillInItsExec(t *testing.T) {
+	runID := fmt.Sprintf("tstrace%d", os.Getpid())
+	env := append(os.Environ(), config.EnvRunID+"="+runID)
+	for i := range 20000 {
+		env = append(env, fmt.Sprintf("AMPLIO_TEST_PAD%05d=x", i))
+	}
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep binary")
+	}
+	caught := 0
+	for range 20 {
+		cmd := exec.Command(sleep, "30")
+		cmd.Env = env
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		pid := cmd.Process.Pid
+		dir := "/proc/" + strconv.Itoa(pid)
+		if b, _ := readProcFile(dir + "/environ"); len(b) == 0 {
+			caught++
+		}
+		p := inspect(pid, os.Getuid(), runID, uptimeSeconds())
+		if st, ok := statOf(dir); ok && st.startCode != 0 {
+			if b, _ := readProcFile(dir + "/environ"); !strings.Contains(string(b), config.EnvRunID+"="+runID) {
+				t.Errorf("pid %d has code but its environ lacks the marker (%d bytes)", pid, len(b))
+			}
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		if p == nil || p.Cmdline != "sleep 30" && !strings.HasSuffix(p.Cmdline, "/sleep 30") {
+			t.Fatalf("a process scanned during its exec was missed or unnamed: %+v", p)
+		}
+	}
+	t.Logf("%d of 20 rounds read an empty environ right after the exec began", caught)
 }

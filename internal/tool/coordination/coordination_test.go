@@ -70,6 +70,42 @@ func setup(t *testing.T) (*Deps, *session.Handle) {
 	return &Deps{Store: store, RunID: testRunID, Registry: reg}, handle
 }
 
+// parkWatch signals each time an await flips the session to awaiting. The flip
+// comes after the await's fast-path check, so an event appended once it is seen
+// can only be caught by the wait loop: the wake path under test, not the
+// "returning immediately" short-circuit.
+type parkWatch struct {
+	db.Store
+	parked chan struct{}
+}
+
+func (s *parkWatch) UpdateSessionStatus(ctx context.Context, runID, sessionID, status string) error {
+	err := s.Store.UpdateSessionStatus(ctx, runID, sessionID, status)
+	if status == db.SessionAwaiting {
+		s.parked <- struct{}{}
+	}
+	return err
+}
+
+// watchParks wraps deps' store in a parkWatch; call it before building the tool.
+func watchParks(deps *Deps) <-chan struct{} {
+	parked := make(chan struct{}, 8)
+	deps.Store = &parkWatch{Store: deps.Store, parked: parked}
+	return parked
+}
+
+// waitParked waits until n awaits have parked.
+func waitParked(t *testing.T, parked <-chan struct{}, n int) {
+	t.Helper()
+	for i := range n {
+		select {
+		case <-parked:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d of %d awaits parked", i, n)
+		}
+	}
+}
+
 func TestSessionCancel_Recursive(t *testing.T) {
 	store, err := sqlite.Open(":memory:")
 	if err != nil {
@@ -132,6 +168,7 @@ func TestSessionCancel_Recursive(t *testing.T) {
 // blocked waiter.
 func TestAwaitEvent_MultipleWaitersWake(t *testing.T) {
 	deps, handle := setup(t)
+	parked := watchParks(deps)
 	await := AwaitEvent(deps, testSessionID, func() *session.Handle { return handle })
 	toolMap := map[string]*tool.Tool{await.Name: await}
 	calls := []llm.ToolCall{
@@ -142,7 +179,7 @@ func TestAwaitEvent_MultipleWaitersWake(t *testing.T) {
 	resCh := make(chan []tool.CallResult, 1)
 	go func() { resCh <- tool.ExecuteAll(context.Background(), calls, toolMap, nil) }()
 
-	time.Sleep(50 * time.Millisecond) // let both park
+	waitParked(t, parked, 2)
 	if _, err := deps.Store.AppendEvent(context.Background(), testRunID, testSessionID,
 		&event.MessageEvent{Content: "ping", Sender: "peer", SenderType: event.SenderTypeAgent}); err != nil {
 		t.Fatal(err)
@@ -202,13 +239,13 @@ func TestAwaitEvent_Timeout(t *testing.T) {
 // An event arriving while parked must wake the waiter via the commit listener.
 func TestAwaitEvent_WakesOnEventDuringWait(t *testing.T) {
 	deps, handle := setup(t)
+	parked := watchParks(deps)
 	resCh := make(chan string, 1)
 	go func() {
 		resCh <- runAwait(t, deps, handle, `{"timeout":5}`)
 	}()
 
-	// Let the await park (snapshot + short-circuit pass, then WaitAfter).
-	time.Sleep(50 * time.Millisecond)
+	waitParked(t, parked, 1)
 	if _, err := deps.Store.AppendEvent(context.Background(), testRunID, testSessionID,
 		&event.MessageEvent{Content: "ping", Sender: "peer", SenderType: event.SenderTypeAgent}); err != nil {
 		t.Fatal(err)
@@ -240,6 +277,7 @@ func TestAwaitEvent_WakesOnEventDuringWait(t *testing.T) {
 // guards against.
 func TestAwaitEvent_IgnoresOwnStepToolResult(t *testing.T) {
 	deps, handle := setup(t)
+	parked := watchParks(deps)
 	// CurrentStep is 1 (T+1); the call step T is 0.
 	const callStep = 0
 
@@ -247,7 +285,7 @@ func TestAwaitEvent_IgnoresOwnStepToolResult(t *testing.T) {
 	go func() {
 		resCh <- runAwait(t, deps, handle, `{"timeout":5}`)
 	}()
-	time.Sleep(50 * time.Millisecond) // let the await park
+	waitParked(t, parked, 1)
 
 	// A tool result from the await's own step lands back at T=0 and fires a
 	// commit/notify — this must spuriously wake but not satisfy the await.

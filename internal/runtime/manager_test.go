@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,25 +33,40 @@ import (
 // recorderAgent records that it was (re)spawned, by session id, then exits. It
 // stands in for a real agent so RecoverRun's orchestration can be tested without
 // the LLM loop; the per-session resume mechanics are covered by eventloop tests.
-type recorderAgent struct{ sid string }
+type recorderAgent struct{ run, sid string }
 
-func (a *recorderAgent) Run(context.Context) error { recoverSeen <- a.sid; return nil }
-func (a *recorderAgent) SessionID() string         { return a.sid }
+func (a *recorderAgent) Run(context.Context) error {
+	if seen, ok := recorders.Load(a.run); ok {
+		seen.(chan string) <- a.sid
+	}
+	return nil
+}
+func (a *recorderAgent) SessionID() string { return a.sid }
 
-var recoverSeen = make(chan string, 64)
+// recorders maps a run ID to the channel its test reads recorderAgent spawns
+// from. Per run, because agent goroutines outlive the test that started them:
+// on one shared channel, a late spawn from an earlier test (StartRun's agents
+// run asynchronously) was counted by the next. Spawns in a run nobody records
+// are dropped.
+var recorders sync.Map
+
+// recordSpawns returns the channel that receives the session ID of every
+// recorderAgent spawned in runID from now on.
+func recordSpawns(t *testing.T, runID string) <-chan string {
+	t.Helper()
+	seen := make(chan string, 64)
+	recorders.Store(runID, seen)
+	t.Cleanup(func() { recorders.Delete(runID) })
+	return seen
+}
 
 func init() {
-	agent.Register("recover_test_agent", func(_ *agent.Env, cfg *agent.Config) (agent.Agent, error) {
-		return &recorderAgent{sid: cfg.SessionID}, nil
+	agent.Register("recover_test_agent", func(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
+		return &recorderAgent{run: env.RunID, sid: cfg.SessionID}, nil
 	}, agent.Traits{})
 }
 
 func TestRecoverRun(t *testing.T) {
-	// Drain residue from any prior run (e.g. -count>1).
-	for len(recoverSeen) > 0 {
-		<-recoverSeen
-	}
-
 	store, err := sqlite.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +99,7 @@ func TestRecoverRun(t *testing.T) {
 	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, runReg, plain.Factory)
 	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus))
 
+	seen := recordSpawns(t, runID)
 	revived, err := mgr.RecoverRun(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +114,10 @@ func TestRecoverRun(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for len(got) < len(want) {
 		select {
-		case sid := <-recoverSeen:
+		case sid := <-seen:
+			if !want[sid] {
+				t.Errorf("unexpected respawn of %q (non-spine)", sid)
+			}
 			got[sid] = true
 		case <-deadline:
 			t.Fatalf("timed out; respawned %v, want %v", got, want)
@@ -105,7 +125,7 @@ func TestRecoverRun(t *testing.T) {
 	}
 	// No non-spine session should be respawned.
 	select {
-	case sid := <-recoverSeen:
+	case sid := <-seen:
 		t.Errorf("unexpected respawn of %q (non-spine or duplicate)", sid)
 	case <-time.After(150 * time.Millisecond):
 	}
@@ -159,9 +179,6 @@ func TestStreamAtRest_IgnoresUnknownEvents(t *testing.T) {
 // StartRun resolves the agent provider from each run's RunConfig.LLM via the
 // injected factory, and caches one provider per distinct spec.
 func TestStartRun_PerRunProviderCached(t *testing.T) {
-	for len(recoverSeen) > 0 {
-		<-recoverSeen
-	}
 	store, err := sqlite.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -201,16 +218,6 @@ func TestStartRun_PerRunProviderCached(t *testing.T) {
 	}
 	if len(counts) != 2 || counts["vertex:model-a"] != 1 || counts["vertex:model-b"] != 1 {
 		t.Errorf("factory calls = %v, want each distinct spec built once", counts)
-	}
-
-	// Drain the recorder sends so a later RecoverRun test starts clean.
-	deadline := time.After(2 * time.Second)
-	for range 3 {
-		select {
-		case <-recoverSeen:
-		case <-deadline:
-			t.Fatal("timed out draining recorder agent sends")
-		}
 	}
 }
 
@@ -275,9 +282,6 @@ func TestExtractMarkdownTitle(t *testing.T) {
 // StartRun resolves the title: explicit wins; else a leading markdown heading;
 // else it fires the async generator with the task.
 func TestStartRun_TitleResolution(t *testing.T) {
-	for len(recoverSeen) > 0 {
-		<-recoverSeen
-	}
 	store, err := sqlite.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -333,14 +337,6 @@ func TestStartRun_TitleResolution(t *testing.T) {
 		t.Errorf("genTitle fired again unexpectedly: %q", extra)
 	case <-time.After(100 * time.Millisecond):
 	}
-
-	for range 3 { // drain recorder-agent sends
-		select {
-		case <-recoverSeen:
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out draining recorder sends")
-		}
-	}
 }
 
 func hasRecoverEvent(t *testing.T, store db.Store, runID, sid string) bool {
@@ -359,10 +355,6 @@ func hasRecoverEvent(t *testing.T, store db.Store, runID, sid string) bool {
 // registered spine session in the same run is still recovered, proving the skip
 // is selective rather than aborting the whole recovery.
 func TestRecoverRun_SkipsUnknownAgentType(t *testing.T) {
-	for len(recoverSeen) > 0 {
-		<-recoverSeen
-	}
-
 	store, err := sqlite.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -388,6 +380,7 @@ func TestRecoverRun_SkipsUnknownAgentType(t *testing.T) {
 	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, runReg, plain.Factory)
 	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus))
 
+	seen := recordSpawns(t, runID)
 	revived, err := mgr.RecoverRun(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
@@ -397,7 +390,7 @@ func TestRecoverRun_SkipsUnknownAgentType(t *testing.T) {
 	}
 
 	select {
-	case sid := <-recoverSeen:
+	case sid := <-seen:
 		if sid != "real" {
 			t.Errorf("respawned %q, want only %q", sid, "real")
 		}
@@ -405,7 +398,7 @@ func TestRecoverRun_SkipsUnknownAgentType(t *testing.T) {
 		t.Fatal("registered spine session was not respawned")
 	}
 	select {
-	case sid := <-recoverSeen:
+	case sid := <-seen:
 		t.Errorf("unexpected respawn of %q (ghost should be skipped)", sid)
 	case <-time.After(150 * time.Millisecond):
 	}

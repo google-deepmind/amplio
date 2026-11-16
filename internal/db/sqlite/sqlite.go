@@ -99,7 +99,30 @@ var _ db.Store = (*sqliteStore)(nil)
 // Open creates or opens a SQLite database at the given path and returns
 // a db.Store. Use ":memory:" for tests.
 func Open(path string) (db.Store, error) {
-	sqlDB, err := sql.Open("sqlite", path)
+	sqlDB, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	// Wrap at the boundary so every error returned through the Store interface
+	// wraps db.ErrStore — callers classify DB failures via errors.Is, not by
+	// matching error-message substrings.
+	return db.Tag(&sqliteStore{
+		sqlDB:  sqlDB,
+		events: make(chan db.StoreEvent, 64),
+	}), nil
+}
+
+// connPragmas are per-connection settings, so they go in the DSN, where the
+// driver applies them to every connection the pool opens; a PRAGMA run through
+// *sql.DB reaches only the one connection that happens to run it. Without them
+// a connection fails at once with SQLITE_BUSY when another holds the write
+// lock, and doesn't enforce foreign keys.
+const connPragmas = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+
+// openDB opens the database at path with connPragmas, in WAL mode, at the
+// current schema.
+func openDB(path string) (*sql.DB, error) {
+	sqlDB, err := sql.Open("sqlite", path+connPragmas)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open %s: %w", path, err)
 	}
@@ -112,28 +135,17 @@ func Open(path string) (db.Store, error) {
 		sqlDB.SetMaxOpenConns(1)
 	}
 	ctx := context.Background()
-	// WAL mode for concurrent reads during writes.
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-	} {
-		if _, err := sqlDB.ExecContext(ctx, pragma); err != nil {
-			sqlDB.Close()
-			return nil, fmt.Errorf("sqlite pragma %q: %w", pragma, err)
-		}
+	// WAL mode for concurrent reads during writes. Unlike connPragmas it is a
+	// property of the database file, so setting it once is enough.
+	if _, err := sqlDB.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("sqlite pragma journal_mode: %w", err)
 	}
 	if err := initSchema(ctx, sqlDB, path); err != nil {
 		sqlDB.Close()
 		return nil, err
 	}
-	// Wrap at the boundary so every error returned through the Store interface
-	// wraps db.ErrStore — callers classify DB failures via errors.Is, not by
-	// matching error-message substrings.
-	return db.Tag(&sqliteStore{
-		sqlDB:  sqlDB,
-		events: make(chan db.StoreEvent, 64),
-	}), nil
+	return sqlDB, nil
 }
 
 // migrate applies additive schema changes that CREATE TABLE IF NOT EXISTS can't

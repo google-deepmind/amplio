@@ -48,8 +48,9 @@ func TestWaitForRun_LogsRunAtRest(t *testing.T) {
 	}
 }
 
-// An interrupted run was stopped, not finished: no `run at rest`. Nor does
-// anything start it again before the process exits.
+// An interrupted run was stopped, not finished: no `run at rest`. waitForRun
+// returns once the cancelled root has exited, and nothing starts the run again
+// before the process exits.
 func TestWaitForRun_InterruptIsNotRest(t *testing.T) {
 	logs := captureLogs(t, "text")
 	mgr := runtime.NewRunManager(nil, nil, runtime.NewRunRegistry(), nil)
@@ -57,6 +58,7 @@ func TestWaitForRun_InterruptIsNotRest(t *testing.T) {
 	if !ok {
 		t.Fatal("register")
 	}
+	go func() { <-runCtx.Done(); release() }() // the root exits when cancelled
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -67,12 +69,33 @@ func TestWaitForRun_InterruptIsNotRest(t *testing.T) {
 	if n := countRunAtRest(t, logs.String(), "text", "r"); n != 0 {
 		t.Errorf("logged `run at rest` %d times after an interrupt:\n%s", n, logs)
 	}
-	if runCtx.Err() == nil {
-		t.Error("the root was not cancelled")
+	if mgr.RunRegistry().IsRunActive("r") {
+		t.Error("waitForRun returned before the cancelled root exited")
 	}
-	release() // the root's goroutine exits
 	if _, _, _, ok := mgr.RunRegistry().GetOrCreate("r").RegisterAndContext(context.Background(), "main-agent"); ok {
 		t.Error("the root could be revived after the interrupt")
+	}
+}
+
+// A session that doesn't exit when cancelled holds an interrupted process for
+// stopGrace at most.
+func TestWaitForRun_InterruptWaitIsBounded(t *testing.T) {
+	captureLogs(t, "text")
+	defer func(d time.Duration) { stopGrace = d }(stopGrace)
+	stopGrace = 50 * time.Millisecond
+	mgr := runtime.NewRunManager(nil, nil, runtime.NewRunRegistry(), nil)
+	_, _, release, ok := mgr.RunRegistry().GetOrCreate("r").RegisterAndContext(context.Background(), "main-agent")
+	if !ok {
+		t.Fatal("register")
+	}
+	defer release()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	waitForRun(ctx, mgr, "r")
+	if d := time.Since(start); d < stopGrace {
+		t.Errorf("returned after %s, before stopGrace (%s), with the session still running", d, stopGrace)
 	}
 }
 

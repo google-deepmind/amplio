@@ -24,9 +24,10 @@ import (
 )
 
 func TestDataDir_Default(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv(EnvDataDir, "")
 	dir := DataDir()
-	home, _ := os.UserHomeDir()
 	want := filepath.Join(home, ".amplio")
 	if dir != want {
 		t.Errorf("DataDir() = %q, want %q", dir, want)
@@ -351,17 +352,14 @@ func TestExpandTilde(t *testing.T) {
 // named "~" and then report every error with the tilde still in it, reading
 // exactly like the path the operator meant.
 func TestDataDir_ExpandsTilde(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home dir")
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv(EnvDataDir, "")
 	SetDataDir("~/.amplio-tilde-test")
 	defer SetDataDir("")
 	if got, want := DataDir(), filepath.Join(home, ".amplio-tilde-test"); got != want {
 		t.Errorf("DataDir() = %q, want %q", got, want)
 	}
-	_ = os.Remove(filepath.Join(home, ".amplio-tilde-test"))
 
 	// …and via the environment, which is where it actually bites: env files,
 	// systemd units and container envs never involve a shell.
@@ -370,7 +368,6 @@ func TestDataDir_ExpandsTilde(t *testing.T) {
 	if got, want := DataDir(), filepath.Join(home, ".amplio-tilde-env"); got != want {
 		t.Errorf("DataDir() from env = %q, want %q", got, want)
 	}
-	_ = os.Remove(filepath.Join(home, ".amplio-tilde-env"))
 }
 
 func TestLoad_ExpandsTildeInPaths(t *testing.T) {
