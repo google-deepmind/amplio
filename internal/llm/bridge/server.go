@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -69,8 +68,8 @@ func GenerateHandler(resolve Resolver) http.HandlerFunc {
 func generateHandler(resolve Resolver, pingEvery time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req wireRequest
-		if err := json.NewDecoder(io.LimitReader(r.Body, maxLine)).Decode(&req); err != nil {
-			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
+			badRequest(w, err)
 			return
 		}
 		if v := r.Header.Get(protocolVersionHeader); v != "" && v != protocolVersion {
@@ -204,8 +203,8 @@ type Embedder interface {
 func EmbedHandler(e Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req wireEmbedRequest
-		if err := json.NewDecoder(io.LimitReader(r.Body, maxLine)).Decode(&req); err != nil {
-			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
+			badRequest(w, err)
 			return
 		}
 		if req.Model != "" && req.Model != e.ModelID() {
@@ -228,4 +227,27 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Error("bridge server: write response", "err", err)
 	}
+}
+
+// maxRequestBody bounds a /generate or /embed request body. It isn't maxLine,
+// which bounds one line of a response: a request carries the whole history,
+// every image included, and the serving provider fits the images to its
+// backend's limits (llm.FitImages) only once the body is decoded. The lending
+// listener is token-gated; this only stops a runaway client.
+const maxRequestBody = 256 << 20
+
+// badRequest answers an undecodable request body. One over maxRequestBody gets
+// its own status and its size in words, not the decoder's "unexpected EOF" that
+// a silently truncated body would produce: that reads like a network fault and
+// tells nobody to shrink anything. "exceeds the maximum" is one of the
+// client's overflow signatures, so it is never retried and the event loop's
+// compaction can take it up.
+func badRequest(w http.ResponseWriter, err error) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		http.Error(w, fmt.Sprintf("request too large: body exceeds the maximum of %d bytes", tooBig.Limit),
+			http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 }

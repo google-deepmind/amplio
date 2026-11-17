@@ -5,6 +5,7 @@ go 1.27.4
 tool golang.org/x/vuln/cmd/govulncheck
 
 require (
+	github.com/HugoSmits86/nativewebp v1.3.0
 	github.com/anthropics/anthropic-sdk-go v1.75.0
 	github.com/gofrs/flock v0.12.1
 	github.com/google/uuid v1.6.0

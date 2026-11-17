@@ -140,7 +140,11 @@ func (p *provider) toWire(req llm.Request) wireRequest {
 		DisableToolCalls: req.DisableToolCalls,
 		SessionID:        req.SessionID,
 	}
-	for _, m := range req.Messages {
+	msgs := req.Messages
+	if p.noWebP {
+		msgs = llm.WithoutWebP(msgs)
+	}
+	for _, m := range msgs {
 		wm := wireMessage{
 			Role:          string(m.Role),
 			Content:       m.Content,

@@ -67,7 +67,7 @@ Request body (JSON):
      "tool_calls": [{"id": "...", "name": "...", "arguments": "{json}"}],  // assistant
      "tool_call_id": "...",                                                 // tool_result
      "is_error": false,
-     "attachments": [{"mime_type": "image/png", "base64_data": "..."}],
+     "attachments": [{"mime_type": "image/webp", "base64_data": "..."}],  // or image/png, image/jpeg, ...
      "provider_extra": {}          // opaque round-tripped cargo (e.g. thought signatures)
     }
   ],
@@ -125,6 +125,10 @@ Notes:
   in `messages`) but asks for an answer without calling any, e.g. the backend's
   `tool_choice: none`. amplio sends it on a forced final turn; a bridge that
   cannot express it may ignore it.
+- Images arrive as `attachments`, often as `image/webp`: amplio stores a PNG as
+  lossless WebP when that is smaller. A bridge whose backend cannot take WebP
+  should convert them, or be given `webp=false` in the spec's client block
+  (`subprocess{bin=…&webp=false}:MODEL`), which makes amplio send PNG instead.
 - Stream NDJSON incrementally (flush each line). With HTTP/1.0 the stream ends on
   connection close after the `final` line.
 

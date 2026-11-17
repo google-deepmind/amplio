@@ -328,6 +328,7 @@ func (m *RunManager) runSessionGoroutine(ctx context.Context, runID, sessionID s
 				slog.Error("session goroutine panicked", "run_id", runID, "session_id", sessionID, "panic", r)
 			}
 			release() // cancel ctx + Unregister the slot
+			session.WarnUndelivered(m.store, m.runReg.Get(runID), runID, sessionID, time.Now())
 			// Clean up run registry if no sessions remain. RemoveIfEmpty checks and
 			// deletes atomically so a concurrent launch can't orphan a live session
 			// (see RunRegistry.RemoveIfEmpty).

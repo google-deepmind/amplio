@@ -22,6 +22,10 @@
 // small-bytes screenshot passes a byte cap and fails the dimension limit, while a
 // photo-like PNG within the dimension limit can still be too many bytes, so both
 // are applied at the single point every attachment funnels through.
+//
+// It also converts between PNG and lossless WebP (ToWebP, ToPNG): images are
+// stored as WebP when that is smaller, and converted back for a server that does
+// not accept WebP.
 package imageutil
 
 import (

@@ -15,8 +15,11 @@
 package openai
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +27,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/HugoSmits86/nativewebp"
 
 	"amplio/internal/llm"
 )
@@ -757,6 +762,54 @@ func TestBuildBody_ProfileDefaults(t *testing.T) {
 	}
 }
 
+// tinyWebP is a 1×1 lossless WebP, base64-encoded.
+func tinyWebP(t *testing.T) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := nativewebp.Encode(&buf, image.NewNRGBA(image.Rect(0, 0, 1, 1)), nil); err != nil {
+		t.Fatalf("encode webp: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+// Images are stored as WebP when that is smaller, so a server not known to
+// take WebP gets them as PNG.
+func TestBuildBody_WebPOnlyWhereTheServerTakesIt(t *testing.T) {
+	webp := tinyWebP(t)
+	tests := []struct {
+		name     string
+		args     []string
+		wantMime string
+	}{
+		{"unknown server defaults to generic", nil, "image/png"},
+		{"openai", []string{"profile", "openai"}, "image/webp"},
+		{"vllm", []string{"profile", "vllm"}, "image/webp"},
+		{"litellm", []string{"profile", "litellm"}, "image/png"},
+		{"ollama", []string{"profile", "ollama"}, "image/png"},
+		{"webp=true beats the profile", []string{"webp", "true"}, "image/webp"},
+		{"webp=false beats the profile", []string{"profile", "openai", "webp", "false"}, "image/png"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, got := serveSSE(t, "data: [DONE]\n")
+			s, err := newProvider(t, srv.URL, tt.args...).Stream(context.Background(), llm.Request{
+				Messages: []llm.Message{{Role: llm.RoleUser, Content: "look",
+					Attachments: []llm.Attachment{{MimeType: "image/webp", Base64Data: webp}}}},
+			})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			drain(t, s)
+			msgs := (*got)["messages"].([]any)
+			parts := msgs[0].(map[string]any)["content"].([]any)
+			dataURL := parts[1].(map[string]any)["image_url"].(map[string]any)["url"].(string)
+			if want := "data:" + tt.wantMime + ";base64,"; !strings.HasPrefix(dataURL, want) {
+				t.Errorf("image url starts %.40q, want %q", dataURL, want)
+			}
+		})
+	}
+}
+
 func TestBuildBody_DisableToolCallsSetsToolChoiceNone(t *testing.T) {
 	srv, got := serveSSE(t, "data: [DONE]\n")
 	s, err := newProvider(t, srv.URL).Stream(context.Background(), llm.Request{
@@ -891,6 +944,9 @@ func TestNew_Validation(t *testing.T) {
 	}
 	if _, err := newFromFlatArgs("m", 10, url.Values{"stream_usage": {"yes-please"}}); err == nil {
 		t.Error("non-boolean stream_usage should fail fast")
+	}
+	if _, err := newFromFlatArgs("m", 10, url.Values{"webp": {"sometimes"}}); err == nil {
+		t.Error("non-boolean webp should fail fast")
 	}
 	// An undeclared key in the BLOCK is an error — the half we own is knowable,
 	// so a typo is caught here instead of being shipped to the server.

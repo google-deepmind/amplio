@@ -66,6 +66,7 @@ var ClientArgsBridge = map[string]bool{
 	"url":          true,
 	"token_env":    true,
 	"idle_timeout": true,
+	"webp":         true,
 	// endpoint names a link configured in config.toml. It is resolved into the
 	// keys above BEFORE a provider is built (cmd/amplio), so this package never
 	// sees it and keeps knowing nothing about application configuration.
@@ -138,6 +139,10 @@ func NewBridge(handle string, maxTokens int, clientArgs, args url.Values) (llm.P
 		}
 		idle = d
 	}
+	webp, err := llm.WebPArg(clientArgs, true)
+	if err != nil {
+		return nil, fmt.Errorf("bridge provider: %w", err)
+	}
 	// The handle keeps its model args: they are the far end's business, and
 	// re-encoding them canonically means the same request produces the same
 	// string, which is what the far end matches against its menu.
@@ -154,6 +159,7 @@ func NewBridge(handle string, maxTokens int, clientArgs, args url.Values) (llm.P
 		},
 		model:     handle,
 		maxTokens: maxTokens,
+		noWebP:    !webp,
 	}, nil
 }
 
@@ -207,6 +213,7 @@ func dialer(raw string) (*http.Client, string, error) {
 // until the OS notices, which by default takes hours.
 type idleReader struct {
 	rc       io.ReadCloser
+	idle     time.Duration // how long without data before giving up
 	timer    *time.Timer
 	cancel   context.CancelFunc
 	endpoint string
@@ -217,7 +224,7 @@ func newIdleReader(rc io.ReadCloser, d time.Duration, cancel context.CancelFunc,
 	if d <= 0 {
 		return &cancelCloser{ReadCloser: rc, cancel: cancel}
 	}
-	r := &idleReader{rc: rc, cancel: cancel, endpoint: endpoint, fired: make(chan struct{})}
+	r := &idleReader{rc: rc, idle: d, cancel: cancel, endpoint: endpoint, fired: make(chan struct{})}
 	r.timer = time.AfterFunc(d, func() {
 		close(r.fired)
 		cancel() // unblocks the read below with context.Canceled
@@ -228,14 +235,14 @@ func newIdleReader(rc io.ReadCloser, d time.Duration, cancel context.CancelFunc,
 func (r *idleReader) Read(p []byte) (int, error) {
 	n, err := r.rc.Read(p)
 	if n > 0 {
-		r.timer.Reset(defaultIdleTimeout)
+		r.timer.Reset(r.idle)
 	}
 	if err != nil {
 		select {
 		case <-r.fired:
 			// Translate: the caller would otherwise see "context canceled" and
 			// conclude that amplio cancelled its own request.
-			return n, fmt.Errorf("bridge %s: no data for %s; connection presumed dead", r.endpoint, defaultIdleTimeout)
+			return n, fmt.Errorf("bridge %s: no data for %s; connection presumed dead", r.endpoint, r.idle)
 		default:
 		}
 	}

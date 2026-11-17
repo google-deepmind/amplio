@@ -60,28 +60,36 @@ var ClientArgs = map[string]bool{
 	"max_tokens_field": true,
 	"stream_usage":     true,
 	"capture_extras":   true,
+	"webp":             true,
 }
 
 // profile is a named bundle of defaults for one flavour of server. They exist
 // because the deviations cluster by implementation, and asking an operator to
 // assemble knobs by hand is a worse interface than naming their server.
 //
-// Two knobs only, both about what we SEND — the parser is uniformly tolerant,
-// so nothing here affects reading a response.
+// Every knob is about what we SEND — the parser is uniformly tolerant, so
+// nothing here affects reading a response.
 type profile struct {
 	streamUsage    bool   // send stream_options.include_usage
 	maxTokensField string // max_tokens (universal) vs max_completion_tokens (newer OpenAI)
+	// webp: the server accepts WebP images. Without it they are sent as PNG
+	// (see llm.WithoutWebP), so it is on only where WebP is known to work.
+	webp bool
 }
 
 var profiles = map[string]profile{
 	// Newer OpenAI models reject max_tokens outright.
-	"openai":  {streamUsage: true, maxTokensField: "max_completion_tokens"},
+	"openai": {streamUsage: true, maxTokensField: "max_completion_tokens", webp: true},
+	// A LiteLLM proxy passes images on to whatever backend it routes to, which
+	// may not take WebP.
 	"litellm": {streamUsage: true, maxTokensField: "max_tokens"},
-	"vllm":    {streamUsage: true, maxTokensField: "max_tokens"},
+	// vLLM loads images with Pillow, which reads WebP.
+	"vllm": {streamUsage: true, maxTokensField: "max_tokens", webp: true},
 	// Measured against ollama 0.x + qwen3.5: it takes either max_tokens field,
 	// ignores unknown fields rather than 400ing, and both accepts AND honours
 	// stream_options — so asking for usage is required, not optional. Without it
-	// a streamed turn reports zero tokens.
+	// a streamed turn reports zero tokens. Its vision models fail on WebP
+	// (ollama/ollama#11410).
 	"ollama": {streamUsage: true, maxTokensField: "max_tokens"},
 	// generic: send nothing optional. The safe default for an unknown server,
 	// some of which reject unknown request fields with a 400.
@@ -147,6 +155,11 @@ func New(model string, maxTokens int, clientArgs, args url.Values) (llm.Provider
 		}
 		prof.streamUsage = b
 	}
+	webp, err := llm.WebPArg(clientArgs, prof.webp)
+	if err != nil {
+		return nil, err
+	}
+	prof.webp = webp
 	capture := false
 	if v := clientArgs.Get("capture_extras"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -240,6 +253,9 @@ func coerce(s string) any {
 // --- request ---------------------------------------------------------------
 
 func (p *provider) buildBody(req llm.Request, stream bool) map[string]any {
+	if !p.prof.webp {
+		req.Messages = llm.WithoutWebP(req.Messages)
+	}
 	body := map[string]any{
 		"model":    p.model,
 		"messages": convertMessages(req),

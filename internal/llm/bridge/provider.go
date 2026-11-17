@@ -74,6 +74,10 @@ type provider struct {
 	tr        transport
 	model     string
 	maxTokens int
+	// noWebP: the far end does not accept WebP images (webp=false), so requests
+	// carry them as PNG instead (see llm.WithoutWebP). An amplio at the far end
+	// converts for its own backend if it must, so this is for other bridges.
+	noWebP bool
 }
 
 // ClientArgsSubprocess are the arguments this transport interprets — the `{k=v}`
@@ -83,7 +87,8 @@ type provider struct {
 // wherever it is displayed; specs stored before this put the binary there, and
 // every model behind one bridge rendered identically.
 var ClientArgsSubprocess = map[string]bool{
-	"bin": true,
+	"bin":  true,
+	"webp": true,
 }
 
 // NewSubprocess builds a provider for a bridge THIS process spawns and owns. binary is the bridge path (the spec's
@@ -103,12 +108,16 @@ func NewSubprocess(pos string, maxTokens int, clientArgs, args url.Values) (llm.
 	if model == "" {
 		return nil, fmt.Errorf("subprocess provider: no model; want subprocess{bin=%s}:MODEL", binary)
 	}
+	webp, err := llm.WebPArg(clientArgs, true)
+	if err != nil {
+		return nil, fmt.Errorf("subprocess provider: %w", err)
+	}
 
 	// What the bridge is told. model= is part of the contract (bridges/README.md)
 	// so it is always present regardless of which spelling the operator used;
-	// bin= is ours and would be meaningless to the bridge. Everything else rides
-	// along, because from amplio's side a bridge is opaque — we cannot know which
-	// of its knobs configure the client and which configure the model.
+	// bin= and webp= are ours and would be meaningless to the bridge. Everything
+	// else rides along, because from amplio's side a bridge is opaque — we cannot
+	// know which of its knobs configure the client and which configure the model.
 	all := url.Values{}
 	for k, v := range args {
 		all[k] = v
@@ -117,6 +126,7 @@ func NewSubprocess(pos string, maxTokens int, clientArgs, args url.Values) (llm.
 		all[k] = v
 	}
 	delete(all, "bin")
+	delete(all, "webp")
 	all.Set("model", model)
 	q := all.Encode() // sorted, canonical
 
@@ -128,6 +138,7 @@ func NewSubprocess(pos string, maxTokens int, clientArgs, args url.Values) (llm.
 		tr:        &spawnTransport{key: binary + "?" + q, binary: binary, specQuery: q},
 		model:     model,
 		maxTokens: maxTokens,
+		noWebP:    !webp,
 	}, nil
 }
 

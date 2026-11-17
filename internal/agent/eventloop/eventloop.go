@@ -1258,6 +1258,13 @@ func (a *EventLoopAgent) executeAndAppendToolResults(ctx context.Context, callSt
 	var mu sync.Mutex
 	var appendErr error
 	tool.ExecuteAll(ctx, calls, toolMap, func(r tool.CallResult) {
+		// Image processing is CPU work (a WebP encode can take a second), so it
+		// happens before the lock: a fast tool's result is not held up behind
+		// another tool's screenshot.
+		atts := make([]event.Attachment, len(r.Result.Attachments))
+		for i, att := range r.Result.Attachments {
+			atts[i] = a.prepareAttachment(att)
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		if appendErr != nil {
@@ -1268,8 +1275,8 @@ func (a *EventLoopAgent) executeAndAppendToolResults(ctx context.Context, callSt
 			ToolCallID: r.ToolCallID,
 			IsError:    r.Result.IsError,
 		}
-		for _, att := range r.Result.Attachments {
-			if ref, ok := a.storeAttachment(att); ok {
+		for _, att := range atts {
+			if ref, ok := a.putAttachment(att); ok {
 				evt.Attachments = append(evt.Attachments, ref)
 			}
 		}
@@ -1283,8 +1290,26 @@ func (a *EventLoopAgent) executeAndAppendToolResults(ctx context.Context, callSt
 // storeAttachment writes an attachment's bytes to the run blob store and returns
 // a persistable reference (key+mime+size, no bytes). Returns ok=false — dropping
 // the image but keeping the text result — when there's no blob store or the
-// write fails. Oversized images are downscaled first (see clampImage).
+// write fails. Images are prepared first (see prepareAttachment).
 func (a *EventLoopAgent) storeAttachment(att event.Attachment) (event.Attachment, bool) {
+	return a.putAttachment(a.prepareAttachment(att))
+}
+
+// prepareAttachment returns att as it should be stored: an oversized image
+// downscaled (see clampImage), and a PNG as lossless WebP when that is smaller
+// (see compressImage). Anything else comes back as it is.
+func (a *EventLoopAgent) prepareAttachment(att event.Attachment) event.Attachment {
+	if len(att.Data) == 0 || a.cfg.BlobStore == nil {
+		return att // putAttachment drops it
+	}
+	att.Data, att.MimeType = a.clampImage(att.Data, att.MimeType)
+	att.Data, att.MimeType = a.compressImage(att.Data, att.MimeType)
+	return att
+}
+
+// putAttachment writes a prepared attachment to the blob store (see
+// storeAttachment).
+func (a *EventLoopAgent) putAttachment(att event.Attachment) (event.Attachment, bool) {
 	if len(att.Data) == 0 {
 		return event.Attachment{}, false
 	}
@@ -1292,16 +1317,15 @@ func (a *EventLoopAgent) storeAttachment(att event.Attachment) (event.Attachment
 		a.logger.Warn("dropping tool-result attachment: no blob store", "mime", att.MimeType)
 		return event.Attachment{}, false
 	}
-	data, mime := a.clampImage(att.Data, att.MimeType)
-	key, err := a.cfg.BlobStore.Put(data)
+	key, err := a.cfg.BlobStore.Put(att.Data)
 	if err != nil {
-		a.logger.Error("dropping tool-result attachment: blob write failed", "error", err, "mime", mime)
+		a.logger.Error("dropping tool-result attachment: blob write failed", "error", err, "mime", att.MimeType)
 		return event.Attachment{}, false
 	}
 	return event.Attachment{
-		MimeType:   mime,
+		MimeType:   att.MimeType,
 		BlobKey:    key,
-		Size:       len(data),
+		Size:       len(att.Data),
 		SourceHint: att.SourceHint,
 	}, true
 }
@@ -1335,6 +1359,29 @@ func (a *EventLoopAgent) clampImage(data []byte, mime string) ([]byte, string) {
 			"from_bytes", len(out), "to_bytes", len(shrunk), "max_bytes", imageutil.DefaultMaxBytes)
 	}
 	return shrunk, shrunkMime
+}
+
+// toWebP is imageutil.ToWebP; a variable so a test can hold an encode open.
+var toWebP = imageutil.ToWebP
+
+// compressImage re-encodes a PNG as lossless WebP when that is smaller and shows
+// the same picture (see imageutil.ToWebP). Every image in a session's context is
+// resent every turn, and screenshots come out about a third smaller. It is done
+// once, here, so the image's bytes never change after it is first sent, which
+// would break the prompt cache. A provider whose server does not accept WebP
+// sends PNG instead (see llm.WithoutWebP). On failure the PNG is stored as is.
+func (a *EventLoopAgent) compressImage(data []byte, mime string) ([]byte, string) {
+	start := time.Now()
+	out, outMime, converted, err := toWebP(data, mime)
+	if err != nil {
+		a.logger.Warn("webp conversion failed; storing the image as it is", "error", err, "mime", mime, "bytes", len(data))
+		return data, mime
+	}
+	if converted {
+		a.logger.Debug("stored image attachment as lossless webp",
+			"from_bytes", len(data), "to_bytes", len(out), "took", time.Since(start))
+	}
+	return out, outMime
 }
 
 // loadAttachments resolves persisted attachment references into provider-ready

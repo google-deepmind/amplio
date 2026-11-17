@@ -26,6 +26,7 @@ import (
 	"amplio/internal/agent"
 	"amplio/internal/db"
 	"amplio/internal/event"
+	"amplio/internal/session"
 	"amplio/internal/tool"
 	"amplio/internal/util"
 	"amplio/internal/workspace"
@@ -162,7 +163,10 @@ func makeExecutor(env *agent.Env, parentSessionID string) tool.Executor {
 		// only backstops a panic that bypasses that path. release (cancel +
 		// Unregister) is deferred FIRST so it runs LAST — after the panic backstop.
 		go func() {
-			defer release()
+			defer func() {
+				release()
+				session.WarnUndelivered(childEnv.Store, childEnv.Registry, childEnv.RunID, sessionID, time.Now())
+			}()
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("sub-agent panicked", "session", sessionID, "panic", r)

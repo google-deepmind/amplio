@@ -16,18 +16,27 @@ package eventloop
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
+	"math/rand"
 	"slices"
 	"testing"
+	"time"
+
+	"golang.org/x/image/webp"
 
 	"amplio/internal/blob"
+	"amplio/internal/db"
 	"amplio/internal/event"
 	"amplio/internal/imageutil"
+	"amplio/internal/llm"
+	"amplio/internal/tool"
 )
 
 // pngBytes builds a w×h PNG for attachment-clamp tests.
@@ -135,6 +144,55 @@ func TestStoreAttachmentKeepsInBounds(t *testing.T) {
 	}
 }
 
+// A PNG whose lossless WebP is smaller is stored as that WebP: the same picture
+// in fewer bytes, resent every turn.
+func TestStoreAttachmentStoresSmallerWebP(t *testing.T) {
+	a := newT(testCfg{BlobStore: blob.NewStore(t.TempDir())})
+	// Smooth gradients with a little noise, which WebP's predictors compress
+	// better than PNG does, as they do screenshots.
+	noise := make([]byte, 200*150)
+	rand.New(rand.NewSource(1)).Read(noise) //nolint:gosec // test determinism
+	img := image.NewRGBA(image.Rect(0, 0, 200, 150))
+	for y := range 150 {
+		for x := range 200 {
+			n := noise[y*200+x] & 3
+			img.Set(x, y, color.RGBA{uint8(x) + n, uint8(y) + n, uint8(x+y)/2 + n, 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	orig := buf.Bytes()
+
+	ref, ok := a.storeAttachment(event.Attachment{MimeType: "image/png", Data: orig, SourceHint: "shot.png"})
+	if !ok {
+		t.Fatal("storeAttachment returned ok=false")
+	}
+	if ref.MimeType != "image/webp" || ref.Size >= len(orig) {
+		t.Fatalf("stored %d bytes of %s; want a webp smaller than the png's %d", ref.Size, ref.MimeType, len(orig))
+	}
+	atts := a.loadAttachments([]event.Attachment{ref})
+	if len(atts) != 1 || atts[0].MimeType != "image/webp" {
+		t.Fatalf("loaded %+v, want one image/webp", atts)
+	}
+	raw, err := base64.StdEncoding.DecodeString(atts[0].Base64Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := webp.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode stored webp: %v", err)
+	}
+	for y := range 150 {
+		for x := range 200 {
+			if g, w := color.RGBAModel.Convert(back.At(x, y)), img.At(x, y); g != w {
+				t.Fatalf("pixel (%d,%d) = %v, want %v", x, y, g, w)
+			}
+		}
+	}
+}
+
 // A non-decodable "image" (or non-image mime) is stored unchanged rather than
 // dropped — a clamp failure must never lose the attachment.
 func TestStoreAttachmentUndecodableFallsBack(t *testing.T) {
@@ -198,4 +256,64 @@ func imageDims(t *testing.T, data []byte) (int, int) {
 		t.Fatalf("decode stored image: %v", err)
 	}
 	return cfg.Width, cfg.Height
+}
+
+// A fast tool's result is persisted while another tool's screenshot in the same
+// step is still being encoded, not after it.
+func TestToolResults_FastResultNotHeldBehindAnImageEncode(t *testing.T) {
+	store, runID, _ := testSetup(t)
+	ctx := context.Background()
+	if err := store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "s", Status: db.SessionOngoing}); err != nil {
+		t.Fatal(err)
+	}
+	a := newT(testCfg{RunID: runID, SessionID: "s", Store: store, BlobStore: blob.NewStore(t.TempDir())})
+
+	encoding, release := make(chan struct{}), make(chan struct{})
+	old := toWebP
+	toWebP = func(data []byte, mime string) ([]byte, string, bool, error) {
+		close(encoding)
+		<-release
+		return data, mime, false, nil
+	}
+	t.Cleanup(func() { toWebP = old })
+
+	img := pngBytes(t, 8, 8)
+	shot := &tool.Tool{Name: "shot", ParamType: &struct{}{}, Execute: func(context.Context, json.RawMessage) (*tool.Result, error) {
+		return &tool.Result{Content: "screenshot", Attachments: []event.Attachment{{MimeType: "image/png", Data: img}}}, nil
+	}}
+	fast := &tool.Tool{Name: "fast", ParamType: &struct{}{}, Execute: func(context.Context, json.RawMessage) (*tool.Result, error) {
+		<-encoding // finish while the screenshot is being encoded
+		return &tool.Result{Content: "done"}, nil
+	}}
+	calls := []llm.ToolCall{{ID: "c1", Name: "shot", Arguments: "{}"}, {ID: "c2", Name: "fast", Arguments: "{}"}}
+	done := make(chan error, 1)
+	go func() {
+		done <- a.executeAndAppendToolResults(ctx, 1, calls, map[string]*tool.Tool{"shot": shot, "fast": fast})
+	}()
+
+	persisted := func(id string) bool {
+		recs, err := store.GetEvents(ctx, runID, "s", db.EventFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range recs {
+			if tr, ok := r.Event.(*event.ToolResultEvent); ok && tr.ToolCallID == id {
+				return true
+			}
+		}
+		return false
+	}
+	for deadline := time.Now().Add(5 * time.Second); !persisted("c2"); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("the fast tool's result waited for the other tool's image encode")
+		}
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !persisted("c1") {
+		t.Error("the screenshot's result was not persisted")
+	}
 }

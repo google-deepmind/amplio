@@ -86,7 +86,7 @@ func (s *fakeStream) Close()     {}
 
 // serveBridge stands up the serving half and returns a dialling provider aimed
 // at it — both ends of the protocol, in-process.
-func serveBridge(t *testing.T, fake *fakeProvider, clientArgs url.Values) llm.Provider {
+func serveBridge(t *testing.T, fake *fakeProvider) llm.Provider {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /generate", GenerateHandler(func(ctx context.Context, handle string) (llm.Provider, error) {
@@ -98,11 +98,7 @@ func serveBridge(t *testing.T, fake *fakeProvider, clientArgs url.Values) llm.Pr
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	args := url.Values{"url": {srv.URL}}
-	for k, v := range clientArgs {
-		args[k] = v
-	}
-	p, err := NewBridge("some-model", 4096, args, nil)
+	p, err := NewBridge("some-model", 4096, url.Values{"url": {srv.URL}}, nil)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
@@ -141,7 +137,7 @@ func TestRoundTrip_Lossless(t *testing.T) {
 			},
 		},
 	}
-	p := serveBridge(t, fake, nil)
+	p := serveBridge(t, fake)
 
 	req := llm.Request{
 		SystemPrompt: "you are a bridge test",
@@ -222,7 +218,7 @@ func TestRoundTrip_Lossless(t *testing.T) {
 // empty Refusal must cross the bridge as non-nil, with both fields on the wire.
 func TestRoundTrip_EmptyRefusalKeepsPresence(t *testing.T) {
 	fake := &fakeProvider{final: &llm.Response{StopReason: "refusal", Refusal: &llm.Refusal{}}}
-	p := serveBridge(t, fake, nil)
+	p := serveBridge(t, fake)
 	got, err := p.Call(context.Background(), llm.Request{})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -242,7 +238,7 @@ func TestRoundTrip_EmptyRefusalKeepsPresence(t *testing.T) {
 // disable compaction for every bridged run.
 func TestRoundTrip_ErrorTextIsVerbatim(t *testing.T) {
 	const upstream = "input is too long: 250000 tokens > 200000 maximum context length"
-	p := serveBridge(t, &fakeProvider{err: fmt.Errorf("%s", upstream)}, nil)
+	p := serveBridge(t, &fakeProvider{err: fmt.Errorf("%s", upstream)})
 
 	// The refusal to generate is not an HTTP failure: the far side answered 200
 	// and reported the model's error on the stream, so it surfaces via Err().

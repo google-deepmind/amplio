@@ -58,7 +58,13 @@ limit.
 
 Images a session has viewed stay in its context, and the whole context is resent
 every turn. Every image is downscaled when it arrives to at most 2000 px on its
-long edge and 3.75 MB (5 MB in base64). The Claude and Gemini providers also
+long edge and 3.75 MB (5 MB in base64). A PNG is then stored as lossless WebP
+when that is smaller: the same pixels, typically a third fewer bytes for a
+screenshot. Claude, Gemini and OpenAI take WebP. A provider whose server may
+not converts it back to PNG for the request, again without changing a pixel
+(see `webp` under
+[OpenAI-compatible endpoints](#openai-compatible-endpoints-openai) and
+[Bridges](#bridges)). The Claude and Gemini providers also
 keep each request within the backend's image limits. Past a limit they keep the
 newest images and replace each older one with a note in its tool result, so the
 model can view the file again if it needs it. The limits:
@@ -169,9 +175,10 @@ never validated: the server is the authority on what it accepts.
 | --- | --- | --- |
 | `base_url` | `$OPENAI_BASE_URL`, else `https://api.openai.com/v1` | the endpoint |
 | `api_key_env` | `OPENAI_API_KEY` | *which env var* holds the key, so several endpoints coexist in one config without secrets in `config.toml`. A missing key is fine for local servers |
-| `profile` | `openai` if `base_url` is the default, else `generic` | preset for the two knobs below |
+| `profile` | `openai` if `base_url` is the default, else `generic` | preset for the three knobs below |
 | `max_tokens_field` | per profile | `max_tokens` vs `max_completion_tokens` |
 | `stream_usage` | per profile | send `stream_options.include_usage` |
+| `webp` | per profile | send WebP images as they are. When `false`, they are converted to PNG first; set `webp=true` for a server known to take WebP |
 | `capture_extras` | `false` | persist and replay non-standard per-tool extension fields (for example Gemini thought signatures in `extra_content` or LiteLLM `provider_specific_fields`); also retain message-level `provider_specific_fields` and `extra_content` for inspection |
 | `max_tokens` | 65536 | output cap. Accepted by **every** provider (handled centrally), and written into whichever field the profile selects — so it can no longer collide with `max_completion_tokens` |
 
@@ -183,13 +190,13 @@ assembling knobs. Any explicit arg overrides the preset.
 A preset is a *claim about a server*, so each row says what it was checked
 against. An unverified row is a guess that happens to be written down.
 
-| profile | `stream_usage` | `max_tokens_field` | verified against |
-| --- | --- | --- | --- |
-| `openai` | true | `max_completion_tokens` | gpt-5.4-nano — rejects `max_tokens` outright |
-| `litellm` | true | `max_tokens` | LiteLLM proxy → Vertex (claude, gemini) |
-| `vllm` | true | `max_tokens` | **not verified** — assumed to match `litellm` |
-| `ollama` | true | `max_tokens` | ollama + qwen3.5 — accepts *and honours* `stream_options` |
-| `generic` | false | `max_tokens` | n/a — deliberately minimal; some servers 400 on unknown fields |
+| profile | `stream_usage` | `max_tokens_field` | `webp` | verified against |
+| --- | --- | --- | --- | --- |
+| `openai` | true | `max_completion_tokens` | true | gpt-5.4-nano — rejects `max_tokens` outright; WebP per OpenAI's docs |
+| `litellm` | true | `max_tokens` | false | LiteLLM proxy → Vertex (claude, gemini); images go on to whichever backend it routes to |
+| `vllm` | true | `max_tokens` | true | **not verified** — assumed to match `litellm`; WebP because vLLM loads images with Pillow |
+| `ollama` | true | `max_tokens` | false | ollama + qwen3.5 — accepts *and honours* `stream_options`; vision models fail on WebP (ollama#11410) |
+| `generic` | false | `max_tokens` | false | n/a — deliberately minimal; some servers 400 on unknown fields |
 
 Getting a row wrong is quiet rather than loud: `ollama` originally shipped with
 `stream_usage: false`, so streamed turns reported zero tokens until it was
@@ -268,8 +275,9 @@ go to the log at debug level, and its **last 50 stderr lines are quoted in the
 error** when it fails to start or exits unexpectedly — otherwise that diagnosis
 is invisible at the default log level.
 
-`bin=` is the only client arg. The rest of the spec — client block and query
-alike — is forwarded verbatim to the bridge as `$AMPLIO_BRIDGE_SPEC`, because
+`bin=` and `webp=` (below) are the only client args. The rest of the spec —
+client block and query alike — is forwarded verbatim to the bridge as
+`$AMPLIO_BRIDGE_SPEC`, because
 from amplio's side a bridge is opaque: we cannot know which of its knobs
 configure the client and which configure the model. That whole spec is also the
 reuse key, so two specs differing in any argument get their own process.
@@ -283,6 +291,11 @@ bridge{url=unix:///tmp/bridge.sock}:model-name
 
 Amplio makes requests to a bridge someone else is running. The underlying
 protocol is the same for `bridge` and `subprocess` modes.
+
+Both modes send images as they are stored, which includes WebP. An amplio at
+the far end converts them to PNG itself if its own model's server needs that.
+For a bridge that cannot take WebP, add `webp=false` to the client block, e.g.
+`bridge{url=…&webp=false}:model-name`, and amplio sends PNG instead.
 
 
 
