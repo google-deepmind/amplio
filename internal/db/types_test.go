@@ -17,6 +17,7 @@ package db
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"amplio/internal/event"
 )
@@ -35,8 +36,12 @@ func TestClassify(t *testing.T) {
 		{"child concluded", &event.ChildResultEvent{Verdict: SessionConcluded}, ClassInput},
 		{"child crashed", &event.ChildResultEvent{Verdict: SessionCrashed}, ClassNotice},
 		{"recover", &event.RecoverEvent{}, ClassInput},
+		{"verification change", &event.VerifyEvent{Action: event.VerifySet}, ClassNotice},
+		{"candidate withdrawn", &event.VerifyEvent{Action: event.VerifyWithdrawn}, ClassNotice},
+		{"verifier's verdict", event.VerifierOutcome("v", "FAIL: x", "", time.Time{}), ClassNotice},
+		{"verifier stopped", event.VerifierOutcome("v", "replaced", SessionCancelled, time.Time{}), ClassNotice},
 		{"self/system write", &event.AssistantEvent{Content: "thinking"}, ClassNotice},
-		{"newer binary's event", &event.UnknownEvent{Type: "verify"}, ClassNotice},
+		{"newer binary's event", &event.UnknownEvent{Type: "teleport"}, ClassNotice},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,7 +58,7 @@ func TestClassify(t *testing.T) {
 func TestKnownEvents(t *testing.T) {
 	recs := []EventRecord{
 		{EventID: "a", Event: &event.UserEvent{Content: "hi"}},
-		{EventID: "b", Event: &event.UnknownEvent{Type: "verify"}},
+		{EventID: "b", Event: &event.UnknownEvent{Type: "teleport"}},
 		{EventID: "c", Event: &event.AssistantEvent{Content: "done"}},
 	}
 	var ids []string
@@ -106,5 +111,59 @@ func TestIsSummarizationFailure(t *testing.T) {
 				t.Errorf("IsSummarizationFailure(%q) = %v, want %v", tt.summary, got, tt.want)
 			}
 		})
+	}
+}
+
+// Record-only events wake no one; WakingEventsSince skips them.
+func TestIsRecordOnly(t *testing.T) {
+	for _, c := range []struct {
+		evt  event.Event
+		want bool
+	}{
+		{&event.ToolResultEvent{}, true},
+		{&event.VerifyEvent{Action: event.VerifySet}, true},
+		{&event.VerifyEvent{Action: event.VerifyStale, Outcome: &event.VerifyOutcome{Verifier: "v", Verdict: "PASS"}}, true},
+		{&event.VerifyEvent{Action: event.VerifyWithdrawn}, false},
+		{event.VerifierOutcome("v", "PASS", "", time.Time{}), false},
+		{event.VerifierOutcome("v", "boom", SessionCrashed, time.Time{}), false},
+		{&event.UnknownEvent{Type: "teleport"}, true},
+		{&event.LoopEvent{Action: event.LoopSet}, true},
+		{&event.UserEvent{Content: "tick", Loop: &event.LoopTick{ID: "1", N: 1}}, false},
+		{&event.ChildResultEvent{Verdict: SessionCancelled}, false},
+		{&event.UserEvent{Content: "x", Check: event.CheckVerify}, false},
+		{&event.MessageEvent{Content: "x"}, false},
+	} {
+		if got := IsRecordOnly(c.evt); got != c.want {
+			t.Errorf("IsRecordOnly(%s) = %v, want %v", c.evt.EventType(), got, c.want)
+		}
+	}
+}
+
+// OpenConclude finds the latest turn's conclude call while it has no result,
+// whatever came after it (the verifier's events, messages); an answered call,
+// an older one, or a turn with other calls is not open.
+func TestOpenConclude(t *testing.T) {
+	conclude := func(id string) EventRecord {
+		return EventRecord{Step: 3, Event: &event.AssistantEvent{ToolCalls: []event.ToolCall{{ID: id, Name: event.ConcludeTool}}}}
+	}
+	result := func(id string) EventRecord { return EventRecord{Event: &event.ToolResultEvent{ToolCallID: id}} }
+	arrived := EventRecord{Step: 4, Event: &event.MessageEvent{Content: "hi"}}
+	work := EventRecord{Step: 5, Event: &event.AssistantEvent{ToolCalls: []event.ToolCall{{ID: "b1", Name: "bash"}}}}
+	for _, c := range []struct {
+		name   string
+		events []EventRecord
+		open   string
+	}{
+		{"waiting", []EventRecord{conclude("c1"), arrived}, "c1"},
+		{"answered", []EventRecord{conclude("c1"), result("c1"), arrived}, ""},
+		{"older call, then work", []EventRecord{conclude("c1"), work}, ""},
+		{"no turns", []EventRecord{arrived}, ""},
+		{"alongside another call", []EventRecord{{Step: 3, Event: &event.AssistantEvent{ToolCalls: []event.ToolCall{
+			{ID: "b1", Name: "bash"}, {ID: "c1", Name: event.ConcludeTool}}}}}, ""},
+	} {
+		call, step, ok := OpenConclude(c.events)
+		if (c.open != "") != ok || call.ID != c.open || (ok && step != 3) {
+			t.Errorf("%s: OpenConclude = %+v, %d, %v; want %q at step 3", c.name, call, step, ok, c.open)
+		}
 	}
 }

@@ -47,7 +47,7 @@ func TestExecuteRun_NoReportSkipsTheReport(t *testing.T) {
 			agent := &llm.MockProvider{Model: "agent", Responses: []llm.Response{{Content: "Paris"}}}
 			cfg := restingRunConfig(t, agent)
 
-			if err := executeRun(cfg, "What is the capital of France?", t.TempDir(), "headless-test:agent", "", tc.noReport); err != nil {
+			if err := executeRun(cfg, "What is the capital of France?", t.TempDir(), "headless-test:agent", "", nil, tc.noReport); err != nil {
 				t.Fatalf("executeRun: %v", err)
 			}
 			if n := agent.CallCount(); n != 1 {
@@ -86,7 +86,7 @@ func TestExecuteResume_MessageRevivesConcludedRoot(t *testing.T) {
 	logs := captureLogs(t, "text")
 
 	const message = "Time is up: give your final answer now."
-	if err := executeResume(cfg, "r", message, false); err != nil {
+	if err := executeResume(cfg, "r", message, nil, false); err != nil {
 		t.Fatalf("executeResume: %v", err)
 	}
 	if strings.Contains(logs.String(), "did not respond") {
@@ -159,7 +159,7 @@ func TestExecuteResume_MessageThatRevivesNothingFails(t *testing.T) {
 			}
 
 			start := time.Now()
-			err = executeResume(cfg, "r", "hello", false)
+			err = executeResume(cfg, "r", "hello", nil, false)
 			if err == nil || !strings.Contains(err.Error(), "did not revive") {
 				t.Errorf("executeResume = %v, want an error saying the message revived nothing", err)
 			}
@@ -180,7 +180,7 @@ func TestExecuteResume_MessageToARootThatCrashesWarns(t *testing.T) {
 	cfg := restingRunConfig(t, failingLLM{})
 	logs := captureLogs(t, "text")
 
-	if err := executeResume(cfg, "r", "hello", false); err != nil {
+	if err := executeResume(cfg, "r", "hello", nil, false); err != nil {
 		t.Fatalf("executeResume: %v, want nil (the crash is the run's outcome)", err)
 	}
 	store, err := sqlite.Open(cfg.DB)
@@ -212,7 +212,7 @@ func TestExecuteResume_MessageNeedsARoot(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	err = executeResume(cfg, "rootless", "hello", false)
+	err = executeResume(cfg, "rootless", "hello", nil, false)
 	if err == nil || !strings.Contains(err.Error(), "has no "+config.RootAgentSessionID) {
 		t.Fatalf("executeResume = %v, want an error naming the missing root", err)
 	}

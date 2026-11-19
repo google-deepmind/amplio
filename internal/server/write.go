@@ -15,17 +15,21 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 
+	"amplio/internal/agent"
 	"amplio/internal/config"
 	"amplio/internal/event"
+	"amplio/internal/loop"
 	"amplio/internal/runspec"
 	"amplio/internal/runtime"
 	"amplio/internal/session"
+	"amplio/internal/verify"
 )
 
 func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
@@ -38,9 +42,11 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		Interactive bool     `json:"interactive"` // interactive run (chatbot root, empty task)
 		Message     string   `json:"message"`     // opening message (interactive mode)
 		Briefings   []string `json:"briefings"`   // prompt sections for the new run; opt-in
+		// Verify turns verification on for the root agent.
+		Verify *verify.Request `json:"verify"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		writeErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
 	if req.Workspace == "" {
@@ -70,6 +76,22 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 			agentType = s.defaults.AgentType
 		}
 	}
+	// StartRun refuses it too; here it is a 400 before the workspace is prepared.
+	if err := runtime.CheckRootAgentType(agentType); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Verify != nil {
+		// Checked here so a bad request is a 400 before anything is created.
+		if req.Interactive || agent.IsInteractive(agentType) {
+			writeErr(w, http.StatusBadRequest, "verify applies to an autonomous agent's conclusion; an interactive run never concludes")
+			return
+		}
+		if _, err := req.Verify.Resolve(r.Context(), event.ByOperator, s.mgr.VerifyDefaults(), s.mgr.ResolveLLM); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	// Resolve the workspace spec to a concrete path (creation sentinels run
 	// their side effects here) and snapshot the operator's AGENTS.md. Storing
 	// the RESOLVED path in RunConfig (not the raw sentinel) means re-deriving it
@@ -97,6 +119,7 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		},
 		Briefings:     req.Briefings,
 		RootSessionID: rootSessionID,
+		Verify:        req.Verify,
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -284,6 +307,9 @@ func (s *Server) handleUpdateRun(w http.ResponseWriter, r *http.Request) {
 	if req.Archived != nil && !apply(s.store.SetRunArchived(r.Context(), id, *req.Archived)) {
 		return
 	}
+	if req.Archived != nil && *req.Archived && s.loops != nil {
+		s.loops.EndRun(context.WithoutCancel(r.Context()), id, loop.EndedRunArchived)
+	}
 	if req.Seen != nil {
 		mark := s.store.MarkRunSeen
 		if !*req.Seen {
@@ -318,9 +344,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id, sid := r.PathValue("id"), r.PathValue("sid")
 	var req struct {
 		Content string `json:"content"`
+		// Verify sets (or replaces) the session's verification with the message.
+		Verify *verify.Request `json:"verify"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		writeErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
 	if req.Content == "" {
@@ -328,10 +356,34 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A UserEvent is Input-class: the commit notifier wakes/respawns the target
-	// session (the iteration / follow-up mechanism).
-	eventID, err := s.store.AppendEvent(r.Context(), id, sid, &event.UserEvent{Content: req.Content})
+	// session (the iteration / follow-up mechanism). With a verification change,
+	// it is written under the change's lock once the change is in place
+	// (verify.SetThen), so the session wakes to both.
+	var eventID string
+	var err error
+	sent := false
+	send := func() {
+		sent = true
+		eventID, err = s.store.AppendEvent(r.Context(), id, sid, &event.UserEvent{Content: req.Content})
+	}
+	if req.Verify != nil {
+		if code, verr := s.setVerify(r, id, sid, *req.Verify, send); verr != nil {
+			writeErr(w, code, verr.Error())
+			return
+		}
+	}
+	if !sent {
+		send()
+	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		msg := err.Error()
+		if req.Verify != nil {
+			// Set before the message, which failed: say so, or a retry would read
+			// as the first attempt.
+			msg += "; the verification change was applied before the message failed"
+			slog.Warn("send message: verification set, but the message failed", "run_id", id, "session_id", sid, "error", err)
+		}
+		writeErr(w, http.StatusInternalServerError, msg)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "delivered", "event_id": eventID})
@@ -343,6 +395,11 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Every loop of the run ends now, including one on a session that is
+	// already concluded, which the cascade below leaves alone.
+	if s.loops != nil {
+		s.loops.EndRun(context.WithoutCancel(r.Context()), id, loop.EndedRunCancelled)
 	}
 	reg := s.mgr.RunRegistry().GetOrCreate(id)
 	// Cancelling each root cascades to its children (CancelSession is recursive).
@@ -384,6 +441,11 @@ func (s *Server) handleRestartRun(w http.ResponseWriter, r *http.Request) {
 // a soft source_run_id, not an FK).
 func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Drop the run's loops first, so no tick revives a session the cancel below
+	// leaves alone (a concluded one) while its rows are being deleted.
+	if s.loops != nil {
+		s.loops.ForgetRun(id)
+	}
 	// Cancel live sessions first. Best-effort: a run with no live goroutines
 	// (the common case for a corrupted/dead run) cancels nothing and proceeds.
 	if sessions, err := s.store.ListSessions(r.Context(), id); err == nil {

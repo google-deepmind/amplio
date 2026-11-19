@@ -66,7 +66,7 @@ const AgentType = config.ChatbotAgentType
 
 func init() {
 	agent.Register(AgentType, factory, agent.Traits{Interactive: true})
-	agent.RegisterTools(AgentType, toolset.Defs)
+	agent.RegisterTools(AgentType, toolset.Lister(toolset.GoesIdle))
 }
 
 func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {

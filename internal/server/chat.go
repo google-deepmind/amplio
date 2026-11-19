@@ -16,14 +16,18 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"amplio/internal/db"
 	"amplio/internal/event"
 	"amplio/internal/toolsummary"
+	"amplio/internal/verify"
 )
 
 // chatBubble is a projected chat message. Tool-result bodies never cross the
@@ -31,12 +35,13 @@ import (
 // server-computed completion flag.
 type chatBubble struct {
 	EventID  string `json:"event_id"`
-	Kind     string `json:"kind"` // "operator" | "chatbot" | "agent" | "environment" | "child_result"
+	Kind     string `json:"kind"` // "operator" | "chatbot" | "agent" | "environment" | "child_result" | "verdict"
 	Content  string `json:"content"`
 	Thoughts string `json:"thoughts,omitempty"`
 	From     string `json:"from,omitempty"`
-	// Verdict is set only for kind=="child_result": the sub-agent's terminal
-	// status (concluded | crashed | cancelled), so the client can badge it.
+	// Verdict is set for kind=="child_result": the sub-agent's terminal status
+	// (concluded | crashed | cancelled), so the client can badge it; and for
+	// kind=="verdict": PASS | FAIL, or the status of a verifier that stopped.
 	Verdict string `json:"verdict,omitempty"`
 	// Notes, also only for child_result: facts about how the sub-agent concluded
 	// (e.g. what it left running), each with a label to show.
@@ -53,6 +58,15 @@ type chatBubble struct {
 	Refusal *chatRefusal `json:"refusal,omitempty"`
 	// StopNotice is set when the turn stopped abnormally (see stopNoticeFor).
 	StopNotice *stopNotice `json:"stop_notice,omitempty"`
+	// Loop is set on a loop's tick (an operator bubble): which loop, which tick.
+	Loop *event.LoopTick `json:"loop,omitempty"`
+	// Outcome is set for kind=="verdict": what the session's verifier said,
+	// as the harness told the session (From is the verifier, Content its
+	// findings).
+	Outcome *event.VerifyOutcome `json:"outcome,omitempty"`
+	// Stale is set for kind=="verdict" when that verdict was on a candidate a
+	// newer version (or a clear) withdrew: told as information, and stale.
+	Stale bool `json:"stale,omitempty"`
 }
 
 // chatRefusal is the display part of event.Refusal: the provider's category
@@ -154,6 +168,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	stale := &staleVerdicts{store: s.store, runID: id, sessionID: sid}
 	msgs := make([]chatBubble, 0, len(recs))
 	for _, rec := range recs {
 		if rec.Step <= boundary {
@@ -161,16 +176,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		switch ev := rec.Event.(type) {
 		case *event.UserEvent:
+			if ev.Outcome != nil {
+				msgs = append(msgs, stale.bubble(r.Context(), rec, ev.Outcome))
+				continue
+			}
 			// The harness writes user-role nudges too (conclusion checks such as
 			// the end-of-run reminder): shown as amplio's, not as the operator's.
 			kind, from := "operator", "user"
-			if ev.IsHarness() {
+			switch {
+			case ev.IsHarness():
 				kind, from = "environment", "amplio"
+			case ev.Loop != nil:
+				from = "loop " + ev.Loop.ID // still the operator's: their prompt, re-sent
 			}
 			msgs = append(msgs, chatBubble{
 				EventID: rec.EventID, Kind: kind, Content: ev.Content,
 				From: from, Step: rec.Step, CreatedAt: rec.CreatedAt,
-				ToolCalls: []chatToolCall{},
+				ToolCalls: []chatToolCall{}, Loop: ev.Loop,
 			})
 		case *event.AssistantEvent:
 			// An empty turn has nothing to show — unless it was refused or
@@ -196,7 +218,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			// original, offer no toggle".
 			rewrite := rewrites[rec.Step].Text
 			msgs = append(msgs, chatBubble{
-				EventID: rec.EventID, Kind: "chatbot", Content: ev.Content,
+				EventID: rec.EventID, Kind: "chatbot", Content: withConclusion(ev),
 				Thoughts: ev.Thoughts, Step: rec.Step, CreatedAt: rec.CreatedAt,
 				ToolCalls: tcs, Rewrite: rewrite, Refusal: refusal, StopNotice: notice,
 			})
@@ -223,6 +245,29 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				Step: rec.Step, CreatedAt: rec.CreatedAt,
 				ToolCalls: []chatToolCall{},
 			})
+		case *event.ToolResultEvent:
+			// Tool results stay out of the chat, but a conclude call's result
+			// that tells what the verifier said is the verdict the session got.
+			if ev.Outcome != nil {
+				msgs = append(msgs, stale.bubble(r.Context(), rec, ev.Outcome))
+			}
+		case *event.LoopEvent:
+			// A loop was set, changed or ended: amplio's note, not a turn.
+			msgs = append(msgs, chatBubble{
+				EventID: rec.EventID, Kind: "environment", Content: s.loopEventText(ev),
+				From: "amplio", Step: rec.Step, CreatedAt: rec.CreatedAt,
+				ToolCalls: []chatToolCall{},
+			})
+		case *event.VerifyEvent:
+			// The harness's own actions come with its check messages; the
+			// operator's or parent's changes have only this event.
+			if text := verifyEventText(ev); text != "" {
+				msgs = append(msgs, chatBubble{
+					EventID: rec.EventID, Kind: "environment", Content: text,
+					From: "amplio", Step: rec.Step, CreatedAt: rec.CreatedAt,
+					ToolCalls: []chatToolCall{},
+				})
+			}
 		case *event.CompactionEvent:
 			// Context compaction: the prior turns were rolled into a summary at
 			// this boundary. Surface it as a distinct seam (rendered as a divider
@@ -304,8 +349,69 @@ func obsStr(o db.ObservationRecord, key string) string {
 	return ""
 }
 
+// withConclusion is an assistant turn's text followed by the result its
+// conclude call gives, if it makes one: the session's result reads as the
+// turn's message, as a reply without tool calls does.
+func withConclusion(a *event.AssistantEvent) string {
+	tc, ok := a.ConcludeCall()
+	if !ok {
+		return a.Content
+	}
+	r := strings.TrimSpace(event.ConcludeResult(tc.Arguments))
+	switch {
+	case r == "":
+		return a.Content
+	case strings.TrimSpace(a.Content) == "":
+		return r
+	}
+	return a.Content + "\n\n" + r
+}
+
+// staleVerdicts tells which verdicts told as information were stale (on a
+// withdrawn candidate), read from the session's verification once, the first
+// time a verdict told as information needs it.
+type staleVerdicts struct {
+	store            db.Store
+	runID, sessionID string
+	stale            map[string]bool // verifier + At
+}
+
+func staleKey(o *event.VerifyOutcome) string {
+	return o.Verifier + "@" + o.At.UTC().Format(time.RFC3339Nano)
+}
+
+// bubble is o's verdict bubble, marked stale when it is.
+func (sv *staleVerdicts) bubble(ctx context.Context, rec db.EventRecord, o *event.VerifyOutcome) chatBubble {
+	b := verdictBubble(rec, o)
+	if !o.Earlier {
+		return b
+	}
+	if sv.stale == nil {
+		sv.stale = map[string]bool{}
+		if st, err := verify.Load(ctx, sv.store, sv.runID, sv.sessionID); err == nil {
+			for i, e := range st.History {
+				if e.Action == event.VerifyVerdict && e.Outcome != nil && (e.Stale || slices.Contains(st.Late, i)) {
+					sv.stale[staleKey(e.Outcome)] = true
+				}
+			}
+		}
+	}
+	b.Stale = sv.stale[staleKey(o)]
+	return b
+}
+
+// verdictBubble shows what a session's verifier said, as the harness told it
+// (a verify message, or a conclude call's result). The verifier's own record
+// of its outcome isn't shown: a verdict for an earlier conclusion was never
+// told.
+func verdictBubble(rec db.EventRecord, o *event.VerifyOutcome) chatBubble {
+	return chatBubble{EventID: rec.EventID, Kind: "verdict", Content: o.Findings, From: o.Verifier,
+		Verdict: o.Verdict, Outcome: o, Step: rec.Step, CreatedAt: rec.CreatedAt, ToolCalls: []chatToolCall{}}
+}
+
 // chatNote is a child_result note as the chat shows it.
 type chatNote struct {
+	Kind  string `json:"kind"` // an event.Note* kind, for styling
 	Label string `json:"label"`
 	Text  string `json:"text"`
 }
@@ -313,7 +419,45 @@ type chatNote struct {
 func chatNotes(notes []event.ResultNote) []chatNote {
 	out := make([]chatNote, 0, len(notes))
 	for _, n := range notes {
-		out = append(out, chatNote{Label: event.NoteLabel(n.Kind), Text: n.Text})
+		out = append(out, chatNote{Kind: n.Kind, Label: event.NoteLabel(n.Kind), Text: n.Text})
 	}
 	return out
+}
+
+// verifyEventText is an operator's or parent's change to a verification as a
+// short note for the chat ("verification set by the operator" and what it
+// checks), or "" for the harness's actions and for a version a loop's tick
+// started (the tick's bubble shows it).
+func verifyEventText(e *event.VerifyEvent) string {
+	verb, ok := map[string]string{
+		event.VerifySet: "set", event.VerifyReplace: "replaced", event.VerifyClear: "cleared",
+	}[e.Action]
+	if !ok || event.LoopOf(e.By) != "" {
+		return ""
+	}
+	head := "verification " + verb
+	switch e.By {
+	case event.ByOperator:
+		head += " by the operator"
+	case "", event.ByHarness:
+	default:
+		head += " by " + e.By
+	}
+	if e.Action == event.VerifyClear {
+		return head
+	}
+	criteria, model, rounds := e.Criteria, e.Model, "unbounded rounds"
+	if criteria == "" {
+		criteria = "the agent's current request"
+	}
+	if model == "" {
+		model = "the agent's own"
+	}
+	switch {
+	case e.MaxRounds == 1:
+		rounds = "1 round"
+	case e.MaxRounds > 1:
+		rounds = fmt.Sprintf("up to %d rounds", e.MaxRounds)
+	}
+	return head + "\nagainst: " + criteria + "\nverifier model: " + model + " · " + rounds
 }

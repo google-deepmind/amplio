@@ -27,7 +27,8 @@ import (
 )
 
 type Params struct {
-	Query     string `json:"query" jsonschema:"required" jsonschema_description:"Search query (FTS5 syntax: words ANDed by default. Use quotes for phrases and - for negation)"`
+	Query     string `json:"query" jsonschema:"required" jsonschema_description:"Words to find, all of which must match; each matches as written, punctuation and all (final_result.json, sub-agent). \"Quoted phrases\" match in sequence; a OR b matches either."`
+	Syntax    string `json:"syntax,omitempty" jsonschema:"enum=simple,enum=fts5" jsonschema_description:"simple (default), or fts5 to pass the query to SQLite FTS5 as written, for NOT, NEAR, prefix* and grouping."`
 	SessionID string `json:"session_id,omitempty" jsonschema_description:"Limit search to a specific session"`
 	StepMin   *int   `json:"step_min,omitempty" jsonschema_description:"Inclusive lower bound on step number"`
 	StepMax   *int   `json:"step_max,omitempty" jsonschema_description:"Inclusive upper bound on step number"`
@@ -56,16 +57,46 @@ func New(store db.Store, runID string) *tool.Tool {
 			if limit > 100 {
 				limit = 100
 			}
-			results, err := search(ctx, store, rid, params, limit)
+			query := params.Query
+			var simple *simpleQuery
+			switch params.Syntax {
+			case "", "simple":
+				q := toFTS5(params.Query)
+				if q.FTS5 == "" {
+					return &tool.Result{Content: fmt.Sprintf("Nothing to search for in %q: no word or phrase in it has a letter or digit.", params.Query)}, nil
+				}
+				query, simple = q.FTS5, &q
+			case "fts5":
+			default:
+				return &tool.Result{Content: fmt.Sprintf("Error: syntax %q: want simple or fts5.", params.Syntax), IsError: true}, nil
+			}
+			fail := func(err error) (*tool.Result, error) {
+				msg := fmt.Sprintf("Error: %s", err)
+				if simple == nil {
+					msg += "\nsyntax=fts5 passes the query to SQLite FTS5 as written; the default simple syntax takes plain words."
+				}
+				return &tool.Result{Content: msg, IsError: true}, nil
+			}
+
+			results, err := search(ctx, store, rid, query, params, limit)
 			if err != nil {
-				return &tool.Result{Content: fmt.Sprintf("Error: %s", err), IsError: true}, nil
+				return fail(err)
+			}
+			header := fmt.Sprintf("%d result(s) for %q:", len(results), params.Query)
+			// Every term must match, which a long list of words often defeats.
+			if len(results) == 0 && simple != nil && len(simple.Terms) > 1 && !simple.HasOR {
+				if results, err = search(ctx, store, rid, simple.AnyTerm(), params, limit); err != nil {
+					return fail(err)
+				}
+				header = fmt.Sprintf("No event matches all %d terms of %q; closest matches (any of the terms, best first):",
+					len(simple.Terms), params.Query)
 			}
 			if len(results) == 0 {
 				return &tool.Result{Content: fmt.Sprintf("No results for query %q.", params.Query)}, nil
 			}
 
 			var b strings.Builder
-			fmt.Fprintf(&b, "%d result(s) for %q:\n", len(results), params.Query)
+			b.WriteString(header + "\n")
 			for _, e := range results {
 				// Rune-safe truncation: event content is frequently non-ASCII
 				// (agent prose, file contents), so a byte slice could split a rune.
@@ -82,13 +113,13 @@ func New(store db.Store, runID string) *tool.Tool {
 // maxSearchRows bounds how many matches search reads to fill limit.
 const maxSearchRows = 5000
 
-// search returns the best limit matches this binary knows. The full-text
-// index covers a newer binary's events too (it indexes the raw JSON), so when
-// some of the matches are those, it reads further until limit known ones are
-// found or the matches run out.
-func search(ctx context.Context, store db.Store, runID string, p *Params, limit int) ([]db.EventRecord, error) {
+// search returns the best limit matches of the FTS5 query that this binary
+// knows. The full-text index covers a newer binary's events too (it indexes
+// the raw JSON), so when some of the matches are those, it reads further until
+// limit known ones are found or the matches run out.
+func search(ctx context.Context, store db.Store, runID, query string, p *Params, limit int) ([]db.EventRecord, error) {
 	for fetch := limit; ; fetch *= 2 {
-		recs, err := store.SearchEvents(ctx, runID, p.Query, db.SearchOpts{
+		recs, err := store.SearchEvents(ctx, runID, query, db.SearchOpts{
 			SessionID: p.SessionID,
 			StepMin:   p.StepMin,
 			StepMax:   p.StepMax,

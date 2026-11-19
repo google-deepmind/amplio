@@ -22,34 +22,29 @@ import (
 	"amplio/internal/db"
 	"amplio/internal/event"
 	"amplio/internal/proctree"
+	"amplio/internal/verify"
 )
 
 // End-of-run reminder. Concluding is final for an autonomous agent: its running
 // sub-agents are cancelled, and notifications from its background processes
 // reach no one afterwards (the environment never wakes a concluded agent). So
 // when an agent is about to conclude with work still running, it gets one
-// reminder instead, listing what is running and what concluding will do, and
-// decides: wait, stop it, or conclude anyway. Facts only, and bounded: the
-// attempt right after a reminder always concludes. Interactive agents never
-// get here; they go idle, and notifications wake them.
+// reminder instead (as its conclude call's result, or a message after a reply
+// without tool calls), listing what is running and what concluding will do,
+// and decides: wait, stop it, or conclude anyway. Facts only, and bounded:
+// the attempt right after a reminder always concludes. Interactive agents
+// never get here; they go idle, and notifications wake them.
 
-// reminderPrefix opens the reminder. justReminded finds reminders by their
-// Check; the prefix identifies those written before Check existed.
-const reminderPrefix = "[system] Before you conclude, these are still running:"
+// reminderLead opens the reminder message; reminderPrefix is how it reads
+// with the harness's prefix. justReminded finds reminders by their Check; the
+// prefix identifies those written before Check existed.
+const (
+	reminderLead   = "Before you conclude, these are still running:"
+	reminderPrefix = "[system] " + reminderLead
+)
 
-// conclusionCheck runs the checks for an autonomous agent about to conclude,
-// given the context its final turn answered. It returns the message that holds
-// the conclusion for a turn, or nil to let it through. One check today: work
-// still running (the end-of-run reminder). Further checks (e.g. verification)
-// go here, in order.
-func (a *EventLoopAgent) conclusionCheck(ctx context.Context, events []db.EventRecord) *event.UserEvent {
-	if !justReminded(events) {
-		if w := a.runningWork(ctx); !w.empty() {
-			return &event.UserEvent{Content: w.reminder(), Check: event.CheckLeftovers}
-		}
-	}
-	return nil
-}
+// reminderCallPrefix opens the reminder as a conclude call's result.
+const reminderCallPrefix = "Not concluded yet: these are still running:"
 
 // scanProcs is the run's process table; a var so tests can stand one in.
 var scanProcs = proctree.Scan
@@ -75,6 +70,11 @@ func (a *EventLoopAgent) runningWork(ctx context.Context) runningWork {
 		a.logger.Warn("list sub-agents for the end-of-run reminder", "error", err)
 	}
 	for _, c := range children {
+		// Not its own verifier: the harness started it, and re-concluding while
+		// it works mustn't remind the agent of it.
+		if verify.VerifierFor(&c) == a.cfg.SessionID {
+			continue
+		}
 		if c.Status == db.SessionOngoing || c.Status == db.SessionAwaiting {
 			w.subAgents = append(w.subAgents, c.SessionID)
 		}
@@ -82,10 +82,15 @@ func (a *EventLoopAgent) runningWork(ctx context.Context) runningWork {
 	return w
 }
 
-// reminder is the message that holds a conclusion for one turn.
-func (w runningWork) reminder() string {
+// reminder is what holds a conclusion for one turn: a conclude call's result
+// (call), or a message after a reply without tool calls.
+func (w runningWork) reminder(call bool) string {
 	var b strings.Builder
-	b.WriteString(reminderPrefix + "\n")
+	if call {
+		b.WriteString(reminderCallPrefix + "\n")
+	} else {
+		b.WriteString(reminderLead + "\n")
+	}
 	for i, j := range w.jobs {
 		if i == maxReminderJobs {
 			fmt.Fprintf(&b, "- and %d more background jobs\n", len(w.jobs)-i)
@@ -120,8 +125,12 @@ func (w runningWork) reminder() string {
 		b.WriteString(", or leave them running on purpose and just conclude")
 	}
 	b.WriteString(".\n")
-	b.WriteString("When you conclude, your final message is your result: restate your full " +
-		"conclusion there, not only a reply to this note.")
+	if call {
+		b.WriteString("To conclude anyway, call conclude again.")
+	} else {
+		b.WriteString("When you conclude, your final message is your result: restate your full " +
+			"conclusion there, not only a reply to this note.")
+	}
 	return b.String()
 }
 
@@ -139,13 +148,14 @@ func (w runningWork) notes() []event.ResultNote {
 	}
 }
 
-// justReminded reports whether a reminder came after the agent's last turn,
-// i.e. this conclusion attempt answers one, so it concludes whatever is still
-// running. The scan stops at the agent's previous turn, so a reminder from an
-// earlier round (before a conclusion, or before tool calls) never counts.
-// Anything that arrived after the reminder (a notification, an operator or
-// parent message) doesn't re-arm it: this turn was produced with the reminder
-// in its context, so the agent concluded knowing what is still running.
+// justReminded reports whether a reminder came after the agent's last turn
+// (as a message, or as the result of that turn's conclude call), i.e. this
+// conclusion attempt answers one, so it concludes whatever is still running.
+// The scan stops at the agent's previous turn, so a reminder from an earlier
+// round (before a conclusion, or before tool calls) never counts. Anything
+// that arrived after the reminder (a notification, an operator or parent
+// message) doesn't re-arm it: this turn was produced with the reminder in its
+// context, so the agent concluded knowing what is still running.
 func justReminded(events []db.EventRecord) bool {
 	for i := len(events) - 1; i >= 0; i-- {
 		switch e := events[i].Event.(type) {
@@ -153,6 +163,10 @@ func justReminded(events []db.EventRecord) bool {
 			return false
 		case *event.UserEvent:
 			if e.Check == event.CheckLeftovers || strings.HasPrefix(e.Content, reminderPrefix) {
+				return true
+			}
+		case *event.ToolResultEvent:
+			if e.Check == event.CheckLeftovers {
 				return true
 			}
 		}

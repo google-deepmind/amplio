@@ -32,9 +32,10 @@ import (
 // the session. This is a diagnostic only, to show whether that window is hit
 // in practice; nothing is redelivered.
 //
-// A cancelled or crashed session keeps its unread Inputs by design, and an
+// A cancelled or crashed session keeps its unread Inputs by design, an
 // environment notification doesn't revive a concluded one (the notifier's
-// rule), so neither is reported. An Input committed after left went through
+// rule), and a verifier's candidate that landed as it stopped is sent again by
+// the agent it verifies, so none of those is reported. An Input committed after left went through
 // the notifier to a session without a goroutine, which revives it.
 func WarnUndelivered(store db.Store, reg *Registry, runID, sessionID string, left time.Time) {
 	if store == nil || (reg != nil && reg.IsRegistered(sessionID)) {
@@ -58,6 +59,9 @@ func WarnUndelivered(store db.Store, reg *Registry, runID, sessionID string, lef
 		if m, ok := rec.Event.(*event.MessageEvent); ok && m.SenderType == event.SenderTypeEnvironment &&
 			sess.Status == db.SessionConcluded {
 			continue
+		}
+		if u, ok := rec.Event.(*event.UserEvent); ok && u.Check == event.CheckVerify {
+			continue // a candidate for a verifier: the harness sends it again once the goroutine is gone
 		}
 		unread = append(unread, rec)
 	}

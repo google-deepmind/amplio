@@ -16,13 +16,18 @@ package inspect
 
 import (
 	"context"
+	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"amplio/internal/db"
 	"amplio/internal/db/sqlite"
 	"amplio/internal/event"
+	"amplio/internal/util"
 )
 
 func seedSession(t *testing.T, s db.Store) (string, string) {
@@ -452,6 +457,47 @@ func TestFormatOpenPhase_NoToolAssistantExpands(t *testing.T) {
 	}
 }
 
+// A conclude call's result is the session's result: rendered in full, like
+// a reply without tool calls, and its step is shown even when summarized.
+// conclude() without a result is a one-line brief.
+func TestRenderStepBody_ConcludeResult(t *testing.T) {
+	result := strings.Repeat("All 12 tests pass after the fix. ", 10)
+	recs := []db.EventRecord{{Event: &event.AssistantEvent{ToolCalls: []event.ToolCall{
+		{ID: "c1", Name: event.ConcludeTool, Arguments: `{"result":"` + result + `"}`}}}}}
+	var b strings.Builder
+	renderStepBody(&b, recs)
+	if !strings.Contains(b.String(), "conclude") || !strings.Contains(b.String(), strings.TrimSpace(result)) {
+		t.Errorf("the result isn't rendered in full:\n%s", b.String())
+	}
+	if !expandStep(recs, 5, 20, 1, true) {
+		t.Error("a summarized step with a conclude result is not expanded")
+	}
+	waiting := []db.EventRecord{{Event: &event.AssistantEvent{ToolCalls: []event.ToolCall{
+		{ID: "c2", Name: event.ConcludeTool, Arguments: `{}`}}}}}
+	b.Reset()
+	renderStepBody(&b, waiting)
+	if strings.TrimSpace(b.String()) != "· conclude" || expandStep(waiting, 5, 20, 1, true) {
+		t.Errorf("conclude() renders as %q (expanded %v), want a brief, not expanded", b.String(), expandStep(waiting, 5, 20, 1, true))
+	}
+}
+
+// A conclude call made alongside other calls failed on its own (it is
+// exclusive): it reads as a brief, not as a conclusion, and doesn't expand
+// its step.
+func TestRenderStepBody_ConcludeAmongOtherCalls(t *testing.T) {
+	recs := []db.EventRecord{{Event: &event.AssistantEvent{ToolCalls: []event.ToolCall{
+		{ID: "b1", Name: "bash", Arguments: `{"command":"make test"}`},
+		{ID: "c1", Name: event.ConcludeTool, Arguments: `{"result":"All tests pass."}`}}}}}
+	var b strings.Builder
+	renderStepBody(&b, recs)
+	if strings.Contains(b.String(), "All tests pass.") || !strings.Contains(b.String(), "· conclude") {
+		t.Errorf("a failed conclude renders as:\n%s\nwant a brief, not the result", b.String())
+	}
+	if expandStep(recs, 5, 20, 1, true) {
+		t.Error("a failed conclude expands its step")
+	}
+}
+
 // Another agent reading this session's steps (a verifier, a parent) sees a
 // conclusion-check nudge as amplio's, not as the operator's words.
 func TestRenderStepBody_HarnessNudgeLabel(t *testing.T) {
@@ -479,19 +525,331 @@ func TestInspect_SkipsUnknownEvents(t *testing.T) {
 	_, err := s.AdvanceStep(ctx, runID, sid) // step 6: only the newer event
 	must(t, err)
 	must(t, appended(s.AppendEvent(ctx, runID, sid,
-		&event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","criteria":"VERIFY-CRITERIA"}`)})))
+		&event.UnknownEvent{Type: "teleport", Raw: []byte(`{"type":"teleport","criteria":"VERIFY-CRITERIA"}`)})))
 	deps := &Deps{Store: s, RunID: runID}
 
 	for name, out := range map[string]string{
-		"session_steps":   SessionSteps(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content,
-		"session_peek":    SessionPeek(deps).ParseAndExecute(ctx, `{"session_id":"s1","last_n_steps":3}`).Content,
-		"session_summary": SessionSummary(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content,
+		"session_steps":      SessionSteps(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content,
+		"session_steps full": SessionSteps(deps).ParseAndExecute(ctx, `{"session_id":"s1","full":true}`).Content,
+		"session_peek":       SessionPeek(deps).ParseAndExecute(ctx, `{"session_id":"s1","last_n_steps":3}`).Content,
+		"session_summary":    SessionSummary(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content,
 	} {
 		if !strings.Contains(out, "raw tail message") {
 			t.Errorf("%s lost the session's own events:\n%s", name, out)
 		}
-		if strings.Contains(out, "verify") || strings.Contains(out, "unknown") || strings.Contains(out, "step 6") {
+		if strings.Contains(out, "teleport") || strings.Contains(out, "unknown") || strings.Contains(out, "step 6") {
 			t.Errorf("%s shows the newer event:\n%s", name, out)
 		}
+	}
+}
+
+// A change to a session's verification, and the harness's steps in it, read
+// as one line each; a step holding one is shown even when summarized.
+func TestRenderStepBody_Verify(t *testing.T) {
+	var b strings.Builder
+	recs := []db.EventRecord{
+		{Event: &event.VerifyEvent{Action: event.VerifySet, By: "boss", Criteria: "tests pass", MaxRounds: 3}},
+		{Event: &event.VerifyEvent{Action: event.VerifyRejected, By: event.ByHarness, Verifier: "quick-rabbit", Round: 1}},
+		{Event: event.VerifierOutcome("quick-rabbit", "FAIL\n\nno unit", "", time.Time{})},
+		{Event: event.VerifierOutcome("quick-rabbit", "llm call: 404", db.SessionCrashed, time.Time{})},
+		{Event: &event.VerifyEvent{Action: event.VerifyClear, By: "operator"}},
+		{Event: &event.VerifyEvent{Action: event.VerifyWithdrawn, By: event.ByHarness, Verifier: "quick-rabbit", Round: 2,
+			Reason: "verification was turned off, which withdrew v1, candidate 2"}},
+		{Event: &event.VerifyEvent{Action: event.VerifyStale, By: event.ByHarness, Verifier: "quick-rabbit",
+			Outcome: &event.VerifyOutcome{Verifier: "quick-rabbit", Verdict: event.VerdictPass},
+			Reason:  "for v1, candidate 2, withdrawn when verification was turned off"}},
+	}
+	renderStepBody(&b, recs)
+	for _, want := range []string{
+		"[verify] set by boss, against: tests pass",
+		"[verify] rejected · verifier quick-rabbit · round 1",
+		"[verify] verdict FAIL from verifier quick-rabbit\n    no unit",
+		"[verify] verifier quick-rabbit stopped without a verdict: crashed\n    llm call: 404",
+		"[verify] cleared by operator",
+		"[verify] withdrawn: verification was turned off, which withdrew v1, candidate 2 · verifier quick-rabbit · round 2",
+		"[verify] stale verdict PASS from verifier quick-rabbit, ignored: for v1, candidate 2, withdrawn when verification was turned off",
+	} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("render lacks %q:\n%s", want, b.String())
+		}
+	}
+	if !expandStep(recs[4:], 5, 20, 1, true) || !expandStep(recs[2:3], 5, 20, 1, true) {
+		t.Error("a summarized step with a verification change or a verdict is not expanded")
+	}
+}
+
+// A loop's tick reads as its loop's, and the loop's changes are shown, who
+// made them and the schedule in words, without the prompt: in a summary or a
+// compaction an agent reads, it would pass for a request.
+func TestRenderStepBody_Loops(t *testing.T) {
+	sched := &event.Schedule{Kind: event.ScheduleRRule, Spec: "DTSTART:20261110T120000Z\nRRULE:FREQ=MINUTELY;COUNT=3"}
+	var b strings.Builder
+	renderStepBody(&b, []db.EventRecord{
+		{Event: &event.LoopEvent{Action: event.LoopSet, ID: "1", Prompt: "report the eval", By: event.ByOperator,
+			Schedule: sched, Summary: "every 1m, 3 times"}},
+		{Event: &event.UserEvent{Content: "[loop 1 · every 1m, 3 times · tick 1] report the eval", Loop: &event.LoopTick{ID: "1", N: 1}}},
+		{Event: &event.LoopEvent{Action: event.LoopEdit, ID: "1", Prompt: "report the eval", By: event.ByOperator,
+			Schedule: sched, Verify: &event.LoopVerify{MaxRounds: 2}}},
+		{Event: &event.UserEvent{Content: "[loop 1 · every 1m, 3 times · tick 2 · verification v1] report the eval",
+			Loop: &event.LoopTick{ID: "1", N: 2, Version: 1}}},
+		{Event: &event.LoopEvent{Action: event.LoopStop, ID: "1", By: event.ByOperator}},
+		{Event: &event.LoopEvent{Action: event.LoopEnded, ID: "1", By: event.ByHarness, Reason: "run archived"}},
+	})
+	want := `    [loop 1 set by the operator] schedule: every 1m, 3 times
+    [loop 1] [loop 1 · every 1m, 3 times · tick 1] report the eval
+    [loop 1 changed by the operator] schedule: DTSTART:20261110T120000Z RRULE:FREQ=MINUTELY;COUNT=3
+    verify each tick: up to 2 rounds
+    [loop 1, verification v1] [loop 1 · every 1m, 3 times · tick 2 · verification v1] report the eval
+    [loop 1 stopped by the operator]
+    [loop 1 ended by amplio] run archived
+`
+	if got := b.String(); got != want {
+		t.Errorf("render:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// seedSteps creates session s1 in a new run holding steps[i] at step i.
+func seedSteps(t *testing.T, s db.Store, steps ...[]event.Event) string {
+	t.Helper()
+	ctx := t.Context()
+	runID := db.NewRunID()
+	must(t, s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()}))
+	must(t, s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "s1", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()}))
+	for step, evs := range steps {
+		if step > 0 {
+			_, err := s.AdvanceStep(ctx, runID, "s1")
+			must(t, err)
+		}
+		for _, e := range evs {
+			must(t, s.AppendEventAtStep(ctx, runID, "s1", step, e))
+		}
+	}
+	return runID
+}
+
+// big is an assistant event whose content starts with "<tag>-BEGIN", ends with
+// "<tag>-END" and is n characters long in between.
+func big(tag string, n int) *event.AssistantEvent {
+	return &event.AssistantEvent{Content: tag + "-BEGIN\n" + strings.Repeat("x", n) + "\n" + tag + "-END"}
+}
+
+func small(content string) *event.AssistantEvent { return &event.AssistantEvent{Content: content} }
+
+// steps runs session_steps on s1 with the given extra args.
+func steps(t *testing.T, s db.Store, runID, extra string) string {
+	t.Helper()
+	r := SessionSteps(&Deps{Store: s, RunID: runID}).ParseAndExecute(t.Context(), `{"session_id":"s1"`+extra+`}`)
+	if r.IsError {
+		t.Fatalf("session_steps%s: %s", extra, r.Content)
+	}
+	return r.Content
+}
+
+// overBudget reports a full-mode result longer than fullStepsBudget.
+func overBudget(out string) error {
+	if n := utf8.RuneCountInString(out); n > fullStepsBudget {
+		return fmt.Errorf("the result is %d characters, over the %d budget", n, fullStepsBudget)
+	}
+	return nil
+}
+
+var continueRE = regexp.MustCompile(`Continue with start_step=(\d+)`)
+
+// continueStep is the start_step a session_steps note says to continue
+// from, or -1 if there is none.
+func continueStep(t *testing.T, out string) int {
+	t.Helper()
+	m := continueRE.FindAllStringSubmatch(out, -1)
+	if len(m) == 0 {
+		return -1
+	}
+	if len(m) > 1 {
+		t.Fatalf("more than one continuation note:\n%s", out)
+	}
+	n, err := strconv.Atoi(m[0][1])
+	must(t, err)
+	return n
+}
+
+// The compact view cuts a long event to one short line; full mode shows it
+// whole, line breaks kept, under a header naming its step and type.
+func TestSessionSteps_FullShowsWholeEvent(t *testing.T) {
+	s := openMem(t)
+	long := big("LONG", 500)
+	runID := seedSteps(t, s, []event.Event{&event.UserEvent{Content: "TASK"}}, []event.Event{long})
+
+	if out := steps(t, s, runID, ``); strings.Contains(out, "LONG-END") || !strings.Contains(out, "LONG-BEGIN") {
+		t.Errorf("the compact view should cut the long event short:\n%s", out)
+	}
+	out := steps(t, s, runID, `,"full":true`)
+	if err := overBudget(out); err != nil {
+		t.Error(err)
+	}
+	if !strings.Contains(out, "--- step 1 · assistant ---\n"+long.ToText()+"\n") {
+		t.Errorf("full mode should show the event whole under its header:\n%s", out)
+	}
+	if !strings.Contains(out, "--- step 0 · user ---") || strings.Contains(out, "[Stopped") || strings.Contains(out, "[Cut") {
+		t.Errorf("full mode should show every event and no note:\n%s", out)
+	}
+}
+
+// Events that don't all fit stop before the first that doesn't, with a note
+// to continue from its step, which then shows it whole.
+func TestSessionSteps_FullStopsAtBudget(t *testing.T) {
+	s := openMem(t)
+	runID := seedSteps(t, s,
+		[]event.Event{&event.UserEvent{Content: "TASK"}},
+		[]event.Event{big("ONE", 20000)},
+		[]event.Event{big("TWO", 20000)},
+		[]event.Event{small("THREE")})
+
+	out := steps(t, s, runID, `,"full":true`)
+	if err := overBudget(out); err != nil {
+		t.Error(err)
+	}
+	if !strings.Contains(out, "ONE-END") || strings.Contains(out, "TWO-BEGIN") || strings.Contains(out, "THREE") {
+		t.Errorf("want step 1 whole and nothing from steps 2-3:\n%s", out)
+	}
+	note := fmt.Sprintf("\n[Stopped at the 32000-character limit before the next event (step 2, assistant, %d characters). Continue with start_step=2.]\n",
+		utf8.RuneCountInString(big("TWO", 20000).ToText()))
+	if !strings.HasSuffix(out, note) {
+		t.Errorf("want a note to continue from step 2:\n%s", out)
+	}
+	out = steps(t, s, runID, `,"start_step":2,"full":true`)
+	if !strings.Contains(out, "TWO-END") || !strings.Contains(out, "THREE") || continueStep(t, out) != -1 {
+		t.Errorf("continuing should show steps 2-3 whole:\n%s", out)
+	}
+}
+
+// An event too big to fit in the range's first step is cut, with a note
+// giving its size, the events of its step left out, and the next step.
+func TestSessionSteps_FullCutsFirstStep(t *testing.T) {
+	s := openMem(t)
+	huge := big("HUGE", 50000)
+	runID := seedSteps(t, s,
+		[]event.Event{&event.UserEvent{Content: "TASK"}},
+		[]event.Event{huge, &event.ToolResultEvent{ToolCallID: "t1", Content: "RESULT"}},
+		[]event.Event{small("NEXT")})
+
+	out := steps(t, s, runID, `,"start_step":1,"full":true`)
+	if err := overBudget(out); err != nil {
+		t.Error(err)
+	}
+	hugeStart := strings.Contains(out, "--- step 1 · assistant ---\n==== assistant ====\nHUGE-BEGIN")
+	pastIt := strings.Contains(out, "HUGE-END") || strings.Contains(out, "RESULT") || strings.Contains(out, "NEXT")
+	if !hugeStart || pastIt {
+		t.Errorf("want the start of the huge event and nothing after it:\n%s", out)
+	}
+	note := fmt.Sprintf("this event is %d characters", utf8.RuneCountInString(huge.ToText()))
+	if !strings.Contains(out, note) || !strings.Contains(out, "1 later event of step 1 was left out.") || continueStep(t, out) != 2 {
+		t.Errorf("want a note with %q, the event left out and start_step=2:\n%s", note, out)
+	}
+	// No later step in the range: nothing to continue with.
+	out = steps(t, s, runID, `,"start_step":1,"end_step":1,"full":true`)
+	if !strings.Contains(out, note) || continueStep(t, out) != -1 {
+		t.Errorf("want the size note and no continuation:\n%s", out)
+	}
+}
+
+// Following the notes from the start always moves on and reaches every
+// event, including past a step that holds a small event then a huge one.
+func TestSessionSteps_FullNotesMakeProgress(t *testing.T) {
+	s := openMem(t)
+	runID := seedSteps(t, s,
+		[]event.Event{small("S0")},
+		[]event.Event{small("S1A"), big("S1B", 50000)},
+		[]event.Event{small("S2")},
+		[]event.Event{big("S3", 40000)},
+		[]event.Event{small("S4")})
+
+	var all strings.Builder
+	var starts []int
+	for start := 0; start != -1 && len(starts) < 10; {
+		starts = append(starts, start)
+		out := steps(t, s, runID, fmt.Sprintf(`,"start_step":%d,"full":true`, start))
+		if err := overBudget(out); err != nil {
+			t.Error(err)
+		}
+		all.WriteString(out)
+		next := continueStep(t, out)
+		if next != -1 && next <= start {
+			t.Fatalf("a note says to continue from step %d after starting at %d:\n%s", next, start, out)
+		}
+		start = next
+	}
+	if fmt.Sprint(starts) != "[0 1 2 3 4]" {
+		t.Errorf("following the notes started at steps %v, want [0 1 2 3 4]", starts)
+	}
+	for _, want := range []string{"S0", "S1A", "S1B-BEGIN", "S2", "S3-BEGIN", "S4", "(it shows this step's events above again)"} {
+		if !strings.Contains(all.String(), want) {
+			t.Errorf("following the notes never showed %q:\n%s", want, all.String())
+		}
+	}
+}
+
+// An event cut in the range's first step shows less than it holds, ending in
+// "…", at every size around the limit.
+func TestSessionSteps_FullCutShowsLess(t *testing.T) {
+	s := openMem(t)
+	cuts, whole := 0, 0
+	for n := fullStepsBudget - fullStepsNoteRoom - 120; n < fullStepsBudget-fullStepsNoteRoom; n++ {
+		runID := seedSteps(t, s, []event.Event{small("TASK")}, []event.Event{small(strings.Repeat("x", n))})
+		out := steps(t, s, runID, `,"start_step":1,"full":true`)
+		if err := overBudget(out); err != nil {
+			t.Errorf("content of %d: %v", n, err)
+		}
+		m := cutRE.FindStringSubmatch(out)
+		if m == nil {
+			whole++
+			continue
+		}
+		cuts++
+		size, _ := strconv.Atoi(m[1])
+		shown, _ := strconv.Atoi(m[2])
+		if shown >= size || !strings.Contains(out, "x…\n") {
+			t.Errorf("content of %d: the cut shows %d of %d characters, or doesn't end in \"…\"", n, shown, size)
+		}
+	}
+	if cuts == 0 || whole == 0 {
+		t.Errorf("want sizes on both sides of the limit: %d cut, %d whole", cuts, whole)
+	}
+}
+
+var cutRE = regexp.MustCompile(`this event is (\d+) characters and only the first (\d+) are shown`)
+
+// Every cut in the inspection tools keeps multi-byte characters whole.
+func TestInspect_CutsKeepUTF8(t *testing.T) {
+	ctx := t.Context()
+	s := openMem(t)
+	// The odd "x" puts a cut by bytes inside a three-byte character.
+	wide := func(n int) string { return "x" + strings.Repeat("世", n) }
+	many := make([]event.Event, 80)
+	for i := range many {
+		many[i] = small(wide(600))
+	}
+	runID := seedSteps(t, s, []event.Event{&event.UserEvent{Content: wide(40000)}}, many)
+	deps := &Deps{Store: s, RunID: runID}
+
+	var body strings.Builder
+	writeBody(&body, "user", wide(2500))
+	summary, err := LayeredSummary(ctx, s, runID, "s1", -1)
+	must(t, err)
+	peek := SessionPeek(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content
+	for name, out := range map[string]string{
+		"session_steps":   SessionSteps(deps).ParseAndExecute(ctx, `{"session_id":"s1"}`).Content,
+		"session_peek":    peek,
+		"session_summary": summary,
+		"writeBody":       body.String(),
+		// Two title lengths, two characters apart: a cut by bytes lands inside a
+		// character in at least one.
+		"session_steps full":   SessionSteps(deps).ParseAndExecute(ctx, `{"session_id":"s1","end_step":0,"full":true}`).Content,
+		"session_steps full 0": SessionSteps(deps).ParseAndExecute(ctx, `{"session_id":"s1","start_step":0,"end_step":0,"full":true}`).Content,
+	} {
+		if !utf8.ValidString(out) || !strings.Contains(out, "世…") {
+			t.Errorf("%s isn't cut, or is cut inside a character:\n%s", name, util.TruncateRunes(out, 300))
+		}
+	}
+	if !strings.HasSuffix(peek, "\n[...truncated...]") || utf8.RuneCountInString(peek) > peekBudget+20 {
+		t.Errorf("session_peek isn't cut to its budget: %d characters", utf8.RuneCountInString(peek))
 	}
 }

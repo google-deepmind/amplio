@@ -26,8 +26,10 @@ import (
 	"testing"
 
 	"amplio/internal/agent"
+	"amplio/internal/config"
 	"amplio/internal/db"
 	"amplio/internal/db/sqlite"
+	"amplio/internal/event"
 	"amplio/internal/llm"
 	"amplio/internal/session"
 	"amplio/internal/tool"
@@ -273,5 +275,63 @@ func TestSpawnModel_WithLinkedWorkspace(t *testing.T) {
 	}
 	if modelCaptured.Workspace.LinkedFrom() != repo {
 		t.Errorf("child workspace LinkedFrom = %q, want %q", modelCaptured.Workspace.LinkedFrom(), repo)
+	}
+}
+
+// verifyCaptured records the Config handed to spawn_verify_test_agent.
+var verifyCaptured *agent.Config
+
+func init() {
+	agent.Register("spawn_verify_test_agent", func(_ *agent.Env, cfg *agent.Config) (agent.Agent, error) {
+		verifyCaptured = cfg
+		return &noopAgent{id: cfg.SessionID}, nil
+	}, agent.Traits{})
+	agent.Register("spawn_verify_test_chat", func(_ *agent.Env, cfg *agent.Config) (agent.Agent, error) {
+		return &noopAgent{id: cfg.SessionID}, nil
+	}, agent.Traits{Interactive: true})
+	agent.Register("spawn_verify_test_verifier", func(_ *agent.Env, cfg *agent.Config) (agent.Agent, error) {
+		verifyCaptured = cfg
+		return &noopAgent{id: cfg.SessionID}, nil
+	}, agent.Traits{Verifier: true})
+}
+
+// A verifier is started by verification only: spawn_agent refuses the type,
+// while the harness's own start (VerifierFor set) goes through.
+func TestSpawnVerifierType(t *testing.T) {
+	env := modelEnv(t)
+	args, _ := json.Marshal(map[string]any{"task": "t", "agent_type": "spawn_verify_test_verifier"})
+	if res, _ := makeExecutor(env, "parent")(context.Background(), args); !res.IsError ||
+		!strings.Contains(res.Content, "started by verification") {
+		t.Errorf("spawn_agent(verifier) = %+v, want refused", res)
+	}
+	started, err := Start(context.Background(), env, "parent", Options{Task: "t", AgentType: "spawn_verify_test_verifier",
+		VerifierFor: "parent"})
+	if err != nil || verifyCaptured.VerifierFor != "parent" || started.AgentType != "spawn_verify_test_verifier" {
+		t.Errorf("the harness's start = %+v, %v (config %+v)", started, err, verifyCaptured)
+	}
+}
+
+// spawn_agent(verify) starts the child with verification on, set by its
+// parent, the defaults filling what the request leaves out; an interactive
+// child, which never concludes, is refused.
+func TestSpawnVerify(t *testing.T) {
+	env := modelEnv(t)
+	env.Verify = config.VerifyDefaults{MaxRounds: 3}
+	args, _ := json.Marshal(map[string]any{"task": "t", "agent_type": "spawn_verify_test_agent",
+		"verify": map[string]any{"criteria": "tests pass"}})
+	res, err := makeExecutor(env, "parent")(context.Background(), args)
+	if err != nil || res.IsError {
+		t.Fatalf("spawn = %+v, %v", res, err)
+	}
+	if !strings.Contains(res.Content, ", verified)") {
+		t.Errorf("result doesn't say it is verified: %s", res.Content)
+	}
+	v := verifyCaptured.Verify
+	if v == nil || v.Action != event.VerifySet || v.By != "parent" || v.Criteria != "tests pass" || v.MaxRounds != 3 {
+		t.Errorf("child's verification = %+v", v)
+	}
+	args, _ = json.Marshal(map[string]any{"task": "t", "agent_type": "spawn_verify_test_chat", "verify": map[string]any{}})
+	if res, _ := makeExecutor(env, "parent")(context.Background(), args); !res.IsError || !strings.Contains(res.Content, "interactive") {
+		t.Errorf("verified interactive child = %+v", res)
 	}
 }

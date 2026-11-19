@@ -15,10 +15,13 @@
 */
 
 // The server's settings, from the open /api/settings, fetched once per page
-// load (retried until it succeeds). Today its time zone: timestamps render in
-// the zone the agents see (lib/time.ts), not the browser's.
+// load (retried until it succeeds): its time zone (timestamps render in the
+// zone the agents see, see lib/time.ts, not the browser's), its clock, and the
+// defaults the verification and loop forms fill in.
 
 import { api } from "$lib/api";
+import type { ServerSettings as Settings } from "$lib/types";
+import { clockOffset } from "$lib/loopSchedule";
 import { RetryingLoad } from "$lib/retryingLoad";
 
 // acceptedZone returns zone if this browser's Intl knows it, else undefined
@@ -43,12 +46,28 @@ class ServerSettings {
   displayZone = $derived(acceptedZone(this.timezone));
   // The settings arrived.
   loaded = $state(false);
-  #loader = new RetryingLoad(() =>
-    api.getSettings().then((s) => {
+  // [verify] and [loop] defaults; the built-in ones until the server answers.
+  verify = $state<NonNullable<Settings["verify"]>>({ max_rounds: 3, model: "" });
+  loop = $state<NonNullable<Settings["loop"]>>({ expiry: "168h", min_interval_seconds: 60 });
+  // The server's clock minus the browser's, from the settings' `now` (half the
+  // round trip in), so a loop's "send now" is the server's now.
+  #offset = 0;
+  #loader = new RetryingLoad(() => {
+    const sent = Date.now();
+    return api.getSettings().then((s) => {
+      this.#offset = clockOffset(s.now, sent, Date.now());
       this.timezone = s.timezone || null;
+      if (s.verify) this.verify = s.verify;
+      if (s.loop) this.loop = s.loop;
       this.loaded = true;
-    }),
-  );
+    });
+  });
+
+  // now is the server's clock, as well as the browser can tell (its own until
+  // the settings arrive).
+  now(): number {
+    return Date.now() + this.#offset;
+  }
 
   // load fetches the settings if they haven't arrived yet; a failure is
   // retried with backoff, and by the next load().

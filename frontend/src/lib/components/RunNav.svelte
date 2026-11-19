@@ -22,10 +22,9 @@
 		FolderIcon,
 		PathIcon,
 		ScrollIcon,
-		TerminalWindowIcon
+		ListMagnifyingGlassIcon
 	} from 'phosphor-svelte';
 	import { logHref, recallSession } from '$lib/logView.svelte';
-	import { serverInfo } from '$lib/serverInfo.svelte';
 	import { viewport } from '$lib/viewport.svelte';
 	import Drawer from './Drawer.svelte';
 	import type { Component } from 'svelte';
@@ -68,11 +67,6 @@
 	const inLog = $derived(path.startsWith(`${base}/sessions`));
 	const inLogChat = $derived(inLog && path.endsWith('/chat'));
 
-	// The process view reads /proc, so it exists only when the SERVER runs Linux
-	// (not the browser). Ask once; the entry stays hidden until the answer is
-	// known, so it never appears and then vanishes under the cursor.
-	serverInfo.load();
-
 	const items = $derived<NavItem[]>([
 		{
 			label: 'Overview',
@@ -99,16 +93,14 @@
 			icon: FolderIcon,
 			active: path.startsWith(`${base}/artifacts`)
 		},
-		...(serverInfo.isLinux
-			? [
-					{
-						label: 'Processes',
-						href: `${base}/processes`,
-						icon: TerminalWindowIcon,
-						active: path.startsWith(`${base}/processes`)
-					}
-				]
-			: [])
+		// Verification, loops and processes, per session or for the whole run.
+		// /processes is the tab's old address; it redirects here.
+		{
+			label: 'Inspector',
+			href: `${base}/inspector`,
+			icon: ListMagnifyingGlassIcon,
+			active: path.startsWith(`${base}/inspector`) || path.startsWith(`${base}/processes`)
+		}
 	]);
 </script>
 

@@ -22,6 +22,9 @@
 	import ToolCall from './ToolCall.svelte';
 	import RefusalNotice from './Refusal.svelte';
 	import StopNoticeView from './StopNotice.svelte';
+	import VerdictBadge from './VerdictBadge.svelte';
+	import { eachTickText } from '$lib/verifyText';
+	import { tickLabel } from '$lib/loopSchedule';
 	// results maps a tool_call_id to its ToolResultEvent. When provided (the
 	// trajectory view), this event's tool_calls render as paired call+result
 	// blocks via <ToolCall>; absent, tool_calls render call-only (legacy).
@@ -42,11 +45,58 @@
 		stopNotice?: StopNotice;
 		unknown?: boolean;
 	} = $props();
+	// How a child_result note's kind reads (event.NoteLabel on the server).
+	const noteLabels: Record<string, string> = {
+		leftover: 'left running',
+		verified: 'verified by',
+		not_verified: 'not verified'
+	};
+	// One line for a change to the session's verification (a verifier's outcome
+	// shows as its badge instead; a stale one's badge is followed by why it
+	// was ignored).
+	function verifyLine(e: AgentEvent): string {
+		if (e.action === 'stale' && e.outcome) return `stale: verifier ${e.outcome.verifier}'s verdict, ignored · ${e.reason ?? ''}`;
+		if (e.outcome) return `from verifier ${e.outcome.verifier}`;
+		return [
+			e.action,
+			e.by && `by ${e.by}`,
+			e.verifier && `verifier ${e.verifier}`,
+			e.round && `round ${e.round}`,
+			e.criteria && `against: ${e.criteria}`,
+			e.action === 'withdrawn' && e.reason ? `${e.reason}: never delivered` : ''
+		]
+			.filter(Boolean)
+			.join(' · ');
+	}
+	const loopVerbs: Record<string, string> = { set: 'set', edit: 'changed', stop: 'stopped', ended: 'ended' };
+	// The header label: what wrote the event, when that isn't its type alone.
+	const label = $derived(
+		ev.type === 'user' && ev.check
+			? `amplio · ${ev.check}`
+			: ev.type === 'user' && ev.loop
+				? tickLabel(ev.loop)
+				: ev.type === 'loop'
+					? `loop ${ev.id} · ${loopVerbs[ev.action ?? ''] ?? ev.action}${ev.by ? ` by ${ev.by}` : ''}`
+					: ev.type
+	);
+	// A loop event has no content field; show what it changed.
+	const loopBody = $derived(
+		ev.type === 'loop'
+			? [
+					ev.schedule ? ev.schedule.spec : '',
+					ev.prompt ? `prompt: ${ev.prompt}` : '',
+					ev.verify ? eachTickText(ev.verify) : '',
+					ev.reason ?? ''
+				]
+					.filter(Boolean)
+					.join('\n')
+			: ''
+	);
 </script>
 
 <div class="evt {ev.type}" class:unknown>
 	<div class="hd">
-		<span class="type">{ev.type === 'user' && ev.check ? `amplio · ${ev.check}` : ev.type}</span>
+		<span class="type">{label}</span>
 		<span class="dim">step {step}</span>
 	</div>
 	{#if unknown}
@@ -76,6 +126,9 @@
 				<pre class="pre">{ev.content}</pre>
 			{/if}
 		{/if}
+		{#if loopBody}
+			<pre class="pre">{loopBody}</pre>
+		{/if}
 		{#if ev.refusal}
 			<RefusalNotice refusal={ev.refusal} />
 		{/if}
@@ -92,6 +145,7 @@
 						result={res?.content}
 						isError={res?.is_error ?? false}
 						attachments={res?.attachments ?? []}
+						outcome={res?.outcome}
 						{runId}
 					/>
 				</div>
@@ -120,8 +174,18 @@
 		{/if}
 		{#if ev.type === 'child_result'}
 			<div class="dim small">
-				child {ev.child_session_id} → {ev.verdict}{#if ev.leftover} · left running: {ev.leftover}{/if}{#each ev.notes ?? [] as n (n.kind + n.text)} · {n.kind === 'leftover' ? 'left running' : n.kind}: {n.text}{/each}
+				child {ev.child_session_id} → {ev.verdict}{#if ev.leftover} · left running: {ev.leftover}{/if}{#each ev.notes ?? [] as n (n.kind + n.text)} · {noteLabels[n.kind] ?? n.kind}: {n.text}{/each}
 			</div>
+		{/if}
+		{#if ev.type === 'verify'}
+			<div class="dim small verify-line">
+				{#if ev.outcome}<VerdictBadge outcome={ev.outcome} />{/if}{verifyLine(ev)}
+			</div>
+			{#if ev.outcome?.findings}
+				<div class="md">{@html renderMarkdown(ev.outcome.findings)}</div>
+			{/if}
+		{:else if ev.outcome}
+			<div class="verify-line"><VerdictBadge outcome={ev.outcome} /></div>
 		{/if}
 	{/if}
 </div>
@@ -149,6 +213,10 @@
 	.evt.unknown {
 		border-left-style: dashed;
 	}
+	.evt.loop {
+		border-left-color: var(--warn);
+		border-left-style: dashed;
+	}
 	.newer {
 		margin: 0 0 0.3rem;
 	}
@@ -168,6 +236,13 @@
 	}
 	.toolwrap {
 		margin-top: 0.4rem;
+	}
+	.verify-line {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		margin-top: 0.2rem;
 	}
 	.atts {
 		display: flex;

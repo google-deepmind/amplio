@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"sync"
 
+	"amplio/internal/config"
 	"amplio/internal/db"
+	"amplio/internal/event"
 	"amplio/internal/eventstream"
 	"amplio/internal/lessons"
 	"amplio/internal/llm"
@@ -71,6 +73,11 @@ type Env struct {
 	// compaction) to the UI. Satisfied by runtime.EphemeralAgentRegistry; nil in
 	// headless/tests (no UI to notify). See InflightTracker.
 	Inflight InflightTracker
+	// Verify holds the [verify] defaults a verification request falls back to.
+	Verify config.VerifyDefaults
+	// RequireConclude is [agent] require_conclude: only the conclude tool
+	// concludes an autonomous agent, not a reply without tool calls.
+	RequireConclude bool
 }
 
 // InflightTracker advertises in-flight ephemeral background work (work with no
@@ -100,6 +107,13 @@ type Config struct {
 	// launcher's release owns Unregister. Nil for a direct caller / test, where
 	// Run() registers its own handle and owns the lifecycle.
 	Handle *session.Handle
+	// VerifierFor marks the new session as the verifier the harness started
+	// for the agent it names, its parent (persisted as session metadata; see
+	// internal/verify).
+	VerifierFor string
+	// Verify, if set, turns verification on for the new session at bootstrap
+	// (spawn_agent(verify), or a run started with verification).
+	Verify *event.VerifyEvent
 }
 
 // Factory creates an Agent instance from an Env and Config.
@@ -117,6 +131,11 @@ type Traits struct {
 	// this to choose how to phase the session — what counts as a phase boundary
 	// in a conversation is not what counts in an autonomous run.
 	Interactive bool
+	// Verifier marks an agent that checks another agent's conclusion and
+	// concludes with a typed verdict, conclude(verdict, findings), rather than
+	// a result. Only the harness starts one (internal/verify), for the agent it
+	// verifies.
+	Verifier bool
 }
 
 type registration struct {
@@ -147,6 +166,14 @@ func IsInteractive(name string) bool {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 	return registry[name].traits.Interactive
+}
+
+// IsVerifier reports whether the named agent type is a verifier (see
+// Traits.Verifier). Unknown names report false.
+func IsVerifier(name string) bool {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return registry[name].traits.Verifier
 }
 
 // Get returns the factory for the given agent type name.

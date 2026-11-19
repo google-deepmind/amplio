@@ -66,6 +66,8 @@ func clientCmd() *cobra.Command {
 		clientListCmd(),
 		clientAPICmd(),
 		clientMonitorCmd(),
+		clientVerifyCmd(),
+		clientLoopCmd(),
 	)
 	return cmd
 }

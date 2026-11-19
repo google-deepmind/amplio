@@ -18,6 +18,7 @@
 	import type { SessionDTO } from '$lib/types';
 	import { timeAgo, formatLocale } from '$lib/time';
 	import StatusBadge from './StatusBadge.svelte';
+	import SessionStateIcons from './SessionStateIcons.svelte';
 	import {
 		AndroidLogoIcon,
 		CaretDownIcon,
@@ -33,7 +34,9 @@
 	// · name · task fade · workspace chip · status · step+time). The name is the
 	// session_id (a human nickname). Rows are links to each session's trajectory
 	// so they're bookmarkable / middle-clickable; the parent/child tree is shown
-	// by indentation. No overflow menu — a session row is a pure link.
+	// by indentation. No overflow menu. At a row's end, beside its link, the
+	// session's state while active (SessionStateIcons: verification, loops),
+	// each a link of its own to the Inspector.
 	//
 	// Two densities, same markup:
 	//   - "card"     (default): the Overview's list — each row a bordered card with
@@ -117,67 +120,67 @@
 {#snippet node(s: SessionDTO)}
 	{@const AnimalIcon = iconForName(s.session_id)}
 	<div class="node" class:hidden={hidden(s)}>
-		<a
-			class="sess"
-			class:card={!compact}
-			class:compact
-			class:selected={s.session_id === selectedId}
-			aria-current={s.session_id === selectedId ? 'true' : undefined}
-			href={linkFor(s)}
-			title={compact ? `${s.agent_type} · step ${s.current_step} · ${s.task ?? ''}` : undefined}
-		>
-			<span class="titleblock">
-				<span class="identity" class:animal={AnimalIcon} title={s.agent_type}>
-					{#if AnimalIcon}
-						<AnimalIcon size={14} weight="bold" />
-					{:else if s.agent_type === 'chatbot'}
-						<ChatTeardropIcon size={14} weight="bold" />
-					{:else}
-						<AndroidLogoIcon size={14} weight="bold" />
+		<div class="sess-row" class:card={!compact} class:compact class:selected={s.session_id === selectedId}>
+			<a
+				class="sess"
+				aria-current={s.session_id === selectedId ? 'true' : undefined}
+				href={linkFor(s)}
+				title={compact ? `${s.agent_type} · step ${s.current_step} · ${s.task ?? ''}` : undefined}
+			>
+				<span class="titleblock">
+					<span class="identity" class:animal={AnimalIcon} title={s.agent_type}>
+						{#if AnimalIcon}
+							<AnimalIcon size={14} weight="bold" />
+						{:else if s.agent_type === 'chatbot'}
+							<ChatTeardropIcon size={14} weight="bold" />
+						{:else}
+							<AndroidLogoIcon size={14} weight="bold" />
+						{/if}
+					</span>
+					<span class="name mono">{s.session_id}</span>
+					{#if s.task && !compact}<span class="task" title={s.task}>{s.task}</span>{/if}
+				</span>
+				{#if ownsWorkspace(s) && !compact}
+					<!-- LinkIcon (chain) instead of FolderIcon: the chip only shows
+					     when this sub-agent's workspace DIVERGES from its parent's,
+					     and the dominant cause is `WorkspaceMode = "link"` (linked
+					     linked worktree on a shared repo). The chain conveys that
+					     parent–child relationship; folder would just say "a
+					     directory" without the linkage cue. -->
+					<span class="chip" title={s.workspace}>
+						<LinkIcon size={12} weight="bold" />
+						<span class="chip-text">{s.workspace_name}</span>
+					</span>
+				{/if}
+				{#if ownsModel(s) && !compact}
+					<!-- CubeIcon and short label as on the run card; full spec in the
+					     tooltip. -->
+					<span class="chip" title="Model: {s.llm}">
+						<CubeIcon size={12} weight="bold" />
+						<span class="chip-text">{s.llm_name || s.llm}</span>
+					</span>
+				{/if}
+				<StatusBadge status={s.status} />
+				<!-- Icon instead of the word "step", matching RunCard: the same value in the
+				     same visual language. Both densities show it — the selector is a
+				     full-width strip, so the three characters fit there too — but only the
+				     card variant has room for the relative time beside it. In the selector
+				     the row's own title already spells out "step N", so the span doesn't
+				     repeat it. -->
+				<span
+					class="meta dim"
+					title={compact
+						? undefined
+						: `step ${s.current_step} · ${formatLocale(s.status_changed_at)}`}
+				>
+					<PathIcon size={12} weight="bold" />
+					{s.current_step}{#if !compact}
+						· {timeAgo(s.status_changed_at)}
 					{/if}
 				</span>
-				<span class="name mono">{s.session_id}</span>
-				{#if s.task && !compact}<span class="task" title={s.task}>{s.task}</span>{/if}
-			</span>
-			{#if ownsWorkspace(s) && !compact}
-				<!-- LinkIcon (chain) instead of FolderIcon: the chip only shows
-				     when this sub-agent's workspace DIVERGES from its parent's,
-				     and the dominant cause is `WorkspaceMode = "link"` (linked
-				     linked worktree on a shared repo). The chain conveys that
-				     parent–child relationship; folder would just say "a
-				     directory" without the linkage cue. -->
-				<span class="chip" title={s.workspace}>
-					<LinkIcon size={12} weight="bold" />
-					<span class="chip-text">{s.workspace_name}</span>
-				</span>
-			{/if}
-			{#if ownsModel(s) && !compact}
-				<!-- CubeIcon and short label as on the run card; full spec in the
-				     tooltip. -->
-				<span class="chip" title="Model: {s.llm}">
-					<CubeIcon size={12} weight="bold" />
-					<span class="chip-text">{s.llm_name || s.llm}</span>
-				</span>
-			{/if}
-			<StatusBadge status={s.status} />
-			<!-- Icon instead of the word "step", matching RunCard: the same value in the
-			     same visual language. Both densities show it — the selector is a
-			     full-width strip, so the three characters fit there too — but only the
-			     card variant has room for the relative time beside it. In the selector
-			     the row's own title already spells out "step N", so the span doesn't
-			     repeat it. -->
-			<span
-				class="meta dim"
-				title={compact
-					? undefined
-					: `step ${s.current_step} · ${formatLocale(s.status_changed_at)}`}
-			>
-				<PathIcon size={12} weight="bold" />
-				{s.current_step}{#if !compact}
-					· {timeAgo(s.status_changed_at)}
-				{/if}
-			</span>
-		</a>
+			</a>
+			<SessionStateIcons {runId} session={s} />
+		</div>
 		{#each childrenOf(s.session_id) as c (c.session_id)}
 			<div class="child">{@render node(c)}</div>
 		{/each}
@@ -195,19 +198,37 @@
 {/if}
 
 <style>
-	/* Row-density override of the global .card padding (bg/border/radius come
-	   from .card), matching RunCard. */
+	/* The row carries the chrome (bg/border/radius from .card), its link the
+	   padding, so the whole row but the state icons is the link; row density
+	   matches RunCard. */
+	.sess-row {
+		display: flex;
+		align-items: center;
+		margin-bottom: 0.35rem;
+	}
+	.sess-row.card {
+		padding: 0;
+	}
+	.sess-row.card:hover {
+		border-color: var(--accent-dim);
+	}
+	.sess-row > :global(.icons) {
+		margin-right: 0.6rem;
+	}
 	.sess {
+		flex: 1;
+		min-width: 0;
 		display: flex;
 		align-items: center;
 		gap: 0.7rem;
 		padding: 0.5rem 0.9rem;
-		margin-bottom: 0.35rem;
 		color: var(--text);
+	}
+	.sess-row:has(> :global(.icons)) > .sess {
+		padding-right: 0.4rem;
 	}
 	.sess:hover {
 		text-decoration: none;
-		border-color: var(--accent-dim);
 	}
 	.sess:hover .name {
 		color: var(--accent);
@@ -216,19 +237,24 @@
 	   tighter padding. Selection is a soft accent WASH plus an accent name —
 	   deliberately NOT the accent left-bar used by the phase index next to it:
 	   one marker style per screen, or the eye stops reading it as a marker. */
-	.sess.compact {
-		padding: 0.2rem 0.5rem;
+	.sess-row.compact {
 		margin-bottom: 0.1rem;
-		gap: 0.5rem;
 		border-radius: var(--radius-sm);
 	}
-	.sess.compact:hover {
+	.sess-row.compact > :global(.icons) {
+		margin-right: 0.3rem;
+	}
+	.sess-row.compact .sess {
+		padding: 0.2rem 0.5rem;
+		gap: 0.5rem;
+	}
+	.sess-row.compact:hover {
 		background: var(--bg-elev2);
 	}
-	.sess.compact.selected {
+	.sess-row.compact.selected {
 		background: color-mix(in srgb, var(--accent) 12%, transparent);
 	}
-	.sess.compact.selected .name {
+	.sess-row.compact.selected .name {
 		color: var(--accent);
 	}
 	/* identity icon + name + task fade; consumes the space left of the chips. */
@@ -320,45 +346,56 @@
 			flex-shrink: 1;
 			min-width: 0;
 		}
-		.sess.card {
+		.sess-row.card {
+			margin-bottom: var(--stack-gap);
+		}
+		.sess-row.card .sess {
 			flex-wrap: wrap;
 			gap: 0 var(--sp-2);
 			padding: var(--card-pad-y) var(--card-pad-x);
-			margin-bottom: var(--stack-gap);
 		}
-		.sess.card .titleblock {
+		.sess-row.card:has(> :global(.icons)) > .sess {
+			padding-right: var(--sp-1);
+		}
+		.sess-row.card > :global(.icons) {
+			margin-right: var(--sp-1);
+		}
+		.sess-row.card .titleblock {
 			display: contents;
 		}
-		.sess.card .name {
+		.sess-row.card .name {
 			flex: 1 1 0;
 		}
 		/* Full-width break between the two lines. */
-		.sess.card::after {
+		.sess-row.card .sess::after {
 			content: '';
 			order: 1;
 			flex-basis: 100%;
 			height: var(--sp-1);
 		}
-		.sess.card .task {
+		.sess-row.card .task {
 			order: 2;
 			text-overflow: ellipsis;
 			mask-image: none;
 			-webkit-mask-image: none;
 		}
-		.sess.card .chip {
+		.sess-row.card .chip {
 			order: 3;
 			flex-shrink: 1;
 			min-width: 0;
 			max-width: 40%;
 		}
-		.sess.card .meta {
+		.sess-row.card .meta {
 			order: 4;
 			margin-left: auto;
 		}
-		.sess.compact {
+		.sess-row.compact {
 			height: var(--row-h);
-			padding: 0 var(--sp-3);
 			margin-bottom: 0;
+		}
+		.sess-row.compact .sess {
+			align-self: stretch;
+			padding: 0 var(--sp-3);
 			gap: var(--sp-2);
 		}
 		.node.hidden {

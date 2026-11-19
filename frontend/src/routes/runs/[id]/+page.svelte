@@ -27,6 +27,13 @@
 	import type { RunReport } from '$lib/types';
 	import { gradeSpecByRank } from '$lib/components/GradePicker.svelte';
 	import MenuSheet from '$lib/components/MenuSheet.svelte';
+	import MessageBox from '$lib/components/MessageBox.svelte';
+	import SessionStateBadges from '$lib/components/SessionStateBadges.svelte';
+	import { activeLoops, shownVerify } from '$lib/sessionState';
+	import { ComposerState } from '$lib/composer.svelte';
+	import { deliver, type MessageOptions } from '$lib/composerSend';
+	import { formatNext } from '$lib/loopSchedule';
+	import { serverSettings } from '$lib/serverSettings.svelte';
 	import { menuKeys, popover } from '$lib/dismiss';
 	import { viewport } from '$lib/viewport.svelte';
 	import { beforeNavigate } from '$app/navigation';
@@ -35,7 +42,8 @@
 		XCircleIcon,
 		WarningIcon,
 		PaperclipIcon,
-		CaretDownIcon
+		CaretDownIcon,
+		MagicWandIcon
 	} from 'phosphor-svelte';
 
 	const store = getRunStore();
@@ -199,10 +207,10 @@
 	// `now` ticks every second WHILE the spinner is showing so the elapsed
 	// time updates live. Stopped otherwise (no time-based state to
 	// re-evaluate now that the grace window is gone).
-	let now = $state(Date.now());
+	let now = $state(serverSettings.now());
 	$effect(() => {
 		if (!reportInProgress) return;
-		const t = setInterval(() => (now = Date.now()), 1000);
+		const t = setInterval(() => (now = serverSettings.now()), 1000);
 		return () => clearInterval(t);
 	});
 
@@ -255,6 +263,17 @@
 	// existing /sessions/{sid}/message endpoint handles the respawn; main
 	// agent re-enters ongoing and emits a new report when it next concludes.
 	let followupText = $state('');
+	// The follow-up's options: verify the main agent's next conclusion, or
+	// repeat the follow-up on a schedule.
+	const followupOptions = new ComposerState(() => !!mainAgentSession && !mainAgentSession.interactive);
+	// What the last send did, when it isn't visible here: a loop set.
+	let sentNote = $state('');
+	// The page is reused across runs: one run's options mustn't go to another's agent.
+	$effect(() => {
+		void store.runId;
+		followupOptions.reset();
+		sentNote = '';
+	});
 	let sending = $state(false);
 	let sendErr = $state('');
 	// Auto-draft a follow-up prompt from the run's task + latest report.
@@ -325,15 +344,24 @@
 		}
 	}
 
-	async function sendFollowup() {
+	// MessageBox takes the options and clears the box; a failure (rethrown)
+	// puts both back.
+	async function sendFollowup(content: string, opts: MessageOptions) {
 		const sess = mainAgentSession;
-		const text = followupText.trim();
-		if (!sess || !text || sending) return;
+		if (!sess) throw new Error('no main agent');
 		sending = true;
 		sendErr = '';
+		sentNote = '';
+		const run = store.runId;
 		try {
-			await api.sendMessage(store.runId, sess.session_id, text);
-			followupText = '';
+			const sent = await deliver(api, run, sess.session_id, content.trim(), opts, serverSettings.now());
+			if (store.runId !== run) return; // the page shows another run now
+			if (sent.kind === 'loop') {
+				const at = sent.loop.next_tick ? Date.parse(sent.loop.next_tick) : NaN;
+				const next = Number.isFinite(at) ? formatNext(at, serverSettings.displayZone, serverSettings.now()) : '';
+				const verified = sent.loop.verify ? ', verifying each tick' : '';
+				sentNote = `Loop ${sent.loop.id} set${verified}${next ? `; first tick at ${next}` : ''}.`;
+			}
 			// Snap selection back to "latest" so the next auto-generated report
 			// shows up as the visible iteration without the user having to click.
 			selectedVersion = null;
@@ -342,7 +370,8 @@
 			await store.refresh();
 			await loadReports(store.runId);
 		} catch (e) {
-			sendErr = String(e);
+			if (store.runId === run) sendErr = errorText(e);
+			throw e;
 		} finally {
 			sending = false;
 		}
@@ -734,31 +763,38 @@
 						Starts a new iteration. The main agent receives this as a user message and
 						respawns to act on it.
 					</p>
-					<textarea
-						bind:value={followupText}
+					{#if mainAgentSession && (shownVerify(mainAgentSession) || activeLoops(mainAgentSession))}
+						<!-- The main agent's state: its verification and loops. -->
+						<div class="fu-status">
+							<SessionStateBadges runId={store.runId} session={mainAgentSession} />
+						</div>
+					{/if}
+					<MessageBox
+						composer={followupOptions}
+						bind:content={followupText}
+						onSend={sendFollowup}
 						placeholder="What should the main agent do next?"
-						rows="3"
-						onkeydown={(e) => {
-							if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-								e.preventDefault();
-								sendFollowup();
-							}
-						}}
-					></textarea>
-					{#if sendErr}<p class="err">{sendErr}</p>{/if}
-					<div class="followup-actions">
-						<button class="gen-btn" onclick={suggestFollowup} disabled={suggesting || sending}>
-							{#if suggesting}<Spinner />{/if}
-							{suggesting ? 'Generating…' : 'Generate follow-up prompt'}
-						</button>
-						<button
-							class="primary"
-							onclick={sendFollowup}
-							disabled={sending || suggesting || !followupText.trim()}
-						>
-							{sending ? 'Sending…' : 'Send follow-up'}
-						</button>
-					</div>
+						rows={3}
+						sendKey="mod-enter"
+						disabled={suggesting}
+						loopTitle="Repeat this follow-up"
+					>
+						{#snippet actions()}
+							<button
+								type="button"
+								class="gen-btn"
+								onclick={suggestFollowup}
+								disabled={suggesting || sending}
+								title="Draft a follow-up from the task and the latest report"
+								aria-label={suggesting ? 'Generating…' : 'Generate follow-up prompt'}
+							>
+								{#if suggesting}<Spinner />{:else}<MagicWandIcon size={15} />{/if}
+								<span class="gen-label">{suggesting ? 'Generating…' : 'Generate follow-up prompt'}</span>
+							</button>
+						{/snippet}
+					</MessageBox>
+					{#if sendErr}<p class="err" role="alert">{sendErr}</p>{/if}
+					{#if sentNote}<p class="dim small" role="status">{sentNote}</p>{/if}
 				</div>
 			{/if}
 		</section>
@@ -953,8 +989,11 @@
 		color: var(--text-dim);
 	}
 	/* Follow-up section: visually distinct from the report body via a top
-	   border, and the textarea + send button are clearly grouped. */
+	   border. */
 	.followup {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
 		margin-top: 1.2rem;
 		padding-top: 1rem;
 		border-top: 1px solid var(--border);
@@ -964,24 +1003,35 @@
 		font-size: var(--fs-md);
 	}
 	.followup-hint {
-		margin: 0.2rem 0 0.5rem;
+		margin: 0 0 0.2rem;
 		font-size: var(--fs-sm);
 	}
-	.followup textarea {
-		min-height: 4.5rem;
-		font: inherit;
+	.followup .err {
+		margin: 0;
 	}
-	.followup-actions {
-		margin-top: 0.6rem;
+	.fu-status {
 		display: flex;
-		justify-content: flex-end;
-		gap: 0.5rem;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.45rem;
 	}
-	/* Keep the spinner and label on one baseline-centered row. */
+	/* In the card's toolbar, beside Send and quieter than it; the spinner and
+	   the label on one row. */
 	.gen-btn {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
+		flex-shrink: 0;
+		white-space: nowrap;
+		background: none;
+		border-color: transparent;
+		border-radius: var(--radius-pill);
+		color: var(--text-dim);
+		padding: 0.3rem 0.6rem;
+		font-size: var(--fs-sm);
+	}
+	.gen-btn:hover:not(:disabled) {
+		color: var(--text);
 	}
 	.report .ver {
 		margin: 0.4rem 0 0.7rem;
@@ -1277,11 +1327,12 @@
 		.report-section[open] > :not(summary) {
 			margin-top: var(--sp-3);
 		}
-		/* Two long labels side by side wrapped to two lines each at 390. */
-		.followup-actions {
-			flex-direction: column;
+		/* The toolbar has room for its icon; the title names it. */
+		.gen-label {
+			display: none;
 		}
-		.followup-actions .gen-btn {
+		.gen-btn {
+			min-width: var(--tap);
 			justify-content: center;
 		}
 		/* Citation links grow their hit area with inline padding, which does not

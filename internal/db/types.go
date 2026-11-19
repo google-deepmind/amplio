@@ -15,6 +15,7 @@
 package db
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -77,10 +78,19 @@ const (
 //     Classify stays a pure function of the event; that state-dependent gate
 //     (and its own status set) lives at the wake path, not here.
 //   - ChildResultEvent verdict concluded → Input; crashed/cancelled → Notice
-//     (a failing child must not hammer a dormant parent back to life).
+//     (a failing child must not hammer a dormant parent back to life). A
+//     verifier's outcome (a VerifyEvent verdict, in place of its child_result)
+//     is a Notice: it wakes the agent waiting for it, and revives only what the
+//     wake path decides it should (runtime.NewCommitNotifier: a crashed agent
+//     whose pending candidate it judges), so no agent takes a turn that tells
+//     it nothing. Any other VerifyEvent → Notice too (a withdrawn candidate
+//     ends a live agent's wait, but revives nothing).
 //   - RecoverEvent (produced only by Recover) → Input.
 //   - UnknownEvent (a newer binary's type) → Notice: it revives nothing.
 //   - all other (self/system writes) → Notice.
+//
+// Record-only events (IsRecordOnly) are Notices that don't even wake a live
+// session.
 func Classify(evt event.Event) EventClass {
 	switch e := evt.(type) {
 	case *event.UserEvent:
@@ -107,6 +117,59 @@ func Classify(evt event.Event) EventClass {
 
 // IsInput reports whether an event revives a dormant (non-ongoing) session.
 func IsInput(evt event.Event) bool { return Classify(evt) == ClassInput }
+
+// IsRecordOnly reports whether an event is only a record for its session: it
+// wakes no one, live or dormant, and the session reads it at its next turn.
+//   - ToolResultEvent: the session's own turn output.
+//   - VerifyEvent: a change to its verification. What must wake an agent comes
+//     with an event of its own: its verifier's outcome (a VerifyEvent verdict),
+//     and the harness's withdrawn record when a newer version or a clear
+//     withdraws the candidate its verifier had, which ends a conclude call
+//     waiting for it. Neither of those is record-only.
+//   - UnknownEvent: a newer binary's event, not this one's to act on.
+//   - LoopEvent: a loop set, changed or ended, which the agent isn't shown.
+//     Changing a loop shouldn't cost an agent a turn or end its wait; the
+//     loop's ticks are what wake it.
+func IsRecordOnly(evt event.Event) bool {
+	switch e := evt.(type) {
+	case *event.VerifyEvent:
+		return !isVerifierOutcome(e) && e.Action != event.VerifyWithdrawn
+	case *event.ToolResultEvent, *event.UnknownEvent, *event.LoopEvent:
+		return true
+	}
+	return false
+}
+
+func isVerifierOutcome(e *event.VerifyEvent) bool {
+	return e.Action == event.VerifyVerdict && e.Outcome != nil
+}
+
+// MetadataVerifierFor is the session-metadata key marking a verifier (see
+// internal/verify); its value is the session it verifies, its parent.
+const MetadataVerifierFor = "verifier_for"
+
+// WakingEventsSince counts a session's events at step or later that are not
+// record-only: what would wake it.
+func WakingEventsSince(ctx context.Context, s Store, runID, sessionID string, step int) (int, error) {
+	recs, err := WakingEvents(ctx, s, runID, sessionID, step)
+	return len(recs), err
+}
+
+// WakingEvents returns a session's events at step or later that are not
+// record-only.
+func WakingEvents(ctx context.Context, s Store, runID, sessionID string, step int) ([]EventRecord, error) {
+	recs, err := s.GetEvents(ctx, runID, sessionID, EventFilter{StartStep: &step})
+	if err != nil {
+		return nil, err
+	}
+	out := recs[:0]
+	for _, r := range recs {
+		if !IsRecordOnly(r.Event) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
 
 // --- Record types ---
 
@@ -220,6 +283,32 @@ func KnownEvents(recs []EventRecord) []EventRecord {
 		}
 	}
 	return out
+}
+
+// OpenConclude returns the conclude call of the agent's latest turn if that
+// turn made only that call (event.AssistantEvent.ConcludeCall) and it has no
+// result yet, with the turn's step: the agent was in it, waiting for its
+// verifier's verdict, when its process stopped or it was cancelled. Its next
+// life resumes the call rather than mending it as interrupted. events must be
+// ordered.
+func OpenConclude(events []EventRecord) (call event.ToolCall, step int, ok bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		a, isAssistant := events[i].Event.(*event.AssistantEvent)
+		if !isAssistant {
+			continue
+		}
+		call, found := a.ConcludeCall()
+		if !found {
+			return event.ToolCall{}, 0, false
+		}
+		for _, later := range events[i+1:] {
+			if r, isResult := later.Event.(*event.ToolResultEvent); isResult && r.ToolCallID == call.ID {
+				return event.ToolCall{}, 0, false
+			}
+		}
+		return call, events[i].Step, true
+	}
+	return event.ToolCall{}, 0, false
 }
 
 // SummarizationFailedPrefix marks a step_summary whose LLM summarization failed:
@@ -344,6 +433,21 @@ type EventFilter struct {
 	CurrentContextOnly bool
 	StartStep          *int
 	EndStep            *int
+	// Types keeps only events of these types (event.Event.EventType; see
+	// EventTypes), read through an index on the type, so a session's few events
+	// of a kind cost as much to read as they are, not as the whole session.
+	// Empty: every type.
+	Types []string
+}
+
+// EventTypes returns the types of evts, for EventFilter.Types:
+// EventTypes(&event.UserEvent{}, &event.ChildResultEvent{}).
+func EventTypes(evts ...event.Event) []string {
+	out := make([]string, len(evts))
+	for i, e := range evts {
+		out[i] = e.EventType()
+	}
+	return out
 }
 
 type SearchOpts struct {

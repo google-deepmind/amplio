@@ -293,8 +293,8 @@ func TestObserver_FinalizeHookSkipsOngoingAndNonRoot(t *testing.T) {
 // Step and phase summaries neither show nor count a newer binary's events.
 func TestSummaries_SkipUnknownEvents(t *testing.T) {
 	user := &event.UserEvent{Content: "hi"}
-	newer := &event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","criteria":"secret"}`)}
-	if got := renderStep([]event.Event{user, newer}, 4, "in chunk"); strings.Contains(got, "verify") || !strings.Contains(got, "hi") {
+	newer := &event.UnknownEvent{Type: "teleport", Raw: []byte(`{"type":"teleport","criteria":"secret"}`)}
+	if got := renderStep([]event.Event{user, newer}, 4, "in chunk"); strings.Contains(got, "teleport") || !strings.Contains(got, "hi") {
 		t.Errorf("renderStep shows the newer event or lost the user's:\n%s", got)
 	}
 	if got, want := renderStep([]event.Event{newer}, 4, "in chunk"), renderStep(nil, 4, "in chunk"); got != want {

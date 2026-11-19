@@ -266,8 +266,8 @@ func CancelSession(store db.Store, reg *Registry, runID, sessionID, reason strin
 		return nil // already terminal: NOP (also dedupes the recursive cascade)
 	}
 	// -1: an async cancel marker belongs at the session's current step.
-	if err := store.TerminateAndNotifyParent(context.Background(), runID, sessionID, sess.ParentID,
-		db.SessionCancelled, reason, nil, &event.SystemEvent{Content: reason, Marker: event.MarkerCancelled}, -1); err != nil {
+	if _, err := store.TerminateAndNotifyParent(context.Background(), runID, sessionID, sess.ParentID,
+		db.SessionCancelled, reason, nil, db.SelfEvent{Event: &event.SystemEvent{Content: reason, Marker: event.MarkerCancelled}, Step: -1}); err != nil {
 		// The terminal write failed: do NOT interrupt the goroutine. Leaving it
 		// alive keeps the session truthfully ongoing (not ongoing-but-dead), so
 		// the canceller can retry — interrupting now would strand the session and

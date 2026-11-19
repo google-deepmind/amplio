@@ -87,6 +87,15 @@ func (s *parkWatch) UpdateSessionStatus(ctx context.Context, runID, sessionID, s
 	return err
 }
 
+// SetStatusUnlessTerminal is how await_event parks (never over a cancel).
+func (s *parkWatch) SetStatusUnlessTerminal(ctx context.Context, runID, sessionID, status string) (bool, error) {
+	set, err := s.Store.SetStatusUnlessTerminal(ctx, runID, sessionID, status)
+	if set && status == db.SessionAwaiting {
+		s.parked <- struct{}{}
+	}
+	return set, err
+}
+
 // watchParks wraps deps' store in a parkWatch; call it before building the tool.
 func watchParks(deps *Deps) <-chan struct{} {
 	parked := make(chan struct{}, 8)
@@ -122,7 +131,7 @@ func TestSessionCancel_Recursive(t *testing.T) {
 	_ = store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "g", ParentID: "c", Status: db.SessionOngoing})
 
 	deps := &Deps{Store: store, RunID: runID, Registry: session.NewRegistry()}
-	if _, err := SessionCancel(deps).Execute(ctx, []byte(`{"session_id":"c","reason":"stop it"}`)); err != nil {
+	if _, err := SessionCancel(deps, "p").Execute(ctx, []byte(`{"session_id":"c","reason":"stop it"}`)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -236,6 +245,21 @@ func TestAwaitEvent_Timeout(t *testing.T) {
 	}
 }
 
+// A session cancelled before await_event parks stays cancelled: the wait
+// never writes awaiting over it, and ends saying the session terminated.
+func TestAwaitEvent_NeverOverACancel(t *testing.T) {
+	deps, handle := setup(t)
+	if err := deps.Store.UpdateSessionStatus(context.Background(), testRunID, testSessionID, db.SessionCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if got := runAwait(t, deps, handle, `{"timeout":2}`); !strings.Contains(got, "session terminated") {
+		t.Errorf("await on a cancelled session = %q", got)
+	}
+	if s, _ := deps.Store.GetSession(context.Background(), testRunID, testSessionID); s.Status != db.SessionCancelled {
+		t.Errorf("status = %s, want cancelled", s.Status)
+	}
+}
+
 // An event arriving while parked must wake the waiter via the commit listener.
 func TestAwaitEvent_WakesOnEventDuringWait(t *testing.T) {
 	deps, handle := setup(t)
@@ -314,5 +338,45 @@ func TestAwaitEvent_IgnoresOwnStepToolResult(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("await did not wake on the real peer event")
+	}
+}
+
+// A loop being set, changed or ended is record-only: it doesn't end an await,
+// whether it was already there or arrives (and even notifies) during the wait.
+// A real event still wakes the waiter.
+func TestAwaitEvent_IgnoresLoopEvents(t *testing.T) {
+	deps, handle := setup(t)
+	ctx := context.Background()
+	if _, err := deps.Store.AppendEvent(ctx, testRunID, testSessionID,
+		&event.LoopEvent{Action: event.LoopSet, ID: "1", Prompt: "p", By: event.ByOperator}); err != nil {
+		t.Fatal(err)
+	}
+	resCh := make(chan string, 1)
+	go func() { resCh <- runAwait(t, deps, handle, `{"timeout":5}`) }()
+	time.Sleep(50 * time.Millisecond) // let the await park
+
+	// setup's listener notifies on every append, so this wakes the waiter.
+	if _, err := deps.Store.AppendEvent(ctx, testRunID, testSessionID,
+		&event.LoopEvent{Action: event.LoopEnded, ID: "1", By: event.ByHarness, Reason: "run archived"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	select {
+	case got := <-resCh:
+		t.Fatalf("await ended on a loop event: %q", got)
+	default:
+	}
+
+	if _, err := deps.Store.AppendEvent(ctx, testRunID, testSessionID,
+		&event.UserEvent{Content: "[loop 1 · every 1m · tick 1] p", Loop: &event.LoopTick{ID: "1", N: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-resCh:
+		if !strings.Contains(got, "Awakened") {
+			t.Errorf("expected a wake on the tick, got: %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("await did not wake on the tick")
 	}
 }

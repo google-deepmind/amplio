@@ -19,6 +19,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +68,7 @@ type testCfg struct {
 	Tools         []*tool.Tool
 	InitialRecall func(ctx context.Context, task string) string
 	BlobStore     *blob.Store
+	Verify        *event.VerifyEvent
 }
 
 func newT(c testCfg) *EventLoopAgent {
@@ -80,6 +82,7 @@ func newT(c testCfg) *EventLoopAgent {
 		Broadcaster: c.Broadcaster,
 		SystemFast:  c.SystemFast,
 		SystemHQ:    c.SystemHQ,
+		Names:       session.NewNameAllocator(c.Store, c.RunID),
 	}
 	return New(env, Config{
 		SessionID:     c.SessionID,
@@ -95,6 +98,7 @@ func newT(c testCfg) *EventLoopAgent {
 		Tools:         c.Tools,
 		InitialRecall: c.InitialRecall,
 		BlobStore:     c.BlobStore,
+		Verify:        c.Verify,
 	})
 }
 
@@ -124,7 +128,7 @@ func testSetup(t *testing.T, runCfg ...config.RunConfig) (db.Store, string, *ses
 
 	runReg := runtime.NewRunRegistry()
 	registry := runReg.GetOrCreate(runID)
-	store.SetCommitListener(runtime.NewCommitNotifier(runReg, nil, nil))
+	store.SetCommitListener(runtime.NewCommitNotifier(runReg, nil, nil, nil))
 
 	return store, runID, registry
 }
@@ -1186,7 +1190,7 @@ func TestEventLoop_ResumeAtRestAutonomous(t *testing.T) {
 // newerEvent is a stored event of a type this binary doesn't know (as a newer
 // binary would write it); the store reads it back as an UnknownEvent.
 func newerEvent() *event.UnknownEvent {
-	return &event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","action":"set","criteria":"VERIFY-CRITERIA"}`)}
+	return &event.UnknownEvent{Type: "teleport", Raw: []byte(`{"type":"teleport","action":"set","criteria":"VERIFY-CRITERIA"}`)}
 }
 
 // A newer binary's event after the final reply doesn't hide it: the agent still
@@ -1245,7 +1249,7 @@ func TestEventLoop_UnknownEventNotSentToModel(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Role != llm.RoleUser || msgs[0].Content != "do X" {
 		t.Errorf("messages = %+v, want only the user's \"do X\"", msgs)
 	}
-	if strings.Contains(reqs[0].SystemPrompt, "verify") {
+	if strings.Contains(reqs[0].SystemPrompt, "teleport") {
 		t.Errorf("system prompt mentions the newer event:\n%s", reqs[0].SystemPrompt)
 	}
 }
@@ -1639,7 +1643,7 @@ func TestBuildMessages_HoistsLeadingSystemCluster(t *testing.T) {
 		{Event: &event.UserEvent{Content: "the real task"}},
 		{Event: &event.SystemEvent{Content: "recalled skills", Marker: event.MarkerInitialRecall}},
 	}
-	systemPrompt, messages := a.buildMessages(recs)
+	systemPrompt, messages := a.buildMessages(context.Background(), recs)
 
 	// The three leading system events fold into systemPrompt (banners kept).
 	for _, want := range []string{"new session", "you are an agent", "cli: sh", "system", "system_prompt"} {
@@ -1678,7 +1682,7 @@ func TestBuildMessages_CompactionAtTipYieldsNonEmpty(t *testing.T) {
 		{Event: &event.SystemEvent{Content: "cli: sh", Marker: event.MarkerCLITools}},
 		{Event: &event.CompactionEvent{Content: "summary of prior work"}},
 	}
-	systemPrompt, messages := a.buildMessages(recs)
+	systemPrompt, messages := a.buildMessages(context.Background(), recs)
 
 	if len(messages) == 0 {
 		t.Fatalf("buildMessages returned zero messages; provider would reject with \"messages: Field required\"\nsystemPrompt:\n%s", systemPrompt)
@@ -1966,7 +1970,7 @@ func TestBuildMessages_ToolResultsFollowCallOrder(t *testing.T) {
 		{Event: &event.ToolResultEvent{ToolCallID: "fast", Content: "quick"}},
 		{Event: &event.ToolResultEvent{ToolCallID: "slow", Content: "eventually"}},
 	}
-	_, messages := a.buildMessages(recs)
+	_, messages := a.buildMessages(context.Background(), recs)
 	if len(messages) != 4 {
 		t.Fatalf("messages = %d, want 4", len(messages))
 	}
@@ -1976,5 +1980,80 @@ func TestBuildMessages_ToolResultsFollowCallOrder(t *testing.T) {
 	}
 	if messages[2].Content != "eventually" || messages[3].Content != "quick" {
 		t.Errorf("content followed the wrong id: %q / %q", messages[2].Content, messages[3].Content)
+	}
+}
+
+// A loop's tick is a plain user turn, labelled with its loop; the loop's own
+// changes, the operator's, don't reach the model at all: a prompt in one would
+// read as a request for now.
+func TestEventToMessage_Loop(t *testing.T) {
+	ag := newT(testCfg{SessionID: "main-agent", Workspace: plain.New("/tmp")})
+	tick := ag.eventToMessage(&event.UserEvent{Content: "[loop 1 · every 1m · tick 2] report", Loop: &event.LoopTick{ID: "1", N: 2}})
+	if tick == nil || tick.Role != llm.RoleUser || tick.Content != "[loop 1 · every 1m · tick 2] report" {
+		t.Errorf("tick projected as %+v", tick)
+	}
+	sched := &event.Schedule{Kind: event.ScheduleRRule, Spec: "DTSTART:20261117T232452Z\nRRULE:FREQ=HOURLY;COUNT=2"}
+	for _, e := range []*event.LoopEvent{
+		{Action: event.LoopSet, ID: "1", Prompt: "status check", Schedule: sched, Summary: "every 1h, 2 times", By: event.ByOperator},
+		{Action: event.LoopEdit, ID: "1", Prompt: "status check", Schedule: sched, Verify: &event.LoopVerify{MaxRounds: 2}, By: event.ByOperator},
+		{Action: event.LoopStop, ID: "1", By: event.ByOperator},
+		{Action: event.LoopEnded, ID: "1", By: event.ByHarness, Reason: "schedule finished after 3 ticks"},
+	} {
+		if msg := ag.eventToMessage(e); msg != nil {
+			t.Errorf("loop %s projected as %+v, want nothing", e.Action, msg)
+		}
+	}
+}
+
+// eventDuringCall is a provider that, on its first call, appends an event to
+// the session as if it arrived during generation.
+type eventDuringCall struct {
+	*llm.MockProvider
+	once   sync.Once
+	during func()
+}
+
+func (p *eventDuringCall) Call(ctx context.Context, req llm.Request) (*llm.Response, error) {
+	p.once.Do(p.during)
+	return p.MockProvider.Call(ctx, req)
+}
+
+// An event arriving during the final turn's generation pulls the agent back for
+// another turn, except a record-only one (a loop's change), which waits for the
+// next.
+func TestEventLoop_LoopEventDuringGenerationTakesNoExtraTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		evt       event.Event
+		wantCalls int
+	}{
+		{"loop event", &event.LoopEvent{Action: event.LoopSet, ID: "1", Prompt: "p", By: event.ByOperator}, 1},
+		{"message", &event.MessageEvent{Content: "one more thing", Sender: "peer", SenderType: event.SenderTypeAgent}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, runID, registry := testSetup(t)
+			ctx := context.Background()
+			mock := &llm.MockProvider{Model: "m", Responses: []llm.Response{
+				{Content: "all done", StopReason: "end_turn"}, {Content: "all done, again", StopReason: "end_turn"},
+			}}
+			provider := &eventDuringCall{MockProvider: mock, during: func() {
+				if _, err := store.AppendEvent(ctx, runID, "main-agent", tc.evt); err != nil {
+					t.Error(err)
+				}
+			}}
+			ag := newT(testCfg{
+				RunID: runID, SessionID: "main-agent", Task: "do it", SystemPrompt: "You are an agent.",
+				LLM: provider, Store: store, Registry: registry, Tools: []*tool.Tool{}, Workspace: plain.New("/tmp"),
+			})
+			if err := ag.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := mock.CallCount(); got != tc.wantCalls {
+				t.Errorf("LLM calls = %d; want %d", got, tc.wantCalls)
+			}
+			if s, _ := store.GetSession(ctx, runID, "main-agent"); s.Status != db.SessionConcluded {
+				t.Errorf("status %q; want concluded", s.Status)
+			}
+		})
 	}
 }

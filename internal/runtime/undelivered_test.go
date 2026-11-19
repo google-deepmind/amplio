@@ -101,7 +101,7 @@ func TestSessionGoroutine_WarnsOfAnUndeliveredInput(t *testing.T) {
 	}
 	runReg := NewRunRegistry()
 	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, runReg, plain.Factory)
-	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus))
+	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus, mgr.AwaitsVerdict))
 	mgr.RespawnSession(runID, "worker")
 
 	<-gate.concluded

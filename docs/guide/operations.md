@@ -74,6 +74,10 @@ when the process ended, and logs what it scheduled:
 Individual runs can also be revived on demand with `amplio client restart
 <run-id>`, which is the same path.
 
+[Loops](runs.md#loops) are re-armed at startup (`msg="loops re-armed"`). Ticks
+that fell due while the server was down are skipped, not sent in a burst, and
+the next one goes at its scheduled time.
+
 Amplio is designed to be robust to server restarts: on-going tool calls will
 be canceled. The agents receive tool call cancelation feedback and decide
 to re-issue them (or not). The harness never auto retry tool calls.

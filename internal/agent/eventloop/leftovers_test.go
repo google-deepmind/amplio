@@ -284,6 +284,7 @@ func TestJustReminded(t *testing.T) {
 	rem := &event.UserEvent{Content: reminderPrefix + "\n- ..."}
 	final := &event.AssistantEvent{Content: "Done."}
 	toolTurn := &event.AssistantEvent{ToolCalls: []event.ToolCall{{ID: "t1", Name: "wait"}}}
+	concludeCall := &event.AssistantEvent{ToolCalls: []event.ToolCall{{ID: "c1", Name: event.ConcludeTool, Arguments: `{"result":"x"}`}}}
 	for _, c := range []struct {
 		name string
 		evs  []event.Event
@@ -297,6 +298,10 @@ func TestJustReminded(t *testing.T) {
 		{"never reminded", []event.Event{&event.UserEvent{Content: "task"}}, false},
 		{"reminder found by its Check", []event.Event{final, &event.UserEvent{Content: "any wording", Check: event.CheckLeftovers}}, true},
 		{"another check's message is not a reminder", []event.Event{final, &event.UserEvent{Content: "[system] Your previous turn produced no tool calls", Check: event.CheckEmptyTurn}}, false},
+		{"a conclude call answered by the reminder", []event.Event{concludeCall,
+			&event.ToolResultEvent{ToolCallID: "c1", Content: reminderCallPrefix, Check: event.CheckLeftovers}}, true},
+		{"a conclude call answered otherwise", []event.Event{concludeCall,
+			&event.ToolResultEvent{ToolCallID: "c1", Content: "Not concluded yet", Check: event.CheckVerify}}, false},
 	} {
 		recs := make([]db.EventRecord, len(c.evs))
 		for i, e := range c.evs {

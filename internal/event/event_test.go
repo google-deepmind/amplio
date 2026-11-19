@@ -43,6 +43,7 @@ func TestRoundTrip_AllTypes(t *testing.T) {
 		&MessageEvent{Content: "hello from peer", Sender: "swift-fox"},
 		&ChildResultEvent{Content: "task done", ChildSessionID: "brave-owl", Verdict: "concluded"},
 		&RecoverEvent{Content: "resumed"},
+		&LoopEvent{Action: LoopSet, ID: "1", Prompt: "p", Schedule: &Schedule{Kind: ScheduleRRule, Spec: "DTSTART:20261110T120000Z\nRRULE:FREQ=HOURLY"}, By: ByOperator},
 	}
 
 	for _, e := range events {
@@ -215,10 +216,38 @@ func TestRoundTrip_ToolResultEvent_IsError(t *testing.T) {
 	}
 }
 
+// A VerifyEvent reads as one for every action this binary knows; with an
+// action it doesn't know (a newer binary's), it reads as a placeholder, as an
+// unknown type does, rather than as a known event misread.
+func TestUnmarshal_VerifyActions(t *testing.T) {
+	for _, action := range []string{VerifySet, VerifyReplace, VerifyClear, VerifyVerifying, VerifyRejected,
+		VerifyPassed, VerifyExhausted, VerifyVerdict, VerifyWithdrawn, VerifyStale} {
+		data, err := Marshal(&VerifyEvent{Action: action, By: ByHarness, Round: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, err := Unmarshal(data)
+		if v, ok := e.(*VerifyEvent); err != nil || !ok || v.Action != action || v.Round != 2 {
+			t.Errorf("%s: read back %T %+v, err %v", action, e, e, err)
+		}
+	}
+	stored := `{"type":"verify","action":"paused","by":"harness","round":1}`
+	e, err := Unmarshal([]byte(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, ok := e.(*UnknownEvent); !ok || u.Type != "verify" {
+		t.Fatalf("unknown action read as %T %+v, want a verify placeholder", e, e)
+	}
+	if out, err := Marshal(e); err != nil || string(out) != stored {
+		t.Errorf("Marshal = %s (%v), want the stored %s", out, err, stored)
+	}
+}
+
 // A type from a newer binary reads as a placeholder that marshals back to the
 // stored JSON byte for byte.
 func TestUnmarshal_UnknownType(t *testing.T) {
-	stored := `{"type":"verify","action":"set","criteria":"tests pass","max_rounds":3}`
+	stored := `{"type":"teleport","action":"set","criteria":"tests pass","max_rounds":3}`
 	data := []byte(stored)
 	e, err := Unmarshal(data)
 	if err != nil {
@@ -228,8 +257,8 @@ func TestUnmarshal_UnknownType(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %T, want *UnknownEvent", e)
 	}
-	if u.Type != "verify" || u.EventType() != "verify" || !IsUnknown(e) {
-		t.Errorf("Type = %q, EventType = %q, IsUnknown = %v; want verify, verify, true", u.Type, u.EventType(), IsUnknown(e))
+	if u.Type != "teleport" || u.EventType() != "teleport" || !IsUnknown(e) {
+		t.Errorf("Type = %q, EventType = %q, IsUnknown = %v; want teleport, teleport, true", u.Type, u.EventType(), IsUnknown(e))
 	}
 	copy(data, "XXXXXXXX") // the caller may reuse its buffer
 	out, err := Marshal(e)
@@ -240,8 +269,8 @@ func TestUnmarshal_UnknownType(t *testing.T) {
 		t.Errorf("Marshal = %s, want the stored %s", out, stored)
 	}
 	again, err := Unmarshal(out)
-	if err != nil || again.EventType() != "verify" || !IsUnknown(again) {
-		t.Errorf("re-read = %T %v, err %v; want a verify placeholder", again, again, err)
+	if err != nil || again.EventType() != "teleport" || !IsUnknown(again) {
+		t.Errorf("re-read = %T %v, err %v; want a teleport placeholder", again, again, err)
 	}
 	if IsUnknown(&UserEvent{Content: "hi"}) {
 		t.Error("IsUnknown(UserEvent) = true")
@@ -331,8 +360,23 @@ func TestToText_AllTypes(t *testing.T) {
 			"recover", []string{"bye"},
 		},
 		{
-			&UnknownEvent{Type: "verify", Raw: json.RawMessage(`{"type":"verify","criteria":"secret"}`)},
-			"unknown", []string{"type=verify"},
+			&UnknownEvent{Type: "teleport", Raw: json.RawMessage(`{"type":"teleport","criteria":"secret"}`)},
+			"unknown", []string{"type=teleport"},
+		},
+		{
+			&LoopEvent{Action: LoopSet, ID: "3", Prompt: "check the eval", By: ByOperator,
+				Schedule: &Schedule{Kind: ScheduleRRule, Spec: "DTSTART:20261110T120000Z\nRRULE:FREQ=MINUTELY;INTERVAL=30"}},
+			"loop", []string{"id=3", "action=set", "by=operator",
+				"schedule: DTSTART:20261110T120000Z RRULE:FREQ=MINUTELY;INTERVAL=30"},
+		},
+		{
+			&LoopEvent{Action: LoopEdit, ID: "4", Prompt: "run the tests", By: ByOperator,
+				Verify: &LoopVerify{Criteria: "they pass", Model: "vertex:judge", MaxRounds: 2}},
+			"loop", []string{"id=4", "action=edit", "verify each tick: criteria: they pass; model: vertex:judge; up to 2 rounds"},
+		},
+		{
+			&LoopEvent{Action: LoopEdit, ID: "5", Prompt: "run the tests", By: ByOperator, VerifyStopped: true},
+			"loop", []string{"id=5", "action=edit", "verify each tick: stopped"},
 		},
 	}
 	for _, tt := range tests {
@@ -352,5 +396,199 @@ func TestToText_AllTypes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A loop's change reads without its prompt, which an agent inspecting the
+// stream would take for a request; its schedule reads in words, or as its
+// spec on one line in an event written before Summary.
+func TestLoopEvent_ToText(t *testing.T) {
+	sched := &Schedule{Kind: ScheduleRRule, Spec: "DTSTART:20261117T232452Z\nRRULE:FREQ=HOURLY;INTERVAL=1;COUNT=2"}
+	for _, tc := range []struct {
+		e    *LoopEvent
+		want string
+	}{
+		{&LoopEvent{Action: LoopSet, ID: "1", Prompt: "status check: reply with one line", Schedule: sched,
+			Summary: "every 1h, 2 times", By: ByOperator},
+			"==== loop · id=1 · action=set · by=operator ====\nschedule: every 1h, 2 times"},
+		{&LoopEvent{Action: LoopEdit, ID: "1", Prompt: "status check: reply with one line", Schedule: sched, By: ByOperator,
+			Verify: &LoopVerify{Criteria: "it says done", MaxRounds: 2}},
+			"==== loop · id=1 · action=edit · by=operator ====\n" +
+				"schedule: DTSTART:20261117T232452Z RRULE:FREQ=HOURLY;INTERVAL=1;COUNT=2\n" +
+				"verify each tick: criteria: it says done; up to 2 rounds"},
+		{&LoopEvent{Action: LoopEdit, ID: "1", Prompt: "status check", Schedule: sched, Summary: "every 1h, 2 times",
+			VerifyStopped: true, By: ByOperator},
+			"==== loop · id=1 · action=edit · by=operator ====\nschedule: every 1h, 2 times\nverify each tick: stopped"},
+		{&LoopEvent{Action: LoopStop, ID: "1", By: ByOperator}, "==== loop · id=1 · action=stop · by=operator ====\n"},
+		{&LoopEvent{Action: LoopEnded, ID: "1", By: ByHarness, Reason: "schedule finished after 2 ticks"},
+			"==== loop · id=1 · action=ended · by=harness ====\nschedule finished after 2 ticks"},
+	} {
+		if got := tc.e.ToText(); got != tc.want {
+			t.Errorf("%s: ToText =\n%s\nwant\n%s", tc.e.Action, got, tc.want)
+		}
+	}
+}
+
+func TestRoundTrip_LoopFields(t *testing.T) {
+	tick := &UserEvent{Content: "[loop 2 · every 1h · tick 5] p", Loop: &LoopTick{ID: "2", N: 5, Version: 4}}
+	data, err := Marshal(tick)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Unmarshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := got.(*UserEvent); u.Loop == nil || *u.Loop != *tick.Loop || u.IsHarness() {
+		t.Errorf("tick round trip = %+v", u)
+	}
+	ended := &LoopEvent{Action: LoopEnded, ID: "2", By: ByHarness, Reason: "run archived"}
+	data, err = Marshal(ended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "schedule") || strings.Contains(string(data), "prompt") {
+		t.Errorf("an ended event carries no schedule or prompt: %s", data)
+	}
+	got, err = Unmarshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := got.(*LoopEvent); *l != *ended {
+		t.Errorf("ended round trip = %+v", l)
+	}
+	// A plain user message is unchanged on the wire, as is a tick that
+	// started no verification.
+	if data, _ := Marshal(&UserEvent{Content: "hi"}); strings.Contains(string(data), "loop") {
+		t.Errorf("plain user event grew a loop field: %s", data)
+	}
+	if data, _ := Marshal(&UserEvent{Loop: &LoopTick{ID: "2", N: 1}}); strings.Contains(string(data), "version") {
+		t.Errorf("an unverified tick carries a version: %s", data)
+	}
+
+	set := &LoopEvent{Action: LoopSet, ID: "2", Prompt: "p", Summary: "every 1h", Verify: &LoopVerify{MaxRounds: 0}}
+	data, err = Marshal(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = Unmarshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unbounded rounds survive: max_rounds is always written.
+	if l := got.(*LoopEvent); l.Verify == nil || *l.Verify != *set.Verify || !strings.Contains(string(data), `"max_rounds":0`) ||
+		l.Summary != set.Summary {
+		t.Errorf("verifying set round trip = %+v (%s)", l, data)
+	}
+}
+
+// A version a loop's tick starts names the loop, which no session id can be.
+func TestByLoop(t *testing.T) {
+	if by := ByLoop("3"); by != "loop 3" || LoopOf(by) != "3" {
+		t.Errorf("ByLoop(3) = %q, LoopOf = %q", by, LoopOf(by))
+	}
+	for _, by := range []string{ByOperator, ByHarness, "boss", "", "loops"} {
+		if id := LoopOf(by); id != "" {
+			t.Errorf("LoopOf(%q) = %q", by, id)
+		}
+	}
+	e := LoopVerify{Criteria: "c", Model: "m", MaxRounds: 1}.Event("7")
+	if e.Action != VerifySet || e.By != "loop 7" || e.Criteria != "c" || e.Model != "m" || e.MaxRounds != 1 {
+		t.Errorf("Event = %+v", e)
+	}
+	if got := (LoopVerify{}).String(); got != "unbounded rounds" {
+		t.Errorf("String() = %q", got)
+	}
+	// One line, long criteria cut short.
+	long := LoopVerify{Criteria: "the tests\n  pass " + strings.Repeat("x", 300), MaxRounds: 2}.String()
+	if !strings.HasPrefix(long, "criteria: the tests pass x") || strings.Contains(long, "\n") ||
+		!strings.HasSuffix(long, "…; up to 2 rounds") || len([]rune(long)) > 240 {
+		t.Errorf("String() = %q", long)
+	}
+}
+
+// A conclude call's result is the session's result: Offered reads it (or a
+// reply's text), and ToText shows it as written rather than JSON-escaped.
+func TestConclude_OfferedAndToText(t *testing.T) {
+	args, _ := json.Marshal(ConcludeArgs{Result: "It is 42 m.\nMeasured twice."})
+	call := &AssistantEvent{Content: "Done.", ToolCalls: []ToolCall{{ID: "c1", Name: ConcludeTool, Arguments: string(args)}}}
+	for _, c := range []struct {
+		name string
+		e    *AssistantEvent
+		want string
+		ok   bool
+	}{
+		{"reply", &AssistantEvent{Content: "It is 42 m."}, "It is 42 m.", true},
+		{"conclude(result)", call, "It is 42 m.\nMeasured twice.", true},
+		{"conclude()", &AssistantEvent{ToolCalls: []ToolCall{{ID: "c2", Name: ConcludeTool, Arguments: "{}"}}}, "", false},
+		{"working", &AssistantEvent{Content: "Looking.", ToolCalls: []ToolCall{{ID: "b", Name: "bash", Arguments: "{}"}}}, "", false},
+		// Alongside another call conclude fails on its own: no attempt to conclude.
+		{"conclude with another call", &AssistantEvent{ToolCalls: []ToolCall{{ID: "b", Name: "bash", Arguments: "{}"},
+			{ID: "c3", Name: ConcludeTool, Arguments: string(args)}}}, "", false},
+	} {
+		if got, ok := c.e.Offered(); got != c.want || ok != c.ok {
+			t.Errorf("%s: Offered = %q, %v; want %q, %v", c.name, got, ok, c.want, c.ok)
+		}
+	}
+	if tc, ok := call.ConcludeCall(); !ok || tc.ID != "c1" {
+		t.Errorf("ConcludeCall = %+v, %v", tc, ok)
+	}
+	text := call.ToText()
+	if !strings.Contains(text, "name=conclude · id=c1 ----\nIt is 42 m.\nMeasured twice.") || strings.Contains(text, `\n`) {
+		t.Errorf("ToText = %q, want the result as written", text)
+	}
+	// Alongside another call conclude failed on its own: its arguments show as
+	// they are, not as a result.
+	multi := &AssistantEvent{ToolCalls: []ToolCall{{ID: "b", Name: "bash", Arguments: `{"command":"ls"}`},
+		{ID: "c4", Name: ConcludeTool, Arguments: string(args)}}}
+	if text := multi.ToText(); !strings.Contains(text, string(args)) {
+		t.Errorf("ToText of a conclude among other calls = %q, want its arguments as they are", text)
+	}
+	// A call whose arguments don't parse shows them raw rather than nothing.
+	raw := &AssistantEvent{ToolCalls: []ToolCall{{ID: "c3", Name: ConcludeTool, Arguments: `{"result":`}}}
+	if !strings.Contains(raw.ToText(), `{"result":`) {
+		t.Errorf("ToText of unparsable arguments = %q", raw.ToText())
+	}
+}
+
+// ToolResultEvent.Check round-trips, and is absent when unset (rows stay as
+// they were).
+func TestRoundTrip_ToolResultEvent_Check(t *testing.T) {
+	data, err := Marshal(&ToolResultEvent{Content: "remind", ToolCallID: "c1", Check: CheckLeftovers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := Unmarshal(data)
+	if err != nil || e.(*ToolResultEvent).Check != CheckLeftovers {
+		t.Errorf("Check did not round-trip: %s", data)
+	}
+	if data, _ := Marshal(&ToolResultEvent{Content: "ok", ToolCallID: "c2"}); strings.Contains(string(data), "check") {
+		t.Errorf("unset Check is serialized: %s", data)
+	}
+}
+
+// A LoopEvent with an action this binary doesn't know (a newer binary's) reads
+// as a placeholder, as an unknown VerifyEvent action does.
+func TestUnmarshal_LoopActions(t *testing.T) {
+	for _, action := range []string{LoopSet, LoopEdit, LoopStop, LoopEnded} {
+		data, err := Marshal(&LoopEvent{Action: action, ID: "2", By: ByOperator})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, err := Unmarshal(data)
+		if l, ok := e.(*LoopEvent); err != nil || !ok || l.Action != action || l.ID != "2" {
+			t.Errorf("%s: read back %T %+v, err %v", action, e, e, err)
+		}
+	}
+	stored := `{"type":"loop","action":"pause","id":"2","by":"operator"}`
+	e, err := Unmarshal([]byte(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, ok := e.(*UnknownEvent); !ok || u.Type != "loop" {
+		t.Fatalf("unknown action read as %T %+v, want a loop placeholder", e, e)
+	}
+	if out, err := Marshal(e); err != nil || string(out) != stored {
+		t.Errorf("Marshal = %s (%v), want the stored %s", out, err, stored)
 	}
 }

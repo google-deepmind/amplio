@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"amplio/internal/db"
 	"amplio/internal/event"
@@ -217,7 +218,7 @@ func LayeredSummary(ctx context.Context, store db.Store, runID, sessionID string
 
 	var b strings.Builder
 	if task != "" {
-		fmt.Fprintf(&b, "TASK:\n%s\n\n", truncate(task, 2000))
+		fmt.Fprintf(&b, "TASK:\n%s\n\n", util.TruncateRunes(task, 2000))
 	}
 	if priorSummary != "" {
 		fmt.Fprintf(&b, "EARLIER CONTEXT (already-summarized memory through step %d):\n%s\n\n", priorStep, priorSummary)
@@ -282,10 +283,12 @@ const openPhaseBodyCap = 2000
 //
 // Each step renders as a header line ("step N: <step summary>", or "step N:" when
 // unsummarized) optionally followed by an expanded body. The body is shown per
-// expandStep (no usable summary, recent, external input, or a no-tool-call
-// assistant reply). In the body, user/agent/environment/child inputs and
-// assistant messages render in full (capped), tool calls collapse to one-line
-// verb/target briefs (one per line), and tool results are omitted entirely.
+// expandStep (no usable summary, recent, external input, a verification
+// change, or an offered result: a no-tool-call reply or a conclude call's
+// result). In the body, user/agent/environment/child inputs, assistant
+// messages and conclude results render in full (capped), other tool calls
+// collapse to one-line verb/target briefs (one per line), and tool results are
+// omitted entirely.
 func FormatOpenPhase(ctx context.Context, store db.Store, runID, sessionID string, throughStep, tailN int) (block string, openLo int, err error) {
 	if tailN <= 0 {
 		tailN = openPhaseTailN
@@ -390,8 +393,9 @@ func FormatOpenPhase(ctx context.Context, store db.Store, runID, sessionID strin
 // expandStep reports whether a step should render its full body (not just the
 // summary header). We expand when there is no usable summary, when the step is
 // within the last tailN steps, when it carries an external input (operator/
-// agent/environment message, concluded child, recover marker), or when it holds
-// a no-tool-call assistant reply — the operator-facing summary of work, worth
+// agent/environment message, concluded child, recover marker), a change to the
+// session's verification, or when it offers a result (a no-tool-call reply,
+// or a conclude call's result) — the operator-facing summary of work, worth
 // surfacing verbatim.
 func expandStep(recs []db.EventRecord, step, throughStep, tailN int, hasSummary bool) bool {
 	if !hasSummary || step > throughStep-tailN {
@@ -401,12 +405,26 @@ func expandStep(recs []db.EventRecord, step, throughStep, tailN int, hasSummary 
 		if db.IsInput(rec.Event) {
 			return true
 		}
-		if a, ok := rec.Event.(*event.AssistantEvent); ok &&
-			len(a.ToolCalls) == 0 && strings.TrimSpace(a.Content) != "" {
-			return true
+		if _, ok := rec.Event.(*event.VerifyEvent); ok {
+			return true // a change to its verification, or a verdict's outcome
+		}
+		if a, ok := rec.Event.(*event.AssistantEvent); ok {
+			if r, offers := a.Offered(); offers && strings.TrimSpace(r) != "" {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// concludeResult is the result a turn's conclude call gives ("" if it makes
+// none, alone, or gives none).
+func concludeResult(a *event.AssistantEvent) string {
+	tc, ok := a.ConcludeCall()
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(event.ConcludeResult(tc.Arguments))
 }
 
 // renderStepBody writes the economical multiline body for one step's events:
@@ -419,15 +437,40 @@ func renderStepBody(b *strings.Builder, recs []db.EventRecord) {
 			if txt := strings.TrimSpace(e.Content); txt != "" {
 				writeBody(b, "assistant", txt)
 			}
-			for _, tc := range e.ToolCalls {
-				fmt.Fprintf(b, "    · %s\n", toolsummary.Brief(tc.Name, tc.Arguments))
+			// A conclude call's result is the session's result: in full, as a
+			// reply is. Alongside other calls it failed, and reads as a brief.
+			if result := concludeResult(e); result != "" {
+				writeBody(b, "conclude", result)
+			} else {
+				for _, tc := range e.ToolCalls {
+					fmt.Fprintf(b, "    · %s\n", toolsummary.Brief(tc.Name, tc.Arguments))
+				}
 			}
 		case *event.UserEvent:
 			label := "user"
-			if e.IsHarness() {
+			switch {
+			case e.IsHarness():
 				label = "amplio" // a conclusion-check nudge, not the operator
+			case e.Loop != nil:
+				label = "loop " + e.Loop.ID // the operator's prompt, re-sent
+				if e.Loop.Version > 0 {
+					label += fmt.Sprintf(", verification v%d", e.Loop.Version)
+				}
 			}
 			writeBody(b, label, e.Content)
+		case *event.LoopEvent:
+			verb, ok := loopVerbs[e.Action]
+			if !ok {
+				verb = e.Action
+			}
+			label := fmt.Sprintf("loop %s %s", e.ID, verb)
+			switch e.By {
+			case event.ByOperator:
+				label += " by the operator"
+			case event.ByHarness:
+				label += " by amplio"
+			}
+			writeBody(b, label, e.Body())
 		case *event.MessageEvent:
 			label := "message"
 			if e.Sender != "" {
@@ -438,6 +481,12 @@ func renderStepBody(b *strings.Builder, recs []db.EventRecord) {
 			writeBody(b, fmt.Sprintf("child %s %s", e.ChildSessionID, e.Verdict), e.Content)
 		case *event.RecoverEvent:
 			writeBody(b, "recover", e.Content)
+		case *event.VerifyEvent:
+			body := verifySummary(e)
+			if o := e.Outcome; o != nil && o.Findings != "" {
+				body += "\n" + o.Findings
+			}
+			writeBody(b, "verify", body)
 		case *event.SystemEvent:
 			label := "system"
 			if e.Marker != "" {
@@ -449,6 +498,49 @@ func renderStepBody(b *strings.Builder, recs []db.EventRecord) {
 	}
 }
 
+// loopVerbs says what each LoopEvent action did to the loop.
+var loopVerbs = map[string]string{
+	event.LoopSet: "set", event.LoopEdit: "changed", event.LoopStop: "stopped", event.LoopEnded: "ended",
+}
+
+// verifySummary is one line for a change to a session's verification.
+func verifySummary(e *event.VerifyEvent) string {
+	var parts []string
+	switch e.Action {
+	case event.VerifySet, event.VerifyReplace:
+		criteria := e.Criteria
+		if criteria == "" {
+			criteria = "the current request"
+		}
+		parts = append(parts, e.Action+" by "+e.By+", against: "+criteria)
+	case event.VerifyClear:
+		parts = append(parts, "cleared by "+e.By)
+	case event.VerifyStale:
+		if o := e.Outcome; o != nil {
+			return "stale verdict " + o.Verdict + " from verifier " + o.Verifier + ", ignored: " + e.Reason
+		}
+		parts = append(parts, e.Action)
+	case event.VerifyWithdrawn:
+		parts = append(parts, "withdrawn: "+e.Reason)
+	case event.VerifyVerdict:
+		if o := e.Outcome; o != nil && o.Stopped() {
+			return "verifier " + o.Verifier + " stopped without a verdict: " + o.Verdict
+		} else if o != nil {
+			return "verdict " + o.Verdict + " from verifier " + o.Verifier
+		}
+		parts = append(parts, e.Action)
+	default:
+		parts = append(parts, e.Action)
+	}
+	if e.Verifier != "" {
+		parts = append(parts, "verifier "+e.Verifier)
+	}
+	if e.Round > 0 {
+		parts = append(parts, fmt.Sprintf("round %d", e.Round))
+	}
+	return strings.Join(parts, " · ")
+}
+
 // writeBody writes a labeled, indented, multiline block. The label prefixes the
 // first line; continuation lines keep the same indent. Content is capped to keep
 // a persisted trace bounded.
@@ -458,7 +550,7 @@ func writeBody(b *strings.Builder, label, content string) {
 		fmt.Fprintf(b, "    [%s]\n", label)
 		return
 	}
-	content = truncate(content, openPhaseBodyCap)
+	content = util.TruncateRunes(content, openPhaseBodyCap)
 	for i, ln := range strings.Split(content, "\n") {
 		if i == 0 {
 			fmt.Fprintf(b, "    [%s] %s\n", label, ln)
@@ -484,14 +576,6 @@ func scanAnchors(events []db.EventRecord) (task, priorSummary string, priorStep 
 	return task, priorSummary, priorStep
 }
 
-// truncate clips s to at most n bytes, appending an ellipsis when it cuts.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
-
 func obsInt(m map[string]any, key string) int {
 	switch v := m[key].(type) {
 	case float64:
@@ -506,18 +590,35 @@ func obsInt(m map[string]any, key string) int {
 
 // --- session_steps ---
 
+// Character caps of the one-line views: per event in session_steps and
+// session_peek, and on session_peek's whole result.
+const (
+	stepsEventCap = 200
+	peekEventCap  = 500
+	peekBudget    = 32000
+)
+
+// fullStepsBudget bounds a full-mode session_steps result, in characters.
+const fullStepsBudget = 32000
+
+// fullStepsNoteRoom is kept free in a full-mode result for the note (and an
+// event's header) that ends it when the events don't all fit.
+const fullStepsNoteRoom = 300
+
 type sessionStepsParams struct {
 	SessionID string `json:"session_id" jsonschema:"required" jsonschema_description:"Session ID to inspect"`
 	StartStep *int   `json:"start_step,omitempty" jsonschema_description:"Start step (inclusive)"`
 	EndStep   *int   `json:"end_step,omitempty" jsonschema_description:"End step (inclusive)"`
+	Full      bool   `json:"full,omitempty" jsonschema_description:"Show each event in full, line breaks kept, instead of one line cut to ~200 characters. A result that would pass 32,000 characters ends with a note giving the start_step to continue from."`
 	RunID     string `json:"run_id,omitempty" jsonschema_description:"Optional: a prior run's id to inspect instead of the current run."`
 }
 
 func SessionSteps(deps *Deps) *tool.Tool {
 	return &tool.Tool{
-		Name:        "session_steps",
-		Description: "View events in a session, optionally filtered by step range. Shows event type and content summary per step.",
-		ParamType:   &sessionStepsParams{},
+		Name: "session_steps",
+		Description: fmt.Sprintf("View events in a session, optionally filtered by step range. Shows one line "+
+			"per event with its step and type, cut to ~%d characters; set full=true to read the events in full.", stepsEventCap),
+		ParamType: &sessionStepsParams{},
 		Execute: func(ctx context.Context, args json.RawMessage) (*tool.Result, error) {
 			params, errResult := tool.ParseArgs[sessionStepsParams](args)
 			if errResult != nil {
@@ -549,17 +650,71 @@ func SessionSteps(deps *Deps) *tool.Tool {
 			}
 			fmt.Fprintln(&b, ":")
 
+			if params.Full {
+				writeFullEvents(&b, db.KnownEvents(events))
+				return &tool.Result{Content: b.String()}, nil
+			}
 			for _, e := range db.KnownEvents(events) {
-				content := e.Event.ToText()
-				if len(content) > 200 {
-					content = content[:200] + "..."
-				}
+				content := util.TruncateRunes(e.Event.ToText(), stepsEventCap)
 				// Collapse newlines for compact display.
 				content = strings.ReplaceAll(content, "\n", " ")
 				fmt.Fprintf(&b, "  step=%d type=%-12s %s\n", e.Step, e.Event.EventType(), content)
 			}
 			return &tool.Result{Content: b.String()}, nil
 		},
+	}
+}
+
+// writeFullEvents writes events in full while the result fits in
+// fullStepsBudget. At the first that doesn't, it stops if an earlier step is
+// shown, else cuts that event, as stopping would make no progress; either way
+// the closing note's start_step is past the first event's step.
+func writeFullEvents(b *strings.Builder, events []db.EventRecord) {
+	if len(events) == 0 {
+		return
+	}
+	first := events[0].Step
+	used := utf8.RuneCountInString(b.String())
+	for i, e := range events {
+		header := fmt.Sprintf("\n--- step %d · %s ---\n", e.Step, e.Event.EventType())
+		text := e.Event.ToText()
+		size := utf8.RuneCountInString(text)
+		room := fullStepsBudget - fullStepsNoteRoom - used
+		if n := utf8.RuneCountInString(header) + size + 1; n <= room {
+			b.WriteString(header + text + "\n")
+			used += n
+			continue
+		}
+		if e.Step > first {
+			again := ""
+			if events[i-1].Step == e.Step {
+				again = " (it shows this step's events above again)"
+			}
+			fmt.Fprintf(b, "\n[Stopped at the %d-character limit before the next event (step %d, %s, %d characters). Continue with start_step=%d%s.]\n",
+				fullStepsBudget, e.Step, e.Event.EventType(), size, e.Step, again)
+			return
+		}
+		// Two fewer, for the "…" and the line break after it: a cut event always
+		// shows less than it holds.
+		keep := max(room-utf8.RuneCountInString(header)-2, 0)
+		b.WriteString(header + util.TruncateRunes(text, keep) + "\n")
+		fmt.Fprintf(b, "\n[Cut at the %d-character limit: this event is %d characters and only the first %d are shown.",
+			fullStepsBudget, size, keep)
+		later := events[i+1:]
+		sameStep := 0
+		for sameStep < len(later) && later[sameStep].Step == e.Step {
+			sameStep++
+		}
+		if sameStep == 1 {
+			fmt.Fprintf(b, " 1 later event of step %d was left out.", e.Step)
+		} else if sameStep > 1 {
+			fmt.Fprintf(b, " %d later events of step %d were left out.", sameStep, e.Step)
+		}
+		if sameStep < len(later) {
+			fmt.Fprintf(b, " Continue with start_step=%d.", e.Step+1)
+		}
+		b.WriteString("]\n")
+		return
 	}
 }
 
@@ -573,9 +728,10 @@ type sessionPeekParams struct {
 
 func SessionPeek(deps *Deps) *tool.Tool {
 	return &tool.Tool{
-		Name:        "session_peek",
-		Description: "View the most recent events in a session (last N steps).",
-		ParamType:   &sessionPeekParams{},
+		Name: "session_peek",
+		Description: fmt.Sprintf("View the most recent events in a session (last N steps), one line per event "+
+			"cut to ~%d characters. Use session_steps with full=true to read an event in full.", peekEventCap),
+		ParamType: &sessionPeekParams{},
 		Execute: func(ctx context.Context, args json.RawMessage) (*tool.Result, error) {
 			params, errResult := tool.ParseArgs[sessionPeekParams](args)
 			if errResult != nil {
@@ -613,17 +769,15 @@ func SessionPeek(deps *Deps) *tool.Tool {
 			var b strings.Builder
 			fmt.Fprintf(&b, "Recent events in %s (steps %d-%d):\n", params.SessionID, startStep, sess.CurrentStep)
 			for _, e := range db.KnownEvents(events) {
-				content := e.Event.ToText()
-				if len(content) > 500 {
-					content = content[:500] + "..."
-				}
+				content := util.TruncateRunes(e.Event.ToText(), peekEventCap)
 				content = strings.ReplaceAll(content, "\n", " ")
 				fmt.Fprintf(&b, "  step=%d type=%-12s %s\n", e.Step, e.Event.EventType(), content)
 			}
-			if b.Len() > 32000 {
-				return &tool.Result{Content: b.String()[:32000] + "\n[...truncated...]"}, nil
+			out := b.String()
+			if utf8.RuneCountInString(out) > peekBudget {
+				return &tool.Result{Content: util.TruncateRunes(out, peekBudget) + "\n[...truncated...]"}, nil
 			}
-			return &tool.Result{Content: b.String()}, nil
+			return &tool.Result{Content: out}, nil
 		},
 	}
 }

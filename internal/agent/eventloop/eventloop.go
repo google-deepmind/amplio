@@ -36,6 +36,7 @@ import (
 	"amplio/internal/session"
 	"amplio/internal/tool"
 	"amplio/internal/util"
+	"amplio/internal/verify"
 	"amplio/internal/workspace"
 )
 
@@ -81,6 +82,40 @@ const outputLimitNudgeText = "[system] Your previous turn reached the model's ou
 	"concise, self-contained final result (no tool calls). That complete turn IS your result; do not " +
 	"merely continue the cut-off prose."
 
+// The two nudges as they read to an agent that has the conclude tool.
+const (
+	concludeNudgeToolText = "[system] Your previous turn produced no tool calls and no message text, " +
+		"so it does not look like a deliberate completion. If the task is genuinely finished, call " +
+		"conclude with your final result. Otherwise, continue working with the appropriate tool calls."
+	outputLimitNudgeToolText = "[system] Your previous turn reached the model's output-token limit " +
+		"before completing the task. Continue any unfinished work as needed. When finished, call conclude " +
+		"with a concise, self-contained final result; do not merely continue the cut-off prose."
+)
+
+// The two nudges as they read to a verifier, which concludes with a verdict.
+const (
+	concludeNudgeVerdictText = "[system] Your previous turn produced no tool calls and no message text. When " +
+		"you have checked the conclusion, call conclude with your verdict and findings. Otherwise, continue " +
+		"checking with the appropriate tool calls."
+	outputLimitNudgeVerdictText = "[system] Your previous turn reached the model's output-token limit. " +
+		"Continue any unfinished checks as needed. When finished, call conclude with your verdict and concise " +
+		"findings; do not merely continue the cut-off prose."
+)
+
+// nudge picks the text of a nudge for this agent: plain, for an agent that
+// concludes with the conclude tool, or for a verifier.
+func (a *EventLoopAgent) nudge(plain, withTool, verdict string) string {
+	if a.givesVerdict() {
+		return verdict
+	}
+	for _, t := range a.cfg.Tools {
+		if t.Name == event.ConcludeTool {
+			return withTool
+		}
+	}
+	return plain
+}
+
 // compactionFraming prefixes a CompactionEvent when it is projected into the
 // LLM context, telling the model to treat the summary as its own memory of
 // already-completed work and continue. Applied here (projection time), not
@@ -116,6 +151,10 @@ type Config struct {
 	// owns Unregister. Nil for a direct caller / test, where Run() registers its
 	// own handle and owns the lifecycle.
 	Handle *session.Handle
+	// VerifierFor marks this session as the verifier of the agent it names;
+	// Verify turns verification on at bootstrap (see agent.Config).
+	VerifierFor string
+	Verify      *event.VerifyEvent
 
 	// ── Type profile: constant for an agent type; set by the factory and
 	//    treated as read-only per type (Go can't attach constants to a type, so
@@ -164,6 +203,10 @@ type EventLoopAgent struct {
 	// bumped current step. -1 outside a turn (pre-loop / between turns) → the
 	// failure marker falls back to the session's current step.
 	callStep int
+
+	// versionBase caches versionsBefore by context generation.
+	versionBase map[int]int
+
 	// concludeNudges counts consecutive accidental-conclusion nudges (an empty
 	// no-tool turn from an autonomous agent). In-memory and bounded by
 	// maxConcludeNudges so a degenerate model can't loop forever; reset to 0 on
@@ -244,16 +287,16 @@ func (a *EventLoopAgent) Run(ctx context.Context) error {
 	// decide whether the first loop iteration advances the step. This runs on
 	// EVERY cold respawn / restart (a follow-up Input or a Recover), not only on
 	// process restart, so the repair is never skipped.
-	needsAdvance := true
+	rp := resumePoint{needsAdvance: true}
 	if !fresh {
-		handled, na, rerr := a.reconcileResume(ctx, sess)
+		handled, r, rerr := a.reconcileResume(ctx, sess)
 		if rerr != nil {
 			return a.recordFailure(ctx, rerr)
 		}
 		if handled {
 			return nil // at-rest autonomous conclude (or other terminal finalize)
 		}
-		needsAdvance = na
+		rp = r
 		// reconcileResume may have parked an at-rest interactive session as idle.
 		sess, err = a.env.Store.GetSession(ctx, a.env.RunID, a.cfg.SessionID)
 		if err != nil {
@@ -263,11 +306,14 @@ func (a *EventLoopAgent) Run(ctx context.Context) error {
 
 	// A non-ongoing session is being (re)started: freshly bootstrapped with no
 	// task, or revived by an Input (the notifier only respawns cold sessions on
-	// an Input; Recover only re-spawns the active spine). Every non-ongoing
+	// an Input, or a crashed agent on its verifier's verdict; Recover only
+	// re-spawns the active spine). Every non-ongoing
 	// status is restartable. Short-circuit if the reviving Input is already
-	// pending (the cold-respawn case); otherwise wait for one.
+	// pending (the cold-respawn case), or if a conclude call is to be resumed
+	// (Recover respawns such a session without an Input: the call waits for
+	// whatever wakes it); otherwise wait for one.
 	if sess.Status != db.SessionOngoing {
-		if !a.hasPendingInput(ctx) {
+		if rp.open == nil && !a.hasPendingInput(ctx) {
 			woken, err := a.waitForFollowUp(ctx)
 			if err != nil {
 				a.logger.Debug("context cancelled while parked, exiting")
@@ -284,18 +330,27 @@ func (a *EventLoopAgent) Run(ctx context.Context) error {
 		}
 	}
 
-	return a.loop(ctx, needsAdvance)
+	return a.loop(ctx, rp)
+}
+
+// resumePoint is where a session's loop starts: whether its first iteration
+// advances the step, and a conclude call left open by its last life (open,
+// made at openStep), which the loop resumes before anything else.
+type resumePoint struct {
+	needsAdvance bool
+	open         *event.ToolCall
+	openStep     int
 }
 
 // reconcileResume performs one-shot crash recovery when entering an existing
 // (non-fresh) session, derived purely from DB state (see docs/internals/step_model.md).
 // It returns handled=true if it finalized the session (the caller should
-// return). Otherwise it returns needsAdvance for the first loop iteration.
-func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRecord) (handled, needsAdvance bool, err error) {
+// return). Otherwise it returns where the loop starts.
+func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRecord) (handled bool, rp resumePoint, err error) {
 	events, err := a.env.Store.GetEvents(ctx, a.env.RunID, a.cfg.SessionID,
 		db.EventFilter{CurrentContextOnly: true})
 	if err != nil {
-		return false, false, fmt.Errorf("load events: %w", err)
+		return false, rp, fmt.Errorf("load events: %w", err)
 	}
 	// A newer binary's event must not hide a final answer at the tail.
 	events = db.KnownEvents(events)
@@ -304,12 +359,21 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 	// counter so a cold restart cannot reset the output-limit retry budget.
 	a.outputLimitNudges = outputLimitNudgesFromHistory(events)
 
+	// A conclude call its last life was in (waiting for a verdict, typically)
+	// is resumed by the loop, not mended as interrupted: the verification it
+	// waits on is in the stream.
+	if !a.cfg.Interactive {
+		if call, step, ok := db.OpenConclude(events); ok {
+			rp.open, rp.openStep = &call, step
+		}
+	}
+
 	// Repair orphan tool calls (idempotent): synthesize a ToolResultEvent for
 	// every tool_call with no matching result, or the next LLM call is rejected
 	// for unmatched tool_use. Written at the declaring AssistantEvent's step so
 	// results stay grouped with it.
-	if err := a.repairOrphanToolCalls(ctx, events); err != nil {
-		return false, false, fmt.Errorf("repair orphans: %w", err)
+	if err := a.repairOrphanToolCalls(ctx, events, rp.open); err != nil {
+		return false, rp, fmt.Errorf("repair orphans: %w", err)
 	}
 
 	// Finalize any complete-but-unfinalized step. After orphan repair every
@@ -325,10 +389,17 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 			maxAssistantStep = rec.Step
 		}
 	}
+	if rp.open != nil {
+		maxAssistantStep = rp.openStep - 1 // the open call's step completes only with its result
+	}
 	if maxAssistantStep > sess.LastFinalizedStep {
 		if err := a.env.Store.MarkStepFinalized(ctx, a.env.RunID, a.cfg.SessionID, maxAssistantStep); err != nil {
-			return false, false, fmt.Errorf("finalize recovered step: %w", err)
+			return false, rp, fmt.Errorf("finalize recovered step: %w", err)
 		}
+	}
+	if rp.open != nil {
+		rp.needsAdvance = true // the iteration after the resumed call takes the next step
+		return false, rp, nil
 	}
 
 	// One-shot rest detection: a no-tool AssistantEvent tail means the prior life
@@ -343,16 +414,16 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 			// re-call the LLM.
 			a.logger.Debug("resume: stream at rest, parking idle")
 			if err := a.env.Store.UpdateSessionStatus(ctx, a.env.RunID, a.cfg.SessionID, db.SessionIdle); err != nil {
-				return false, false, fmt.Errorf("idle session: %w", err)
+				return false, rp, fmt.Errorf("idle session: %w", err)
 			}
-			return false, true, nil
+			return false, resumePoint{needsAdvance: true}, nil
 		}
 		// Refusal guard, on the RECOVERY path. A refused turn persisted just before
 		// the process died must fail the session exactly like the live loop does,
 		// not be nudged (as an empty turn) or concluded (with partial text). The
 		// caller routes the error through recordFailure.
 		if tail.Refusal != nil {
-			return false, false, refusalError(tail.StopReason, tail.Refusal.Category, tail.Refusal.Explanation)
+			return false, rp, refusalError(tail.StopReason, tail.Refusal.Category, tail.Refusal.Explanation)
 		}
 		// Output-limit guard, on the RECOVERY path. A persisted no-tool response
 		// with an explicit output-limit stop is incomplete, so append the same nudge
@@ -360,16 +431,16 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 		// false successful conclusion.
 		if llm.IsOutputLimitStopReason(tail.StopReason) {
 			if a.outputLimitNudges >= maxOutputLimitNudges {
-				return false, false, fmt.Errorf("model repeatedly reached output-token limit (stop_reason=%q)", tail.StopReason)
+				return false, rp, fmt.Errorf("model repeatedly reached output-token limit (stop_reason=%q)", tail.StopReason)
 			}
 			a.outputLimitNudges++
 			a.logger.Debug("resume: at-rest turn hit output limit; nudging instead of concluding",
 				"nudge", a.outputLimitNudges, "stop_reason", tail.StopReason)
 			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-				&event.UserEvent{Content: outputLimitNudgeText, Check: event.CheckOutputLimit}); aErr != nil {
-				return false, false, fmt.Errorf("append resume output-limit nudge: %w", aErr)
+				&event.UserEvent{Content: a.nudge(outputLimitNudgeText, outputLimitNudgeToolText, outputLimitNudgeVerdictText), Check: event.CheckOutputLimit}); aErr != nil {
+				return false, rp, fmt.Errorf("append resume output-limit nudge: %w", aErr)
 			}
-			return false, true, nil
+			return false, resumePoint{needsAdvance: true}, nil
 		}
 		// Accidental-conclusion guard, on the RECOVERY path. Append the nudge
 		// instead and re-enter the loop: that also makes the tail a user event,
@@ -382,56 +453,60 @@ func (a *EventLoopAgent) reconcileResume(ctx context.Context, sess *db.SessionRe
 		// independent of that detail.)
 		if isDegenerateTurn(tail.Content) {
 			if a.concludeNudges >= maxConcludeNudges {
-				return false, false, emptyResultError(tail.StopReason)
+				return false, rp, emptyResultError(tail.StopReason)
 			}
 			a.concludeNudges++
 			a.logger.Debug("resume: at-rest turn is empty; nudging instead of concluding", "nudge", a.concludeNudges)
 			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-				&event.UserEvent{Content: concludeNudgeText, Check: event.CheckEmptyTurn}); aErr != nil {
-				return false, false, fmt.Errorf("append resume conclude nudge: %w", aErr)
+				&event.UserEvent{Content: a.nudge(concludeNudgeText, concludeNudgeToolText, concludeNudgeVerdictText), Check: event.CheckEmptyTurn}); aErr != nil {
+				return false, rp, fmt.Errorf("append resume conclude nudge: %w", aErr)
 			}
-			return false, true, nil
+			return false, resumePoint{needsAdvance: true}, nil
 		}
-		// Conclusion checks, on the RECOVERY path: the same checks as the live
-		// loop, so a final answer interrupted by a restart is still checked (e.g.
-		// reminded of work that survived it). Appending also makes the tail a
-		// user event.
-		if hold := a.conclusionCheck(ctx, events[:len(events)-1]); hold != nil {
-			a.logger.Debug("resume: conclusion held by a check", "check", hold.Check)
-			if _, aErr := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID, hold); aErr != nil {
-				return false, false, fmt.Errorf("append resume %s check: %w", hold.Check, aErr)
+		// Conclusion checks, on the RECOVERY path: the same as the live loop's,
+		// so a final answer interrupted by a restart is still checked (e.g.
+		// reminded of work that survived it, or given to its verifier). Unless
+		// it concludes, the message appended makes the tail a user event.
+		//
+		// A failed conclude must not claim handled-success: that would exit the
+		// goroutine with the session still ongoing and the parent never notified
+		// (an awaiting parent would hang). The caller routes the error through
+		// recordFailure, which records the crash and notifies the parent, or,
+		// for a broken DB (errors.Is(db.ErrStore)), leaves it ongoing-but-dead
+		// for Recover.
+		// Where only the conclude tool concludes, the reply gets its note
+		// instead (replies.go), which makes the tail a user event too.
+		if a.requiresConclude() {
+			if err := a.answerReply(ctx, events[:len(events)-1]); err != nil {
+				return false, rp, err
 			}
-			return false, true, nil
+			return false, resumePoint{needsAdvance: true}, nil
 		}
-		// Autonomous: the no-tool reply is the result. Conclude without re-asking.
-		a.logger.Debug("resume: stream at rest, concluding")
-		if cErr := a.conclude(tail.Content); cErr != nil {
-			// Don't claim handled-success on a failed conclude: that would exit the
-			// goroutine with the session still ongoing and the parent never
-			// notified (an awaiting parent would hang). Return the error (raw, like
-			// the other returns here) so the caller routes it through recordFailure,
-			// which records the crash + notifies the parent — or, if conclude failed
-			// because the DB itself is broken (errors.Is(db.ErrStore)), leaves it
-			// ongoing-but-dead for Recover.
-			return false, false, fmt.Errorf("resume at-rest conclude: %w", cErr)
+		done, cErr := a.plainReply(ctx, events[:len(events)-1], tail.Content, events[len(events)-1].Step)
+		if cErr != nil {
+			return false, rp, fmt.Errorf("resume at-rest conclusion: %w", cErr)
 		}
-		return true, false, nil
+		return done, resumePoint{needsAdvance: true}, nil
 	}
 
 	// Advance the first iteration unless resuming mid-LLM-call: a real turn step
 	// at current_step-1 with no AssistantEvent means the dead predecessor
 	// advanced the step but never wrote its assistant — re-run the LLM at that
 	// step instead of double-bumping.
-	needsAdvance = sess.CurrentStep <= 1 || hasAssistantAtStep(events, sess.CurrentStep-1)
-	return false, needsAdvance, nil
+	rp.needsAdvance = sess.CurrentStep <= 1 || hasAssistantAtStep(events, sess.CurrentStep-1)
+	return false, rp, nil
 }
 
 // repairOrphanToolCalls appends a placeholder ToolResultEvent for every tool_call
 // id (across the current context) that has no matching result, at the step of the
-// AssistantEvent that declared it. Idempotent.
-func (a *EventLoopAgent) repairOrphanToolCalls(ctx context.Context, events []db.EventRecord) error {
+// AssistantEvent that declared it, except an open conclude call the loop
+// resumes (open). Idempotent.
+func (a *EventLoopAgent) repairOrphanToolCalls(ctx context.Context, events []db.EventRecord, open *event.ToolCall) error {
 	declaredStep := map[string]int{}
 	hasResult := map[string]bool{}
+	if open != nil {
+		hasResult[open.ID] = true
+	}
 	for _, rec := range events {
 		switch e := rec.Event.(type) {
 		case *event.AssistantEvent:
@@ -523,7 +598,7 @@ func outputLimitNudgesFromHistory(events []db.EventRecord) int {
 				n = 0
 			}
 		case *event.UserEvent:
-			if e.Content == outputLimitNudgeText {
+			if e.Check == event.CheckOutputLimit || e.Content == outputLimitNudgeText {
 				n++
 			}
 		}
@@ -592,6 +667,12 @@ func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 			meta = map[string]any{}
 		}
 		meta[llm.SessionMetadataKey] = a.env.LLMSpec
+	}
+	if a.cfg.VerifierFor != "" {
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta[verify.MetadataVerifierFor] = a.cfg.VerifierFor
 	}
 
 	err := a.env.Store.CreateSession(ctx, db.SessionRecord{
@@ -705,6 +786,14 @@ func (a *EventLoopAgent) bootstrap(ctx context.Context) error {
 		return fmt.Errorf("advance past bootstrap: %w", err)
 	}
 
+	// Verification asked for at the start: at step 1, not in the permanent
+	// step 0, since it ends (a pass, a clear) while the session goes on.
+	if a.cfg.Verify != nil {
+		if err := a.recordStartVerification(ctx); err != nil {
+			return err
+		}
+	}
+
 	// Opening message for a chat run (generic: appended for any agent if set).
 	if a.cfg.FirstMessage != "" {
 		if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
@@ -748,13 +837,25 @@ func (a *EventLoopAgent) seedInitialRecall(ctx context.Context, task string) err
 // (current_step before the bump). Events arriving during LLM generation
 // land at current_step (after the bump), placing them at the next step.
 //
-// needsAdvance is the first-iteration advance decision from reconcileResume:
-// false only when resuming a mid-LLM-call crash, where the dead predecessor
-// already advanced and we must call the LLM at the existing call step rather
-// than double-bumping. Every subsequent iteration advances.
-func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
+// rp is where reconcileResume says to start. rp.needsAdvance is false only
+// when resuming a mid-LLM-call crash, where the dead predecessor already
+// advanced and we must call the LLM at the existing call step rather than
+// double-bumping. Every subsequent iteration advances. A conclude call left
+// open (rp.open) is resumed first.
+func (a *EventLoopAgent) loop(ctx context.Context, rp resumePoint) error {
 	toolMap := tool.ByName(a.cfg.Tools)
 	toolDefs := tool.Defs(a.cfg.Tools)
+	needsAdvance := rp.needsAdvance
+
+	if rp.open != nil {
+		done, err := a.resumeConclude(ctx, *rp.open, rp.openStep)
+		if err != nil {
+			return a.recordFailure(ctx, fmt.Errorf("resume conclude: %w", err))
+		}
+		if done {
+			return nil
+		}
+	}
 
 	// consecutiveCompactions guards against a pathological compact→retry→compact
 	// loop (e.g. a context limit so small even the post-compaction context can't
@@ -798,6 +899,14 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		a.callStep = callStep // a crash this turn records at its call step
 		a.logger.Debug("calling LLM", "call_step", callStep, "current_step", newStep)
 
+		// A verdict that reached the agent outside a conclude call: told now,
+		// in this turn's context.
+		if !a.cfg.Interactive {
+			if err := a.noteVerdict(ctx, callStep); err != nil {
+				return a.recordFailure(ctx, fmt.Errorf("tell the verifier's outcome: %w", err))
+			}
+		}
+
 		// Load context up to and including the call step (bootstrap + current
 		// generation, step <= callStep). Events at the bumped step — arrivals
 		// during/after now — are excluded here and picked up by the
@@ -807,7 +916,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 		if err != nil {
 			return a.recordFailure(ctx, fmt.Errorf("load events: %w", err))
 		}
-		systemPrompt, messages := a.buildMessages(events)
+		systemPrompt, messages := a.buildMessages(ctx, events)
 
 		// Call LLM.
 		resp, err := a.callLLM(ctx, llm.Request{
@@ -866,7 +975,15 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 			if err := a.env.Store.AppendEventAtStep(ctx, a.env.RunID, a.cfg.SessionID, callStep, assistantEvt); err != nil {
 				return a.recordFailure(ctx, fmt.Errorf("record assistant: %w", err))
 			}
-			if err := a.executeAndAppendToolResults(ctx, callStep, resp.ToolCalls, toolMap); err != nil {
+			if call, ok := a.concludeCallOf(resp.ToolCalls, toolMap); ok {
+				done, err := a.concludeCall(ctx, events, call, callStep)
+				if err != nil {
+					return a.recordFailure(ctx, fmt.Errorf("conclude: %w", err))
+				}
+				if done {
+					return nil
+				}
+			} else if err := a.executeAndAppendToolResults(ctx, callStep, resp.ToolCalls, toolMap); err != nil {
 				return a.recordFailure(ctx, fmt.Errorf("append tool results: %w", err))
 			}
 			if err := a.env.Store.MarkStepFinalized(ctx, a.env.RunID, a.cfg.SessionID, callStep); err != nil {
@@ -902,8 +1019,16 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 			return a.recordFailure(ctx, fmt.Errorf("count events arrived during generation: %w", err))
 		}
 		if nextStepCount > 0 {
-			a.logger.Debug("events arrived during generation, continuing")
-			continue
+			// Unless all of them are records that wake no one (db.IsRecordOnly):
+			// those are read at the next turn, whenever that is.
+			waking, err := db.WakingEventsSince(ctx, a.env.Store, a.env.RunID, a.cfg.SessionID, newStep)
+			if err != nil {
+				return a.recordFailure(ctx, fmt.Errorf("read events arrived during generation: %w", err))
+			}
+			if waking > 0 {
+				a.logger.Debug("events arrived during generation, continuing")
+				continue
+			}
 		}
 
 		// A bare no-tool-call turn means "done for now". What it produces
@@ -935,7 +1060,7 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 				a.logger.Debug("output-limited no-tool turn; nudging instead of concluding",
 					"nudge", a.outputLimitNudges, "stop_reason", resp.StopReason)
 				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-					&event.UserEvent{Content: outputLimitNudgeText, Check: event.CheckOutputLimit}); err != nil {
+					&event.UserEvent{Content: a.nudge(outputLimitNudgeText, outputLimitNudgeToolText, outputLimitNudgeVerdictText), Check: event.CheckOutputLimit}); err != nil {
 					return a.recordFailure(ctx, fmt.Errorf("append output-limit nudge: %w", err))
 				}
 				continue
@@ -956,23 +1081,30 @@ func (a *EventLoopAgent) loop(ctx context.Context, needsAdvance bool) error {
 				a.concludeNudges++
 				a.logger.Debug("empty no-tool turn; nudging instead of concluding", "nudge", a.concludeNudges)
 				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID,
-					&event.UserEvent{Content: concludeNudgeText, Check: event.CheckEmptyTurn}); err != nil {
+					&event.UserEvent{Content: a.nudge(concludeNudgeText, concludeNudgeToolText, concludeNudgeVerdictText), Check: event.CheckEmptyTurn}); err != nil {
 					return a.recordFailure(ctx, fmt.Errorf("append conclude nudge: %w", err))
 				}
 				continue
 			}
-			// Conclusion checks (leftovers.go): one may hold the conclusion for a
-			// turn with a message of its own.
-			if hold := a.conclusionCheck(ctx, events); hold != nil {
-				a.logger.Debug("conclusion held by a check", "check", hold.Check)
-				if _, err := a.env.Store.AppendEvent(ctx, a.env.RunID, a.cfg.SessionID, hold); err != nil {
-					return a.recordFailure(ctx, fmt.Errorf("append %s check: %w", hold.Check, err))
+			// Where only the conclude tool concludes, a reply gets a note asking
+			// for it (replies.go).
+			if a.requiresConclude() {
+				if err := a.answerReply(ctx, events); err != nil {
+					return a.recordFailure(ctx, err)
 				}
 				continue
 			}
-			// Autonomous: conclude — the turn's text is the result.
-			a.logger.Debug("no tool calls, concluding")
-			return a.conclude(resp.Content)
+			// Otherwise the reply is an attempt to conclude with its text, as
+			// conclude(result=text) would be; the conclusion checks may hold it
+			// with a message of their own.
+			done, err := a.plainReply(ctx, events, resp.Content, callStep)
+			if err != nil {
+				return a.recordFailure(ctx, err)
+			}
+			if done {
+				return nil
+			}
+			continue
 		}
 
 		// Interactive (chatbot): park idle and wait for the next user input.
@@ -1032,9 +1164,10 @@ func (a *EventLoopAgent) waitForFollowUp(ctx context.Context) (bool, error) {
 	}
 }
 
-// hasPendingInput reports whether an Input-class event is already sitting at or
-// past the session's current step (events arriving while parked land at the
-// current step). Used to short-circuit both the idle wait and the Run-entry wait.
+// hasPendingInput reports whether an Input-class event (or a verdict that
+// revives a crashed agent) is already sitting at or past the session's current
+// step (events arriving while parked land at the current step). Used to
+// short-circuit both the idle wait and the Run-entry wait.
 func (a *EventLoopAgent) hasPendingInput(ctx context.Context) bool {
 	sess, err := a.env.Store.GetSession(ctx, a.env.RunID, a.cfg.SessionID)
 	if err != nil {
@@ -1047,7 +1180,9 @@ func (a *EventLoopAgent) hasPendingInput(ctx context.Context) bool {
 		return false
 	}
 	for _, rec := range events {
-		if db.IsInput(rec.Event) {
+		// Or what revived a crashed agent: its verifier's verdict on its
+		// pending candidate (a Notice; see runtime.NewCommitNotifier).
+		if db.IsInput(rec.Event) || verify.Revives(ctx, a.env.Store, a.env.RunID, a.cfg.SessionID, rec.Event) {
 			return true
 		}
 	}
@@ -1071,11 +1206,23 @@ func (a *EventLoopAgent) hasPendingInput(ctx context.Context) bool {
 //
 // Banners are preserved (SystemEvent.ToText): the marker headers signal the kind
 // of each system segment and we keep them for consistency with the trajectory.
-func (a *EventLoopAgent) buildMessages(events []db.EventRecord) (systemPrompt string, messages []llm.Message) {
+func (a *EventLoopAgent) buildMessages(ctx context.Context, events []db.EventRecord) (systemPrompt string, messages []llm.Message) {
 	var sys []string
 	leading := true
+	version := a.versionsBefore(ctx, events)
 	for _, rec := range events {
 		msg := a.eventToMessage(rec.Event)
+		if e, ok := rec.Event.(*event.VerifyEvent); ok {
+			// A change someone else made to its verification reads as a note,
+			// with the version it starts or ends; the harness's own actions come
+			// with messages of their own.
+			if e.Action == event.VerifySet || e.Action == event.VerifyReplace {
+				version++
+			}
+			if note := verify.Note(e, version); note != "" {
+				msg = &llm.Message{Role: llm.RoleUser, Content: note}
+			}
+		}
 		if msg == nil {
 			continue
 		}
@@ -1088,6 +1235,44 @@ func (a *EventLoopAgent) buildMessages(events []db.EventRecord) (systemPrompt st
 	}
 	orderToolResults(messages)
 	return strings.Join(sys, "\n\n"), messages
+}
+
+// versionsBefore counts the versions of the agent's verification started
+// before its context (events): in what a compaction took out of it. Counted
+// once per generation.
+func (a *EventLoopAgent) versionsBefore(ctx context.Context, events []db.EventRecord) int {
+	gen := 0
+	for _, r := range events {
+		gen = max(gen, r.Generation)
+	}
+	if gen == 0 {
+		return 0
+	}
+	if n, ok := a.versionBase[gen]; ok {
+		return n
+	}
+	all, err := a.env.Store.GetEvents(ctx, a.env.RunID, a.cfg.SessionID, db.EventFilter{})
+	if err != nil {
+		return 0
+	}
+	inContext := make(map[string]bool, len(events))
+	for _, r := range events {
+		inContext[r.EventID] = true
+	}
+	n := 0
+	for _, r := range all {
+		// Only an earlier generation's: one appended since the context was read
+		// carries this one, and isn't before it.
+		if e, ok := r.Event.(*event.VerifyEvent); ok && r.Generation < gen && !inContext[r.EventID] &&
+			(e.Action == event.VerifySet || e.Action == event.VerifyReplace) {
+			n++
+		}
+	}
+	if a.versionBase == nil {
+		a.versionBase = map[int]int{}
+	}
+	a.versionBase[gen] = n
+	return n
 }
 
 // orderToolResults puts each run of tool-result messages back into the order
@@ -1185,6 +1370,10 @@ func (a *EventLoopAgent) eventToMessage(evt event.Event) *llm.Message {
 		return &llm.Message{Role: llm.RoleUser, Content: e.ToText()}
 	case *event.UnknownEvent:
 		return nil // a newer binary's event: not ours to show the model
+	case *event.VerifyEvent:
+		return nil // buildMessages projects a change someone else made, with its version
+	case *event.LoopEvent:
+		return nil // the operator's change to a loop, whose prompt would read as a request; its ticks name it
 	default:
 		return nil
 	}
@@ -1409,22 +1598,6 @@ func (a *EventLoopAgent) loadAttachments(refs []event.Attachment) []llm.Attachme
 	return out
 }
 
-// conclude ends an autonomous agent: its final turn's text is the result. It
-// cascade-cancels any owned children, then atomically sets concluded and posts
-// the result to the parent. Uses a background context so a late ctx cancellation
-// can't tear down the terminal write.
-func (a *EventLoopAgent) conclude(result string) error {
-	// What it leaves running rides on the parent's child_result (not in the
-	// result text, which is the agent's own words).
-	var notes []event.ResultNote
-	if a.cfg.ParentID != "" {
-		notes = a.runningWork(context.Background()).notes()
-	}
-	a.cascadeCancelChildren("parent " + a.cfg.SessionID + " concluded")
-	return a.env.Store.TerminateAndNotifyParent(
-		context.Background(), a.env.RunID, a.cfg.SessionID, a.cfg.ParentID, db.SessionConcluded, result, notes, nil, -1)
-}
-
 // cascadeCancelChildren canceller-drives a recursive cancel of each active child
 // (CancelSession recurses into grandchildren and skips already-terminal ones).
 func (a *EventLoopAgent) cascadeCancelChildren(reason string) {
@@ -1463,8 +1636,8 @@ func (a *EventLoopAgent) recordFailure(ctx context.Context, err error) error {
 	if errors.Is(err, db.ErrStore) {
 		return err
 	}
-	_ = a.env.Store.TerminateAndNotifyParent(context.Background(), a.env.RunID, a.cfg.SessionID,
+	_, _ = a.env.Store.TerminateAndNotifyParent(context.Background(), a.env.RunID, a.cfg.SessionID,
 		a.cfg.ParentID, db.SessionCrashed, err.Error(), nil,
-		&event.SystemEvent{Content: err.Error(), Marker: event.MarkerError}, a.callStep)
+		db.SelfEvent{Event: &event.SystemEvent{Content: err.Error(), Marker: event.MarkerError}, Step: a.callStep})
 	return err
 }

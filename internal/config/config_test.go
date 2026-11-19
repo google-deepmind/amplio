@@ -502,3 +502,76 @@ func TestResolve_EmbedModelValues(t *testing.T) {
 		}
 	}
 }
+
+// [verify]: max_rounds defaults to 3 when omitted, an explicit 0 means
+// unbounded, a negative one is refused; model defaults to "" (the verified
+// agent's own).
+func TestVerifyDefaults(t *testing.T) {
+	clearLayerEnv(t)
+	if d := (Config{}).VerifyDefaults(); d != (VerifyDefaults{MaxRounds: DefaultVerifyMaxRounds}) || DefaultVerifyMaxRounds != 3 {
+		t.Errorf("omitted [verify] = %+v", d)
+	}
+	for _, c := range []struct {
+		toml string
+		want VerifyDefaults
+		err  bool
+	}{
+		{"[verify]\nmodel = \"vertex-claude:judge\"\nmax_rounds = 5\n", VerifyDefaults{Model: "vertex-claude:judge", MaxRounds: 5}, false},
+		{"[verify]\nmax_rounds = 0\n", VerifyDefaults{MaxRounds: 0}, false},
+		{"[verify]\nmax_rounds = -1\n", VerifyDefaults{}, true},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(ConfigPath(dir), []byte(c.toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Resolve(dir, Overrides{SystemLLMHQ: "x:hq", SystemLLMFast: "x:fast"})
+		if (err != nil) != c.err {
+			t.Errorf("%q: err = %v, want error %v", c.toml, err, c.err)
+			continue
+		}
+		if err == nil && cfg.VerifyDefaults() != c.want {
+			t.Errorf("%q: defaults = %+v, want %+v", c.toml, cfg.VerifyDefaults(), c.want)
+		}
+	}
+}
+
+func TestLoopExpiry(t *testing.T) {
+	for raw, want := range map[string]string{"": "168h0m0s", "36h": "36h0m0s", "2d": "48h0m0s", "never": "never"} {
+		d, never, err := Config{Loop: LoopConfig{Expiry: raw}}.LoopExpiry()
+		got := d.String()
+		if never {
+			got = "never"
+		}
+		if err != nil || got != want {
+			t.Errorf("expiry %q = %s, %v; want %s", raw, got, err, want)
+		}
+	}
+	for _, bad := range []string{"soon", "0s", "-1h", "forever"} {
+		if _, _, err := (Config{Loop: LoopConfig{Expiry: bad}}).LoopExpiry(); err == nil {
+			t.Errorf("expiry %q accepted", bad)
+		}
+	}
+	// A bad value fails at startup, not when someone first opens the loop form.
+	clearLayerEnv(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(ConfigPath(dir), []byte("[loop]\nexpiry = \"a week\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(dir, Overrides{SystemLLMHQ: "x:hq", SystemLLMFast: "x:fast"}); err == nil || !strings.Contains(err.Error(), "[loop] expiry") {
+		t.Errorf("Resolve with a bad [loop] expiry = %v", err)
+	}
+}
+
+// [agent] require_conclude is off unless the file turns it on.
+func TestLoad_AgentRequireConclude(t *testing.T) {
+	dir := t.TempDir()
+	if cfg, err := Load(dir); err != nil || cfg.Agent.RequireConclude {
+		t.Fatalf("no file: RequireConclude = %v, %v; want off", cfg.Agent.RequireConclude, err)
+	}
+	if err := os.WriteFile(ConfigPath(dir), []byte("[agent]\nrequire_conclude = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := Load(dir); err != nil || !cfg.Agent.RequireConclude {
+		t.Errorf("[agent] require_conclude = true: RequireConclude = %v, %v", cfg.Agent.RequireConclude, err)
+	}
+}

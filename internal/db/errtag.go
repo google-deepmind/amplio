@@ -16,6 +16,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -33,6 +34,10 @@ import (
 // every error returned through the Store interface wraps ErrStore (see Tag), so
 // classification can never miss a DB error or mislabel a non-DB one.
 var ErrStore = errors.New("db store")
+
+// IsNotFound reports whether a Store read failed because the row doesn't
+// exist, as opposed to the read itself failing.
+func IsNotFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }
 
 // Tag wraps a Store so that every error it returns wraps ErrStore. Install it
 // once at the boundary (the concrete store's constructor returns Tag(impl)), so
@@ -169,12 +174,23 @@ func (t *taggedStore) UpdateSessionStatus(ctx context.Context, runID, sessionID,
 	return tag(t.s.UpdateSessionStatus(ctx, runID, sessionID, status))
 }
 
-func (t *taggedStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, selfEvent event.Event, selfEventStep int) error {
-	return tag(t.s.TerminateAndNotifyParent(ctx, runID, sessionID, parentID, status, content, notes, selfEvent, selfEventStep))
+func (t *taggedStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, self ...SelfEvent) (bool, error) {
+	ok, err := t.s.TerminateAndNotifyParent(ctx, runID, sessionID, parentID, status, content, notes, self...)
+	return ok, tag(err)
+}
+
+func (t *taggedStore) SetStatusUnlessTerminal(ctx context.Context, runID, sessionID, status string) (bool, error) {
+	ok, err := t.s.SetStatusUnlessTerminal(ctx, runID, sessionID, status)
+	return ok, tag(err)
 }
 
 func (t *taggedStore) MergeSessionMetadata(ctx context.Context, runID, sessionID string, updates map[string]any) error {
 	return tag(t.s.MergeSessionMetadata(ctx, runID, sessionID, updates))
+}
+
+func (t *taggedStore) ListSessionsWithMetadata(ctx context.Context, key string) ([]SessionRecord, error) {
+	r, err := t.s.ListSessionsWithMetadata(ctx, key)
+	return r, tag(err)
 }
 
 // --- Event operations ---
@@ -184,8 +200,36 @@ func (t *taggedStore) AppendEvent(ctx context.Context, runID, sessionID string, 
 	return id, tag(err)
 }
 
+func (t *taggedStore) AppendEventWithMetadata(ctx context.Context, runID, sessionID string, evt event.Event, updates map[string]any) (string, error) {
+	id, err := t.s.AppendEventWithMetadata(ctx, runID, sessionID, evt, updates)
+	return id, tag(err)
+}
+
+// AppendEventsIf returns ok's refusal as it is: it isn't a store error.
+func (t *taggedStore) AppendEventsIf(ctx context.Context, runID, sessionID string, ok func([]SessionRecord) error,
+	updates map[string]any, evts ...event.Event) error {
+	refused := false
+	check := ok
+	if ok != nil {
+		check = func(lineage []SessionRecord) error {
+			err := ok(lineage)
+			refused = err != nil
+			return err
+		}
+	}
+	err := t.s.AppendEventsIf(ctx, runID, sessionID, check, updates, evts...)
+	if refused {
+		return err
+	}
+	return tag(err)
+}
+
 func (t *taggedStore) AppendEventAtStep(ctx context.Context, runID, sessionID string, step int, evt event.Event) error {
 	return tag(t.s.AppendEventAtStep(ctx, runID, sessionID, step, evt))
+}
+
+func (t *taggedStore) AppendEvents(ctx context.Context, runID, sessionID string, evts ...SelfEvent) error {
+	return tag(t.s.AppendEvents(ctx, runID, sessionID, evts...))
 }
 
 func (t *taggedStore) FinalizeStep(ctx context.Context, runID, sessionID string, step int, events []event.Event) error {

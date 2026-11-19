@@ -24,6 +24,12 @@
 	import ModelSelect from './ModelSelect.svelte';
 	import BriefingSelect from './BriefingSelect.svelte';
 	import WorkspaceField from './WorkspaceField.svelte';
+	import ComposerOptions from './ComposerOptions.svelte';
+	import { ComposerState } from '$lib/composer.svelte';
+	import { addRootLoop } from '$lib/composerSend';
+	import { verifyRequest, type VerifyFields } from '$lib/composerOptions';
+	import { serverSettings } from '$lib/serverSettings.svelte';
+	import type { LoopFields } from '$lib/loopSchedule';
 	import {
 		CommandIcon,
 		KeyReturnIcon,
@@ -38,6 +44,21 @@
 	let llm = $state('');
 	let workspace = $state('.');
 	let briefings = $state<string[]>([]);
+	// Verification and a loop on the root agent. The loop repeats its own prompt
+	// (default: the task) from one interval after the start; the verification
+	// is the task's conclusion, and the loop form's "Verify each tick" is its
+	// own (options.loopVerify).
+	const options = new ComposerState(() => mode === 'autonomous', { ownLoopVerify: true });
+	// A run that started but whose loop couldn't be set: the form offers to
+	// retry the loop, or to open the run, and won't start a second run.
+	let unlooped = $state<{
+		runId: string;
+		prompt: string;
+		loop: LoopFields;
+		verify: VerifyFields | null;
+		path: string;
+		why: string;
+	} | null>(null);
 	// Bound from WorkspaceField — the short label ("new · jj", "my-alias",
 	// basename of path). Used on the Start button during the resolving stage
 	// so the user sees WHICH workspace is being created without bloating the
@@ -49,6 +70,7 @@
 	// 'starting' fires the actual run (fast). Idle when nothing in flight.
 	let stage = $state<'idle' | 'resolving' | 'starting'>('idle');
 	const busy = $derived(stage !== 'idle');
+	const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 	let error = $state('');
 	let focused = $state(false);
 	// Set once the operator edits any field; keeps the composer expanded on blur
@@ -72,7 +94,7 @@
 		if (!peekRunPrefill()) return; // track; nothing pending
 		const p = takeRunPrefill();
 		if (!p) return;
-		mode = p.interactive ? 'interactive' : 'autonomous';
+		setMode(p.interactive ? 'interactive' : 'autonomous');
 		text = p.task;
 		title = p.title;
 		llm = p.llm;
@@ -82,11 +104,15 @@
 
 	const interactive = $derived(mode === 'interactive');
 	// Resting state is a single-line bar; expands while focused or once edited
-	// (dirty), so blurring a partially-filled form doesn't fold it shut.
+	// (dirty, an option chosen or its form open), so blurring a partially-filled
+	// form doesn't fold it shut.
 	// Phone: the expanded form is a bottom sheet; tapping its scrim (or Escape)
 	// folds it back to the resting bar and keeps the draft.
 	let folded = $state(false);
-	const expanded = $derived(!folded && (focused || dirty || text.trim().length > 0));
+	const composing = $derived(
+		dirty || text.trim().length > 0 || !!options.open || !!options.verify || !!options.loop || !!unlooped
+	);
+	const expanded = $derived(!folded && (focused || composing));
 
 	// Back folds the sheet (a picker open inside it closes first).
 	closeOnBack(
@@ -107,14 +133,31 @@
 		(document.activeElement as HTMLElement | null)?.blur();
 	}
 
+	// A press on the form's own non-focusable space (a heading, the gap between
+	// controls, a panel's padding) moves the focus to <body>: focusout comes
+	// with no relatedTarget, which isn't the focus leaving the form. The next
+	// press outside is, though no focusout follows it then.
+	let pressedInside = false;
+	$effect(() => {
+		const onDown = (e: PointerEvent) => {
+			pressedInside = !!formEl?.contains(e.target as Node);
+			if (!pressedInside && !formEl?.contains(document.activeElement)) focused = false;
+		};
+		document.addEventListener('pointerdown', onDown, true);
+		return () => document.removeEventListener('pointerdown', onDown, true);
+	});
 	function onFocusOut(e: FocusEvent) {
 		const form = e.currentTarget as HTMLElement;
 		const next = e.relatedTarget as Node | null;
-		if (!next || !form.contains(next)) focused = false;
+		if (next ? !form.contains(next) : !pressedInside) focused = false;
 	}
 
 	function setMode(m: 'autonomous' | 'interactive') {
 		mode = m;
+		if (m === 'interactive') {
+			options.verify = options.loopVerify = null; // an interactive root never concludes
+			if (options.open === 'verify') options.close();
+		}
 		taEl?.focus(); // keep the cursor where you were typing
 	}
 
@@ -128,9 +171,25 @@
 		}
 	}
 
+	// A leading /verify or /loop opens that option's form, as in a composer
+	// card (MessageBox), and is removed from the task.
+	function onTaskInput() {
+		const rest = options.slash(text);
+		if (typeof rest === 'string') text = rest;
+	}
+
 	async function submit(e: Event) {
 		e.preventDefault();
-		if (!text.trim()) return;
+		// A shortcut opens its form rather than starting; a refused one (the hint
+		// says why) doesn't start either.
+		const rest = options.slash(text, true);
+		if (typeof rest === 'string') {
+			text = rest;
+			return;
+		}
+		if (rest === false) return;
+		// requestSubmit (Cmd/Ctrl+Enter) fires even while Start is disabled.
+		if (busy || unlooped || !text.trim() || options.formOpen()) return;
 		error = '';
 		try {
 			// Stage 1 (slow path only): pre-create the workspace when the spec
@@ -160,15 +219,48 @@
 				workspace: wsForStart,
 				briefings: briefings.length > 0 ? briefings : undefined
 			};
-			if (interactive) {
-				const { run_id } = await api.startRun({ interactive: true, message: text, ...common });
-				resetAndGo(`/runs/${run_id}/chat`); // follow up in the conversation
-			} else {
-				const { run_id } = await api.startRun({ task: text, ...common });
-				resetAndGo(`/runs/${run_id}`); // watch it on the overview
+			const { run_id } = interactive
+				? await api.startRun({ interactive: true, message: text, ...common })
+				: await api.startRun({
+						task: text,
+						...common,
+						verify: options.verify ? verifyRequest(options.verify) : undefined
+					});
+			// Interactive: follow up in the conversation; autonomous: watch it on the overview.
+			const path = interactive ? `/runs/${run_id}/chat` : `/runs/${run_id}`;
+			if (options.loop) {
+				const pending = {
+					runId: run_id,
+					prompt: options.loopPrompt.trim() || text,
+					loop: options.loop,
+					verify: interactive ? null : options.loopVerify,
+					path,
+					why: ''
+				};
+				try {
+					await addRootLoop(api, run_id, pending.prompt, pending.loop, pending.verify, () => serverSettings.now());
+				} catch (err) {
+					unlooped = { ...pending, why: errText(err) };
+					return;
+				}
 			}
+			resetAndGo(path);
 		} catch (err) {
-			error = String(err);
+			error = errText(err);
+		} finally {
+			stage = 'idle';
+		}
+	}
+
+	async function retryLoop() {
+		const u = unlooped;
+		if (!u || busy) return;
+		stage = 'starting';
+		try {
+			await addRootLoop(api, u.runId, u.prompt, u.loop, u.verify, () => serverSettings.now());
+			resetAndGo(u.path);
+		} catch (err) {
+			unlooped = { ...u, why: errText(err) };
 		} finally {
 			stage = 'idle';
 		}
@@ -177,6 +269,8 @@
 	function resetAndGo(path: string) {
 		text = '';
 		title = '';
+		unlooped = null;
+		options.reset();
 		focused = false;
 		dirty = false;
 		goto(path);
@@ -236,8 +330,20 @@
 		rows={expanded ? 4 : 1}
 		placeholder={interactive ? 'Message the agent to start a chat…' : 'Start a run…'}
 		onkeydown={onTaskKey}
+		oninput={onTaskInput}
 	></textarea>
 	{#if expanded}
+		<div class="run-opts">
+			<ComposerOptions
+				composer={options}
+				onclose={() => taEl?.focus()}
+				withPrompt
+				withSendNow={false}
+				promptPlaceholder={interactive ? 'Default: the opening message' : 'Default: the task'}
+				loopTitle="Repeat a prompt to the root agent"
+				adders={{ verify: interactive ? null : 'Verify the result', loop: 'Repeat a prompt' }}
+			/>
+		</div>
 		<div class="footer">
 			<div class="modes" role="group" aria-label="Run mode">
 				<button
@@ -271,7 +377,7 @@
 			     a verb, and keeping it short prevents the button from
 			     wrapping to a second line. Starting: brief action word
 			     before navigation. -->
-			<button class="primary start" class:interactive disabled={busy || !text.trim()}>
+			<button class="primary start" class:interactive disabled={busy || !!unlooped || !text.trim()}>
 				<span>
 					{#if stage === 'resolving'}
 						{workspaceSummary || 'workspace'}
@@ -292,7 +398,16 @@
 			</button>
 		</div>
 	{/if}
-	{#if error}<p class="err">{error}</p>{/if}
+	{#if unlooped}
+		<div class="unlooped" role="alert">
+			<p class="err">The run started, but its loop wasn't set: {unlooped.why}</p>
+			<div class="unlooped-actions">
+				<button type="button" onclick={() => unlooped && resetAndGo(unlooped.path)}>Open the run</button>
+				<button type="button" class="primary" onclick={retryLoop} disabled={busy}>Retry the loop</button>
+			</div>
+		</div>
+	{/if}
+	{#if error}<p class="err" role="alert">{error}</p>{/if}
 </form>
 
 <style>
@@ -364,6 +479,9 @@
 		min-height: 4.5rem;
 		margin-bottom: 0.4rem;
 	}
+	.run-opts:has(> :global(*)) {
+		margin-bottom: 0.5rem;
+	}
 	.footer {
 		display: flex;
 		align-items: center;
@@ -429,6 +547,12 @@
 	.err {
 		font-size: var(--fs-md);
 		margin: 0.5rem 0 0;
+	}
+	.unlooped-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		margin-top: 0.4rem;
 	}
 
 	/* Phone: expanded, the form is a bottom sheet over a scrim. Its footer (the

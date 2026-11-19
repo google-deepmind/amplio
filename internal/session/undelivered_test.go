@@ -95,6 +95,8 @@ func TestWarnUndelivered(t *testing.T) {
 			&event.ChildResultEvent{ChildSessionID: "c", Verdict: db.SessionConcluded, Content: "done"}, false, 0, false, true},
 		{"concluded, a cancelled child's result unread", db.SessionConcluded,
 			&event.ChildResultEvent{ChildSessionID: "c", Verdict: db.SessionCancelled, Content: "parent worker concluded"}, false, 0, false, false},
+		{"concluded, a verifier's candidate unread", db.SessionConcluded,
+			&event.UserEvent{Content: "verify: It is 42.", Check: event.CheckVerify}, false, 0, false, false},
 		{"concluded, a notification unread", db.SessionConcluded, message(envMsg), false, 0, false, false},
 		{"cancelled, a message unread", db.SessionCancelled, message(agentMsg), false, 0, false, false},
 		{"crashed, a message unread", db.SessionCrashed, message(agentMsg), false, 0, false, false},

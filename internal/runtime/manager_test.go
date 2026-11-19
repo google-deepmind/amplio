@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -64,6 +65,32 @@ func init() {
 	agent.Register("recover_test_agent", func(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		return &recorderAgent{run: env.RunID, sid: cfg.SessionID}, nil
 	}, agent.Traits{})
+	agent.Register("manager_test_verifier", func(_ *agent.Env, cfg *agent.Config) (agent.Agent, error) {
+		return &recorderAgent{sid: cfg.SessionID}, nil
+	}, agent.Traits{Verifier: true})
+}
+
+// A verifier checks another agent's conclusion: a run can't be started with
+// one as its root, and nothing is created.
+func TestStartRun_RefusesAVerifierRoot(t *testing.T) {
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil },
+		NewRunRegistry(), plain.Factory)
+	ctx := context.Background()
+	_, err = mgr.StartRun(ctx, StartRunConfig{
+		RunConfig:     config.RunConfig{Task: "t", Workspace: ".", LLM: "vertex:m", AgentType: "manager_test_verifier"},
+		RootSessionID: "root",
+	})
+	if err == nil || !strings.Contains(err.Error(), "can't run on its own") {
+		t.Errorf("StartRun with a verifier root = %v, want refused", err)
+	}
+	if runs, _, _ := store.ListRuns(ctx, db.ListRunsOpts{}); len(runs) != 0 {
+		t.Errorf("runs = %d, want none created", len(runs))
+	}
 }
 
 func TestRecoverRun(t *testing.T) {
@@ -88,16 +115,18 @@ func TestRecoverRun(t *testing.T) {
 		}
 	}
 	ctxTail := func() event.Event { return &event.UserEvent{Content: "ctx"} }
-	mk("ongoing", db.SessionOngoing, "", ctxTail())                             // spine, not at rest
-	mk("awaiting", db.SessionAwaiting, "", ctxTail())                           // spine, not at rest
-	mk("crashed-root", db.SessionCrashed, "", ctxTail())                        // spine, not at rest
-	mk("crashed-child", db.SessionCrashed, "ongoing", ctxTail())                // NOT spine
-	mk("concluded", db.SessionConcluded, "", ctxTail())                         // NOT spine
-	mk("atrest", db.SessionOngoing, "", &event.AssistantEvent{Content: "done"}) // spine, AT REST
+	mk("ongoing", db.SessionOngoing, "", ctxTail())                                              // spine, not at rest
+	mk("awaiting", db.SessionAwaiting, "", ctxTail())                                            // spine, not at rest
+	mk("crashed-root", db.SessionCrashed, "", ctxTail())                                         // spine, not at rest
+	mk("crashed-child", db.SessionCrashed, "ongoing", ctxTail())                                 // NOT spine
+	mk("concluded", db.SessionConcluded, "", ctxTail())                                          // NOT spine
+	mk("atrest", db.SessionOngoing, "", &event.AssistantEvent{Content: "done"})                  // spine, AT REST
+	mk("in-conclude", db.SessionAwaiting, "", &event.AssistantEvent{ToolCalls: []event.ToolCall{ // spine, its call resumes
+		{ID: "c1", Name: event.ConcludeTool, Arguments: `{"result":"42"}`}}})
 
 	runReg := NewRunRegistry()
 	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, runReg, plain.Factory)
-	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus))
+	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus, mgr.AwaitsVerdict))
 
 	seen := recordSpawns(t, runID)
 	revived, err := mgr.RecoverRun(ctx, runID)
@@ -105,8 +134,8 @@ func TestRecoverRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Exactly the four spine sessions are respawned.
-	want := map[string]bool{"ongoing": true, "awaiting": true, "crashed-root": true, "atrest": true}
+	// Exactly the five spine sessions are respawned.
+	want := map[string]bool{"ongoing": true, "awaiting": true, "crashed-root": true, "atrest": true, "in-conclude": true}
 	if revived != len(want) {
 		t.Fatalf("RecoverRun revived %d sessions, want %d", revived, len(want))
 	}
@@ -139,11 +168,14 @@ func TestRecoverRun(t *testing.T) {
 	if hasRecoverEvent(t, store, runID, "atrest") {
 		t.Error("at-rest session should not get a RecoverEvent")
 	}
+	if hasRecoverEvent(t, store, runID, "in-conclude") {
+		t.Error("a session waiting in conclude should not get a RecoverEvent: it would end the resumed wait")
+	}
 }
 
 // A newer binary's event after the final reply leaves the stream at rest, so
 // Recover respawns it to conclude rather than appending a RecoverEvent.
-func TestStreamAtRest_IgnoresUnknownEvents(t *testing.T) {
+func TestResumesOnItsOwn_IgnoresUnknownEvents(t *testing.T) {
 	store, err := sqlite.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +188,7 @@ func TestStreamAtRest_IgnoresUnknownEvents(t *testing.T) {
 	}
 	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, NewRunRegistry(), plain.Factory)
 	newer := func() event.Event {
-		return &event.UnknownEvent{Type: "verify", Raw: []byte(`{"type":"verify","action":"set"}`)}
+		return &event.UnknownEvent{Type: "teleport", Raw: []byte(`{"type":"teleport","action":"set"}`)}
 	}
 	for _, tc := range []struct {
 		sid  string
@@ -169,9 +201,49 @@ func TestStreamAtRest_IgnoresUnknownEvents(t *testing.T) {
 		_ = store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: tc.sid, Status: db.SessionOngoing})
 		_ = store.AppendEventAtStep(ctx, runID, tc.sid, 1, tc.tail)
 		_ = store.AppendEventAtStep(ctx, runID, tc.sid, 1, newer())
-		got, err := mgr.streamAtRest(ctx, runID, tc.sid)
+		got, err := mgr.resumesOnItsOwn(ctx, runID, tc.sid)
 		if err != nil || got != tc.want {
-			t.Errorf("%s: streamAtRest = %v, %v; want %v", tc.sid, got, err, tc.want)
+			t.Errorf("%s: resumesOnItsOwn = %v, %v; want %v", tc.sid, got, err, tc.want)
+		}
+	}
+}
+
+// A session left in a conclude call, waiting for its verifier's verdict (the
+// call has no result; the verifier's events came after it), resumes on its
+// own: a RecoverEvent would end the resumed wait at once. One whose conclude
+// call was answered, or that called other tools, is resumed as usual.
+func TestResumesOnItsOwn_OpenConcludeCall(t *testing.T) {
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	runID := "run-open"
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: runID}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, NewRunRegistry(), plain.Factory)
+	call := func(id, name string) *event.AssistantEvent {
+		return &event.AssistantEvent{ToolCalls: []event.ToolCall{{ID: id, Name: name, Arguments: `{"result":"42"}`}}}
+	}
+	verifying := &event.VerifyEvent{Action: event.VerifyVerifying, By: event.ByHarness, Verifier: "v", Round: 1}
+	for _, tc := range []struct {
+		sid    string
+		events []event.Event
+		want   bool
+	}{
+		{"waiting", []event.Event{call("c1", event.ConcludeTool), verifying}, true},
+		{"answered", []event.Event{call("c1", event.ConcludeTool), &event.ToolResultEvent{ToolCallID: "c1", Content: "rejected"}}, false},
+		{"working", []event.Event{call("b1", "bash")}, false},
+	} {
+		_ = store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: tc.sid, Status: db.SessionAwaiting})
+		for _, e := range tc.events {
+			_ = store.AppendEventAtStep(ctx, runID, tc.sid, 1, e)
+		}
+		got, err := mgr.resumesOnItsOwn(ctx, runID, tc.sid)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: resumesOnItsOwn = %v, %v; want %v", tc.sid, got, err, tc.want)
 		}
 	}
 }
@@ -378,7 +450,7 @@ func TestRecoverRun_SkipsUnknownAgentType(t *testing.T) {
 
 	runReg := NewRunRegistry()
 	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil }, runReg, plain.Factory)
-	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus))
+	store.SetCommitListener(NewCommitNotifier(runReg, mgr.RespawnSession, mgr.SessionStatus, mgr.AwaitsVerdict))
 
 	seen := recordSpawns(t, runID)
 	revived, err := mgr.RecoverRun(ctx, runID)

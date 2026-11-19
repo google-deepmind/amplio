@@ -23,7 +23,23 @@
 	import { closeOnBack } from '$lib/pickerSheet.svelte';
 	import { CubeIcon, CaretDownIcon, PlusIcon, MinusIcon } from 'phosphor-svelte';
 
-	let { value = $bindable(''), onpick }: { value?: string; onpick?: () => void } = $props();
+	let {
+		value = $bindable(''),
+		onpick,
+		name = 'Agent model',
+		defaultLabel,
+		placement = 'up'
+	}: {
+		value?: string;
+		onpick?: () => void;
+		name?: string; // what is being picked (the trigger's title and accessible name)
+		// Offer "Default" (value ""), naming what it stands for (a spec on the
+		// menu shows as its label). The value is then never replaced by the
+		// menu's default, and one not on the menu stays choosable.
+		defaultLabel?: string;
+		// Which way the menu opens: up, or toward the side with more room.
+		placement?: 'up' | 'auto';
+	} = $props();
 
 	// Seed synchronously from the prefetched cache (common case) so the pill shows
 	// its model immediately rather than populating after the fetch resolves.
@@ -32,8 +48,17 @@
 	// Label of the current selection. Falls back to the raw spec when the menu
 	// hasn't loaded yet, or when the run was started with a spec no longer listed
 	// — the pill must never go blank just because we can't shorten it.
-	const selectedLabel = $derived(models.find((m) => m.spec === value)?.label || value);
+	const defaultText = $derived(
+		defaultLabel === undefined ? '' : models.find((m) => m.spec === defaultLabel)?.label || defaultLabel
+	);
+	const selectedLabel = $derived(
+		value === '' && defaultLabel !== undefined
+			? `Default: ${defaultText}`
+			: models.find((m) => m.spec === value)?.label || value
+	);
+	const offMenu = $derived(defaultLabel !== undefined && value !== '' && !models.some((m) => m.spec === value));
 	let open = $state(false);
+	let down = $state(false);
 	let adding = $state(false);
 	let newSpec = $state('');
 	let error = $state('');
@@ -44,7 +69,7 @@
 		models = menu.models;
 		const specs = models.map((m) => m.spec);
 		if (preferred && specs.includes(preferred)) value = preferred;
-		else if (!value || !specs.includes(value)) value = menu.default || specs[0] || '';
+		else if (defaultLabel === undefined && (!value || !specs.includes(value))) value = menu.default || specs[0] || '';
 	}
 
 	function focusEl(node: HTMLInputElement) {
@@ -99,10 +124,26 @@
 		if (!cached) load();
 	});
 
+	// The room the menu has on its side (desktop), in px: it scrolls within it
+	// rather than run off the viewport, wherever the picker sits (a popover).
+	let room = $state(0);
+	function toggle() {
+		if (!open && triggerEl && !viewport.isPhone) {
+			const r = triggerEl.getBoundingClientRect();
+			if (placement === 'auto') down = r.top < window.innerHeight - r.bottom;
+			room = Math.max(120, (down ? window.innerHeight - r.bottom : r.top) - 12);
+		}
+		open = !open;
+	}
+
 	function select(spec: string) {
 		value = spec;
-		open = false;
-		onpick?.(); // let the parent restore focus (e.g. back to the composer)
+		// The parent may restore focus (e.g. back to the composer); else the
+		// trigger keeps it, as the picked row unmounts.
+		if (onpick) {
+			open = false;
+			onpick();
+		} else done();
 	}
 
 	async function add() {
@@ -146,18 +187,36 @@
 		type="button"
 		bind:this={triggerEl}
 		class="trigger"
-		title={value ? `Agent model\n${value}` : 'Agent model'}
-		onclick={() => (open = !open)}
+		title={value ? `${name}\n${value}` : name}
+		aria-label="{name}: {selectedLabel || 'select model'}"
+		aria-expanded={open}
+		onclick={toggle}
 	>
 		<CubeIcon size={16} />
 		<span class="label">{selectedLabel || 'select model'}</span>
 		<span class="caret"><CaretDownIcon size={12} /></span>
 	</button>
 	{#if open}
-		<div class="menu">
+		<div class="menu" class:down style:max-height={room && !viewport.isPhone ? `min(65dvh, ${room}px)` : undefined}>
 			{#if viewport.isPhone}
-				<!-- Phone: the menu is a bottom sheet (StartRunForm); this is its header. -->
-				<div class="sheet-head"><span>Model</span><button type="button" class="done" onclick={done}>Done</button></div>
+				<!-- Phone: the menu is a bottom sheet; this is its header. -->
+				<div class="sheet-head"><span>{name}</span><button type="button" class="done" onclick={done}>Done</button></div>
+			{/if}
+			{#if defaultLabel !== undefined}
+				<div class="row" class:selected={value === ''}>
+					<button type="button" class="pick" onclick={() => select('')}>
+						<span class="pick-label">Default</span>
+						<span class="pick-spec">{defaultText}</span>
+					</button>
+				</div>
+				{#if offMenu}
+					<div class="row selected">
+						<button type="button" class="pick" onclick={() => select(value)}>
+							<span class="pick-label">{value}</span>
+							<span class="pick-spec">not on the menu</span>
+						</button>
+					</div>
+				{/if}
 			{/if}
 			{#each models as m (m.spec)}
 				<div class="row" class:selected={m.spec === value}>
@@ -201,8 +260,12 @@
 						use:focusEl
 						placeholder="vertex:model-id"
 						onkeydown={(e) => {
-							if (e.key === 'Enter') add();
-							else if (e.key === 'Escape') {
+							if (e.key === 'Enter') {
+								// Not the host form's Enter (submitting it, or a run).
+								e.preventDefault();
+								e.stopPropagation();
+								add();
+							} else if (e.key === 'Escape') {
 								e.stopPropagation();
 								adding = false;
 							}
@@ -278,6 +341,10 @@
 		padding: 0.25rem;
 		z-index: 10;
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+	}
+	.menu.down {
+		bottom: auto;
+		top: calc(100% + 4px);
 	}
 	.row {
 		display: flex;
@@ -387,6 +454,60 @@
 		.pick-spec,
 		.dup {
 			font-size: var(--fs-xs);
+		}
+		/* The menu is a bottom sheet over a scrim wherever the picker sits (in a
+		   form inside a scrolling sheet, an absolute menu would be clipped);
+		   StartRunForm gives its footer's other pickers the same sheet. The
+		   trigger's ::after catches a tap on the scrim, so the tap closes the
+		   menu (the trigger toggles it) instead of reaching what's underneath. */
+		.menu {
+			position: fixed;
+			z-index: 32;
+			inset: auto 0 calc(100dvh - var(--app-h, 100dvh)) 0;
+			min-width: 0;
+			max-width: none;
+			max-height: calc(var(--app-h, 100dvh) * 0.7);
+			padding: 0 var(--sheet-pad-x, var(--sp-2)) var(--sp-3);
+			background: var(--bg-elev);
+			border-bottom: none;
+			border-radius: var(--sheet-radius) var(--sheet-radius) 0 0;
+			box-shadow: 0 0 0 100vmax var(--scrim);
+		}
+		.sheet-head {
+			position: sticky;
+			top: 0;
+			z-index: 1;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin-inline: calc(-1 * var(--sheet-pad-x, var(--sp-2)));
+			padding: var(--sp-4) calc(var(--gutter) - var(--sp-3)) var(--sp-2) var(--gutter);
+			background: var(--bg-elev);
+			font-size: var(--fs-md);
+			font-weight: 600;
+		}
+		.sheet-head::before {
+			content: '';
+			position: absolute;
+			top: var(--sp-2);
+			left: calc(50% - 16px);
+			width: 32px;
+			height: 4px;
+			border-radius: 2px;
+			background: var(--border);
+		}
+		.sheet-head > .done {
+			padding: 0 var(--sp-3);
+			background: none;
+			border: none;
+			color: var(--accent);
+			font-weight: 600;
+		}
+		.wrap:has(> .menu) > .trigger::after {
+			content: '';
+			position: fixed;
+			inset: 0;
+			z-index: 31;
 		}
 	}
 </style>

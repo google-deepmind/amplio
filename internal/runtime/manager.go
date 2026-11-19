@@ -36,6 +36,7 @@ import (
 	"amplio/internal/session"
 	"amplio/internal/skills"
 	"amplio/internal/util"
+	"amplio/internal/verify"
 	"amplio/internal/workspace"
 )
 
@@ -59,6 +60,8 @@ type RunManager struct {
 	lessonIndex      *lessons.Index           // shared lesson recall corpus; nil = no lesson recall
 	systemFast       llm.Provider             // shared fast tier (compaction judge); nil = none
 	systemHQ         llm.Provider             // shared HQ tier (compaction summarizer); nil = none
+	verify           config.VerifyDefaults    // [verify] defaults, for verification requests
+	requireConclude  bool                     // [agent] require_conclude, for every agent's Env
 
 	providerMu sync.Mutex
 	providers  map[string]llm.Provider // spec -> provider; stateless, reused across runs
@@ -110,6 +113,24 @@ func (m *RunManager) SetLessonIndex(ix *lessons.Index) { m.lessonIndex = ix }
 // are always non-nil. Set once at startup.
 func (m *RunManager) SetSystemProviders(fast, hq llm.Provider) {
 	m.systemFast, m.systemHQ = fast, hq
+}
+
+// SetVerifyDefaults installs the [verify] defaults that verification requests
+// fall back to, in every agent's Env (for spawn_agent and send_message) and in
+// StartRun. Set once at startup.
+func (m *RunManager) SetVerifyDefaults(d config.VerifyDefaults) { m.verify = d }
+
+// VerifyDefaults returns the [verify] defaults (see SetVerifyDefaults).
+func (m *RunManager) VerifyDefaults() config.VerifyDefaults { return m.verify }
+
+// SetRequireConclude installs [agent] require_conclude in every agent's Env.
+// Set once at startup.
+func (m *RunManager) SetRequireConclude(on bool) { m.requireConclude = on }
+
+// ResolveLLM turns a model name (a menu #nickname or label, or a spec) into the
+// spec it means and its provider, as spawn_agent's model argument is resolved.
+func (m *RunManager) ResolveLLM(ctx context.Context, model string) (string, llm.Provider, error) {
+	return m.resolveLLM(ctx, model)
 }
 
 // SetModelMenu installs config.toml's [run].llms, the half of the model menu
@@ -228,8 +249,21 @@ func (m *RunManager) removeAllocator(runID string) {
 	m.allocMu.Unlock()
 }
 
+// CheckRootAgentType reports why a run can't start with agentType at its root,
+// or nil if it can.
+func CheckRootAgentType(agentType string) error {
+	if agent.IsVerifier(agentType) {
+		return fmt.Errorf("a %s checks another agent's conclusion, started for it by verification; it can't run on its own",
+			agentType)
+	}
+	return nil
+}
+
 // StartRun creates a new run in the DB and launches the root agent goroutine.
 func (m *RunManager) StartRun(ctx context.Context, cfg StartRunConfig) (string, error) {
+	if err := CheckRootAgentType(cfg.RunConfig.AgentType); err != nil {
+		return "", err
+	}
 	// Resolve the run's provider before creating anything, so a bad/empty spec
 	// fails fast instead of leaving an orphaned run with no agent.
 	provider, err := m.providerFor(cfg.RunConfig.LLM)
@@ -246,6 +280,16 @@ func (m *RunManager) StartRun(ctx context.Context, cfg StartRunConfig) (string, 
 	title := cfg.Title
 	if title == "" {
 		title = extractMarkdownTitle(titleBasis)
+	}
+
+	var verifyEvt *event.VerifyEvent
+	if cfg.Verify != nil {
+		if verifyEvt, err = cfg.Verify.Resolve(ctx, event.ByOperator, m.verify, m.resolveLLM); err != nil {
+			return "", err
+		}
+		if agent.IsInteractive(cfg.RunConfig.AgentType) {
+			return "", fmt.Errorf("verification applies to an autonomous agent's conclusion; a %s run never concludes", cfg.RunConfig.AgentType)
+		}
 	}
 
 	names, unknown := briefing.Resolve(cfg.Briefings)
@@ -273,6 +317,7 @@ func (m *RunManager) StartRun(ctx context.Context, cfg StartRunConfig) (string, 
 		SessionID:    cfg.RootSessionID,
 		Task:         cfg.RunConfig.Task,
 		FirstMessage: cfg.FirstMessage,
+		Verify:       verifyEvt,
 	}
 	// Reconstruct the live workspace from the persisted path — the same wrap
 	// RecoverRun does — so fresh and resume are symmetric. The path is already
@@ -316,16 +361,17 @@ func (m *RunManager) createRun(ctx context.Context, rec db.RunRecord) (string, e
 // The operator's AGENTS.md snapshot is NOT passed here — the agent reads it from
 // the persisted RunConfig at bootstrap (see eventloop.bootstrap).
 // runSessionGoroutine launches ag.Run(ctx) in a background goroutine with the
-// standard manager cleanup, deferred in LIFO order: log a panic, release the
-// registry slot (cancel + Unregister), then GC the run registry if it went empty
-// (mirroring the goroutine-exit cleanup that RemoveIfEmpty is designed for).
-// ctx is the session's cancelable context (from RegisterAndContext) and release
-// is its paired teardown.
+// standard manager cleanup, deferred in LIFO order: crash the session on a
+// panic (crashAfterPanic), release the registry slot (cancel + Unregister),
+// then GC the run registry if it went empty (mirroring the goroutine-exit
+// cleanup that RemoveIfEmpty is designed for). ctx is the session's cancelable
+// context (from RegisterAndContext) and release is its paired teardown.
 func (m *RunManager) runSessionGoroutine(ctx context.Context, runID, sessionID string, ag agent.Agent, release func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("session goroutine panicked", "run_id", runID, "session_id", sessionID, "panic", r)
+				m.crashAfterPanic(runID, sessionID, r)
 			}
 			release() // cancel ctx + Unregister the slot
 			session.WarnUndelivered(m.store, m.runReg.Get(runID), runID, sessionID, time.Now())
@@ -340,6 +386,23 @@ func (m *RunManager) runSessionGoroutine(ctx context.Context, runID, sessionID s
 			slog.Error("session run error", "run_id", runID, "session_id", sessionID, "error", err)
 		}
 	}()
+}
+
+// crashAfterPanic records a session whose goroutine panicked as crashed, and
+// tells its parent, as the spawn runner does for a sub-agent's first life:
+// left ongoing, it would hold a parent waiting for its result, or an agent
+// waiting for its verifier's outcome, forever.
+func (m *RunManager) crashAfterPanic(runID, sessionID string, r any) {
+	ctx := context.Background()
+	parent := ""
+	if s, err := m.store.GetSession(ctx, runID, sessionID); err == nil {
+		parent = s.ParentID
+	}
+	msg := fmt.Sprintf("panic: %v", r)
+	if _, err := m.store.TerminateAndNotifyParent(ctx, runID, sessionID, parent, db.SessionCrashed, msg, nil,
+		db.SelfEvent{Event: &event.SystemEvent{Content: msg, Marker: event.MarkerError}, Step: -1}); err != nil {
+		slog.Error("record a panicked session as crashed", "run_id", runID, "session_id", sessionID, "error", err)
+	}
 }
 
 func (m *RunManager) launchAgent(ctx context.Context, runID, agentType string, provider, fast, hq llm.Provider, ws workspace.Workspace, agentCfg *agent.Config) error {
@@ -373,19 +436,21 @@ func (m *RunManager) launchAgent(ctx context.Context, runID, agentType string, p
 		}
 	}()
 	env := &agent.Env{
-		Store:       m.store,
-		RunID:       runID,
-		LLM:         provider,
-		ResolveLLM:  m.resolveLLM,
-		Registry:    registry,
-		Names:       m.allocatorFor(runID),
-		Workspace:   ws,
-		Broadcaster: m.broadcaster,
-		Inflight:    m.ephemeral,
-		SkillIndex:  m.skillIndex,
-		LessonIndex: m.lessonIndex,
-		SystemFast:  fast,
-		SystemHQ:    hq,
+		Store:           m.store,
+		RunID:           runID,
+		LLM:             provider,
+		ResolveLLM:      m.resolveLLM,
+		Registry:        registry,
+		Names:           m.allocatorFor(runID),
+		Workspace:       ws,
+		Broadcaster:     m.broadcaster,
+		Inflight:        m.ephemeral,
+		SkillIndex:      m.skillIndex,
+		LessonIndex:     m.lessonIndex,
+		SystemFast:      fast,
+		SystemHQ:        hq,
+		Verify:          m.verify,
+		RequireConclude: m.requireConclude,
 	}
 	factory, err := agent.Get(agentType)
 	if err != nil {
@@ -467,6 +532,12 @@ func (m *RunManager) SessionStatus(runID, sessionID string) (string, bool) {
 		return "", false
 	}
 	return sess.Status, true
+}
+
+// AwaitsVerdict reports whether a session's verification has a candidate with
+// verifier, waiting for its verdict (AwaitsVerdictFunc).
+func (m *RunManager) AwaitsVerdict(runID, sessionID, verifier string) bool {
+	return verify.AwaitsVerdict(context.Background(), m.store, runID, sessionID, verifier)
 }
 
 // RespawnSession re-creates an agent goroutine for a session that has no
@@ -556,20 +627,22 @@ func (m *RunManager) RespawnSession(runID, sessionID string) {
 		return
 	}
 	env := &agent.Env{
-		Store:       m.store,
-		RunID:       runID,
-		LLM:         provider,
-		LLMSpec:     ownLLM,
-		ResolveLLM:  m.resolveLLM,
-		Registry:    registry,
-		Names:       m.allocatorFor(runID),
-		Workspace:   ws,
-		Broadcaster: m.broadcaster,
-		Inflight:    m.ephemeral,
-		SkillIndex:  m.skillIndex,
-		LessonIndex: m.lessonIndex,
-		SystemFast:  m.systemFast,
-		SystemHQ:    m.systemHQ,
+		Store:           m.store,
+		RunID:           runID,
+		LLM:             provider,
+		LLMSpec:         ownLLM,
+		ResolveLLM:      m.resolveLLM,
+		Registry:        registry,
+		Names:           m.allocatorFor(runID),
+		Workspace:       ws,
+		Broadcaster:     m.broadcaster,
+		Inflight:        m.ephemeral,
+		SkillIndex:      m.skillIndex,
+		LessonIndex:     m.lessonIndex,
+		SystemFast:      m.systemFast,
+		SystemHQ:        m.systemHQ,
+		Verify:          m.verify,
+		RequireConclude: m.requireConclude,
 	}
 	ag, err := factory(env, &agent.Config{
 		SessionID: sessionID,
@@ -597,9 +670,8 @@ func (m *RunManager) RespawnSession(runID, sessionID string) {
 // operator resume: ongoing/awaiting sessions with no live goroutine, plus a
 // crashed root. For each, it appends a RecoverEvent (an Input-class "resumed"
 // marker) so the commit notifier respawns it through the normal machinery —
-// EXCEPT a session whose stream is already at rest (a no-tool AssistantEvent
-// tail), which is respawned directly without a RecoverEvent (the marker would
-// force a redundant LLM round-trip; the goroutine's resume path finalizes it).
+// EXCEPT a session that resumes on its own (see resumesOnItsOwn), which is
+// respawned directly without a RecoverEvent.
 //
 // Per-session crash artifacts (orphan tool calls, mid-LLM resume) are repaired
 // by the respawned goroutine's resume path, not here. Recover does not aim at a
@@ -627,13 +699,13 @@ func (m *RunManager) RecoverRun(ctx context.Context, runID string) (int, error) 
 				"run_id", runID, "session_id", s.SessionID, "agent_type", s.AgentType)
 			continue
 		}
-		atRest, err := m.streamAtRest(ctx, runID, s.SessionID)
+		own, err := m.resumesOnItsOwn(ctx, runID, s.SessionID)
 		if err != nil {
 			return revived, fmt.Errorf("recover %s: %w", s.SessionID, err)
 		}
-		if atRest {
+		if own {
 			// Skip the RecoverEvent; respawn directly so the resume path
-			// finalizes the at-rest stream without a redundant LLM call.
+			// finishes what the stream holds.
 			m.RespawnSession(runID, s.SessionID)
 			revived++
 			continue
@@ -684,7 +756,16 @@ func (m *RunManager) recoverFacts(ctx context.Context, runID, sessionID string, 
 	}
 	for _, c := range children {
 		if c.Status == db.SessionOngoing || c.Status == db.SessionAwaiting {
-			lines = append(lines, fmt.Sprintf("- sub-agent: %s (%s)", c.SessionID, c.Status))
+			line := fmt.Sprintf("- sub-agent: %s (%s)", c.SessionID, c.Status)
+			if verify.VerifierFor(&c) == sessionID {
+				// It is kept across versions: it may have no candidate of the agent's.
+				if st, err := verify.Load(ctx, m.store, runID, sessionID); err == nil && (!st.On || !st.Pending) {
+					line += ", your verifier, standing by for your next conclusion"
+				} else {
+					line += ", your verifier, checking your conclusion: call conclude() to wait for its verdict"
+				}
+			}
+			lines = append(lines, line)
 		}
 	}
 	if !snap.Supported {
@@ -700,10 +781,13 @@ func (m *RunManager) recoverFacts(ctx context.Context, runID, sessionID string, 
 	return out
 }
 
-// streamAtRest reports whether the session's current-context tail is a no-tool
-// AssistantEvent (the prior life produced its final reply but never flipped
-// status).
-func (m *RunManager) streamAtRest(ctx context.Context, runID, sessionID string) (bool, error) {
+// resumesOnItsOwn reports whether the session's current context ends in
+// something its next life finishes without being told it was resumed: a
+// no-tool AssistantEvent tail (the prior life produced its final reply but
+// never flipped status: the marker would force a redundant LLM round-trip),
+// or a conclude call still waiting for its result (db.OpenConclude: the
+// resumed call waits for its verdict, which the marker would cut short).
+func (m *RunManager) resumesOnItsOwn(ctx context.Context, runID, sessionID string) (bool, error) {
 	events, err := m.store.GetEvents(ctx, runID, sessionID, db.EventFilter{CurrentContextOnly: true})
 	if err != nil {
 		return false, err
@@ -711,6 +795,9 @@ func (m *RunManager) streamAtRest(ctx context.Context, runID, sessionID string) 
 	events = db.KnownEvents(events)
 	if len(events) == 0 {
 		return false, nil
+	}
+	if _, _, open := db.OpenConclude(events); open {
+		return true, nil
 	}
 	return event.IsNoToolAssistant(events[len(events)-1].Event), nil
 }
@@ -724,4 +811,7 @@ type StartRunConfig struct {
 	// RunConfig.Briefings by StartRun — the one place a run is created, which is
 	// what keeps the UI, `client submit`, headless and the raw API agreeing.
 	Briefings []string
+	// Verify, if set, turns verification on for the root agent (the operator's
+	// request: the new-run form, POST /api/runs, headless run --verify).
+	Verify *verify.Request
 }

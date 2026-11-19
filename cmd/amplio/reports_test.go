@@ -99,7 +99,7 @@ func TestExecuteResume_NoReportSkipsTheReport(t *testing.T) {
 func resumeRestingRun(t *testing.T, noReport bool) int {
 	t.Helper()
 	cfg := restingRunConfig(t, stubHQ{})
-	if err := executeResume(cfg, "r", "", noReport); err != nil {
+	if err := executeResume(cfg, "r", "", nil, noReport); err != nil {
 		t.Fatalf("executeResume: %v", err)
 	}
 

@@ -24,6 +24,7 @@ import (
 	"amplio/internal/event"
 	"amplio/internal/llm"
 	"amplio/internal/proctree"
+	"amplio/internal/verify"
 	"amplio/internal/workspace/plain"
 )
 
@@ -58,11 +59,25 @@ func recoverWith(t *testing.T, scan proctree.Snapshot) (db.Store, string) {
 		{"boss", db.SessionOngoing, ""},
 		{"calm-heron", db.SessionAwaiting, "boss"}, // running sub-agent of boss
 		{"done-owl", db.SessionConcluded, "boss"},  // finished sub-agent: not running
+		{"sharp-lynx", db.SessionOngoing, "boss"},  // boss's verifier
 		{"solo", db.SessionOngoing, ""},
 	} {
+		var meta map[string]any
+		if s.sid == "sharp-lynx" {
+			meta = map[string]any{verify.MetadataVerifierFor: "boss"}
+		}
 		if err := store.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: s.sid,
-			AgentType: "recover_test_agent", Status: s.status, ParentID: s.parent}); err != nil {
+			AgentType: "recover_test_agent", Status: s.status, ParentID: s.parent, Metadata: meta}); err != nil {
 			t.Fatal(err)
+		}
+		if s.sid == "boss" { // its conclusion is with its verifier
+			for _, e := range []event.Event{&event.VerifyEvent{Action: event.VerifySet, By: event.ByOperator},
+				&event.AssistantEvent{Content: "42"},
+				&event.VerifyEvent{Action: event.VerifyVerifying, By: event.ByHarness, Verifier: "sharp-lynx", Round: 1}} {
+				if err := store.AppendEventAtStep(ctx, runID, s.sid, 1, e); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 		// A tail that isn't at rest, so recovery writes a marker.
 		if err := store.AppendEventAtStep(ctx, runID, s.sid, 1, &event.UserEvent{Content: "ctx"}); err != nil {
@@ -97,6 +112,7 @@ func TestRecoverRun_MarkerSaysWhatIsStillRunning(t *testing.T) {
 		"Still running from before the restart:",
 		"- background: process group 48213, 47 min: ./bench.sh --iters 50 (+1 child process)",
 		"- sub-agent: calm-heron (awaiting)",
+		"- sub-agent: sharp-lynx (ongoing), your verifier, checking your conclusion: call conclude() to wait for its verdict",
 		"kill -- -<process group>",
 	} {
 		if !strings.Contains(boss, want) {
@@ -110,6 +126,46 @@ func TestRecoverRun_MarkerSaysWhatIsStillRunning(t *testing.T) {
 		if m := recoverMarker(t, store, runID, sid); !strings.Contains(m, "Nothing you started is still running") {
 			t.Errorf("%s's marker = %q, want it to say nothing is running", sid, m)
 		}
+	}
+}
+
+// A verifier is kept across versions of the verification: with no candidate
+// of the agent's (a replace withdrew it), the marker says it stands by
+// rather than that it is checking.
+func TestRecoverRun_MarkerKeptVerifierStandsBy(t *testing.T) {
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	const runID = "run-kept"
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: runID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []db.SessionRecord{{SessionID: "w", Status: db.SessionOngoing},
+		{SessionID: "v", ParentID: "w", Status: db.SessionAwaiting, Metadata: map[string]any{verify.MetadataVerifierFor: "w"}}} {
+		s.RunID, s.AgentType = runID, "recover_test_agent"
+		if err := store.CreateSession(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, e := range []event.Event{&event.VerifyEvent{Action: event.VerifySet, By: event.ByOperator},
+		&event.AssistantEvent{Content: "42"},
+		&event.VerifyEvent{Action: event.VerifyVerifying, By: event.ByHarness, Verifier: "v", Round: 1},
+		&event.VerifyEvent{Action: event.VerifyReplace, By: event.ByOperator}, &event.UserEvent{Content: "ctx"}} {
+		if err := store.AppendEventAtStep(ctx, runID, "w", 1, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr := NewRunManager(store, func(string) (llm.Provider, error) { return &llm.MockProvider{Model: "m"}, nil },
+		NewRunRegistry(), plain.Factory)
+	mgr.scanProcs = func(string) proctree.Snapshot { return proctree.Snapshot{Supported: true} }
+	if _, err := mgr.RecoverRun(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if m := recoverMarker(t, store, runID, "w"); !strings.Contains(m, "- sub-agent: v (awaiting), your verifier, standing by for your next conclusion") {
+		t.Errorf("w's marker = %q", m)
 	}
 }
 

@@ -180,8 +180,14 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	} else {
 		d.Grades = toGradeEntries(grades[id])
 	}
+	var loops map[string]*loopsSummary
+	if s.loops != nil {
+		loops = summarizeLoops(s.loops.List(id, ""))
+	}
 	for _, sess := range sessions {
-		d.Sessions = append(d.Sessions, toSessionDTO(sess, run.Config.LLM))
+		dto := toSessionDTO(sess, run.Config.LLM)
+		dto.Loops = loops[sess.SessionID]
+		d.Sessions = append(d.Sessions, dto)
 	}
 	// has_updates from the run's ROOT sessions, same predicate as the list view,
 	// so the run-page tab's favicon dot stays correct off detail refreshes.

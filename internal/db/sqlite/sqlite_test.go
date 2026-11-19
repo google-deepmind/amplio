@@ -17,10 +17,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -421,7 +423,7 @@ func TestGetEvents_UnknownTypeReadsAsPlaceholder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stored := `{"type":"verify","action":"set","criteria":"flux tests pass"}`
+	stored := `{"type":"teleport","action":"set","criteria":"flux tests pass"}`
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -439,8 +441,8 @@ func TestGetEvents_UnknownTypeReadsAsPlaceholder(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: got %T, want *event.UnknownEvent", what, rec.Event)
 		}
-		if u.Type != "verify" || u.Step != 3 || u.CreatedAt.IsZero() {
-			t.Errorf("%s: placeholder = {Type %q, Step %d, CreatedAt %v}; want verify at step 3 with a time", what, u.Type, u.Step, u.CreatedAt)
+		if u.Type != "teleport" || u.Step != 3 || u.CreatedAt.IsZero() {
+			t.Errorf("%s: placeholder = {Type %q, Step %d, CreatedAt %v}; want teleport at step 3 with a time", what, u.Type, u.Step, u.CreatedAt)
 		}
 		if out, _ := event.Marshal(u); string(out) != stored {
 			t.Errorf("%s: Marshal = %s, want the stored %s", what, out, stored)
@@ -1164,7 +1166,7 @@ func TestTerminateAndNotifyParent(t *testing.T) {
 	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "parent", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
 	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "child", ParentID: "parent", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
 
-	if err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionConcluded, "the result", nil, nil, -1); err != nil {
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionConcluded, "the result", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1190,8 +1192,8 @@ func TestTerminateAndNotifyParent(t *testing.T) {
 	// Root (no parent): status flips, selfEvent lands on its own stream, no
 	// child_result anywhere.
 	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "root", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
-	if err := s.TerminateAndNotifyParent(ctx, runID, "root", "", db.SessionCrashed, "boom", nil,
-		&event.SystemEvent{Content: "boom", Marker: event.MarkerError}, -1); err != nil {
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "root", "", db.SessionCrashed, "boom", nil,
+		db.SelfEvent{Event: &event.SystemEvent{Content: "boom", Marker: event.MarkerError}, Step: -1}); err != nil {
 		t.Fatal(err)
 	}
 	root, _ := s.GetSession(ctx, runID, "root")
@@ -1211,7 +1213,7 @@ func TestTerminateAndNotifyParent(t *testing.T) {
 
 	// Dedupe: terminating an already-terminal session is a no-op — status stays,
 	// and no second child_result is written to the parent.
-	if err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionCancelled, "again", nil, nil, -1); err != nil {
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "child", "parent", db.SessionCancelled, "again", nil); err != nil {
 		t.Fatal(err)
 	}
 	child, _ = s.GetSession(ctx, runID, "child")
@@ -1230,6 +1232,64 @@ func TestTerminateAndNotifyParent(t *testing.T) {
 	}
 }
 
+// A verifier's terminal transition posts its outcome to the agent it
+// verifies, in place of a child_result: its verdict, read from the result it
+// concluded with, or how it stopped, at the transition's time. It wakes a
+// live agent (not record-only) but revives none (a Notice).
+func TestTerminateAndNotifyParent_VerifierPostsItsOutcome(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	runID := db.NewRunID()
+	_ = s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()})
+	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "worker", Status: db.SessionAwaiting})
+	verifier := func(sid string, meta map[string]any) {
+		_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: sid, ParentID: "worker",
+			Status: db.SessionOngoing, Metadata: meta})
+	}
+	verifier("v1", map[string]any{db.MetadataVerifierFor: "worker"})
+	verifier("v2", map[string]any{db.MetadataVerifierFor: "worker"})
+	verifier("helper", nil)
+	var committed []event.Event
+	s.SetCommitListener(func(_, sid string, e event.Event) {
+		if sid == "worker" {
+			committed = append(committed, e)
+		}
+	})
+
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "v1", "worker", db.SessionConcluded,
+		event.FormatVerdict(false, "PASS: no. The file is missing."), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "v2", "worker", db.SessionCrashed, "llm call: 404", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "helper", "worker", db.SessionConcluded, "done", nil); err != nil {
+		t.Fatal(err)
+	}
+	evts, _ := s.GetEvents(ctx, runID, "worker", db.EventFilter{})
+	if len(evts) != 3 || len(committed) != 3 {
+		t.Fatalf("worker got %d events (%d committed), want 3", len(evts), len(committed))
+	}
+	for i, want := range []event.VerifyOutcome{
+		{Verifier: "v1", Verdict: event.VerdictFail, Findings: "PASS: no. The file is missing."},
+		{Verifier: "v2", Verdict: db.SessionCrashed, Findings: "llm call: 404"},
+	} {
+		sess, _ := s.GetSession(ctx, runID, want.Verifier)
+		want.At = sess.StatusChangedAt
+		ve, ok := evts[i].Event.(*event.VerifyEvent)
+		if !ok || ve.Action != event.VerifyVerdict || ve.Outcome == nil || *ve.Outcome != want || want.At.IsZero() {
+			t.Errorf("event %d = %+v, want the verifier's outcome %+v", i, evts[i].Event, want)
+		}
+		if db.IsRecordOnly(committed[i]) || db.IsInput(committed[i]) {
+			t.Errorf("event %d: record-only %v, input %v; want it to wake a waiting agent and revive none", i,
+				db.IsRecordOnly(committed[i]), db.IsInput(committed[i]))
+		}
+	}
+	if cr, ok := evts[2].Event.(*event.ChildResultEvent); !ok || cr.Content != "done" {
+		t.Errorf("an ordinary child's result = %+v, want a child_result", evts[2].Event)
+	}
+}
+
 // TestTerminateSelfEventStep verifies selfEventStep pins the marker's step: a
 // non-negative value overrides the session's current step (so a crash lands at
 // the failed turn's call step, not the bumped current step).
@@ -1244,8 +1304,8 @@ func TestTerminateSelfEventStep(t *testing.T) {
 	_, _ = s.AdvanceStep(ctx, runID, "a") // -> 2 (current_step)
 
 	const pinned = 1
-	if err := s.TerminateAndNotifyParent(ctx, runID, "a", "", db.SessionCrashed, "boom", nil,
-		&event.SystemEvent{Content: "boom", Marker: event.MarkerError}, pinned); err != nil {
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "a", "", db.SessionCrashed, "boom", nil,
+		db.SelfEvent{Event: &event.SystemEvent{Content: "boom", Marker: event.MarkerError}, Step: pinned}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1258,6 +1318,54 @@ func TestTerminateSelfEventStep(t *testing.T) {
 	}
 	if step != pinned {
 		t.Errorf("error marker at step %d, want pinned %d", step, pinned)
+	}
+}
+
+// A conclusion through a conclude call writes several self events in its one
+// transaction, each at its own step: the call's result at the call's step,
+// the verification record at the current one.
+func TestTerminateAndNotifyParent_SeveralSelfEvents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	runID := db.NewRunID()
+	_ = s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()})
+	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "a", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
+	_, _ = s.AdvanceStep(ctx, runID, "a")
+	_, _ = s.AdvanceStep(ctx, runID, "a") // current_step 2
+	if _, err := s.TerminateAndNotifyParent(ctx, runID, "a", "", db.SessionConcluded, "42", nil,
+		db.SelfEvent{Event: &event.ToolResultEvent{ToolCallID: "c1", Content: "Concluded."}, Step: 1},
+		db.SelfEvent{Event: &event.VerifyEvent{Action: event.VerifyPassed}, Step: -1}); err != nil {
+		t.Fatal(err)
+	}
+	evts, _ := s.GetEvents(ctx, runID, "a", db.EventFilter{})
+	steps := map[string]int{}
+	for _, e := range evts {
+		steps[e.Event.EventType()] = e.Step
+	}
+	if len(evts) != 2 || steps["tool_result"] != 1 || steps["verify"] != 2 {
+		t.Errorf("self events at steps %v (%d events), want tool_result at 1, verify at 2", steps, len(evts))
+	}
+}
+
+// SetStatusUnlessTerminal sets a live session's status, but never over a
+// terminal one (a cancel that landed while the session waited).
+func TestSetStatusUnlessTerminal(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	runID := db.NewRunID()
+	_ = s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()})
+	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "a", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
+	if set, err := s.SetStatusUnlessTerminal(ctx, runID, "a", db.SessionAwaiting); err != nil || !set {
+		t.Fatalf("live session: set = %v, %v", set, err)
+	}
+	if err := s.UpdateSessionStatus(ctx, runID, "a", db.SessionCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if set, err := s.SetStatusUnlessTerminal(ctx, runID, "a", db.SessionOngoing); err != nil || set {
+		t.Errorf("cancelled session: set = %v, %v; want left alone", set, err)
+	}
+	if sess, _ := s.GetSession(ctx, runID, "a"); sess.Status != db.SessionCancelled {
+		t.Errorf("status = %s, want cancelled", sess.Status)
 	}
 }
 
@@ -1290,6 +1398,57 @@ func TestStoreEvents(t *testing.T) {
 		for _, e := range received {
 			t.Logf("  %T", e)
 		}
+	}
+}
+
+// A metadata write announces itself as a run update: the run detail shows
+// what session metadata holds, and the write carries no event of its own.
+func TestStoreEvents_MetadataWriteIsARunUpdate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	runID := db.NewRunID()
+	_ = s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()})
+	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "s1", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
+	for len(s.Events()) > 0 {
+		<-s.Events() // what the setup emitted
+	}
+	if err := s.MergeSessionMetadata(ctx, runID, "s1", map[string]any{"verify": map[string]any{"status": "on"}}); err != nil {
+		t.Fatal(err)
+	}
+	next := func() db.StoreEvent {
+		t.Helper()
+		select {
+		case evt := <-s.Events():
+			return evt
+		case <-time.After(5 * time.Second):
+			t.Fatal("no event")
+			return nil
+		}
+	}
+	if u, ok := next().(db.RunUpdated); !ok || u.RunID != runID {
+		t.Errorf("after MergeSessionMetadata: want RunUpdated for %s", runID)
+	}
+	// An append that carries a metadata change (a loop's mirror) announces it
+	// too; one without doesn't.
+	if err := s.AppendEventsIf(ctx, runID, "s1", nil, map[string]any{"loops": []any{}}, &event.SystemEvent{Content: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := next().(db.EventAppended); !ok {
+		t.Error("the append wasn't announced first")
+	}
+	if u, ok := next().(db.RunUpdated); !ok || u.RunID != runID {
+		t.Errorf("an append with metadata: want RunUpdated for %s", runID)
+	}
+	if err := s.AppendEventsIf(ctx, runID, "s1", nil, nil, &event.SystemEvent{Content: "y"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := next().(db.EventAppended); !ok {
+		t.Error("the plain append wasn't announced")
+	}
+	select {
+	case evt := <-s.Events():
+		t.Errorf("a plain append also emitted %#v", evt)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -1568,5 +1727,467 @@ func TestCommitListener_EventCarriesCommittedStep(t *testing.T) {
 		if w, ok := want[g.content]; !ok || g.step != w {
 			t.Errorf("%q committed at step %d, want %d", g.content, g.step, w)
 		}
+	}
+}
+
+// typedSession is a session with a mix of events over three steps and a
+// compaction, for typed reads.
+func typedSession(t *testing.T, s db.Store) string {
+	t.Helper()
+	ctx := context.Background()
+	runID := db.NewRunID()
+	_ = s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()})
+	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "s1", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
+	appendE := func(e event.Event) {
+		t.Helper()
+		if _, err := s.AppendEvent(ctx, runID, "s1", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendE(&event.SystemEvent{Content: "prompt"})
+	appendE(&event.UserEvent{Content: "task"})
+	_, _ = s.AdvanceStep(ctx, runID, "s1")
+	appendE(&event.AssistantEvent{Content: "turn 1"})
+	appendE(&event.ChildResultEvent{ChildSessionID: "c1", Verdict: db.SessionConcluded, Content: "done"})
+	appendE(&event.UserEvent{Content: "follow-up"})
+	_, _ = s.AdvanceStep(ctx, runID, "s1")
+	appendE(&event.AssistantEvent{Content: "turn 2"})
+	if _, err := s.CompactContext(ctx, runID, "s1", 1, "summary"); err != nil {
+		t.Fatal(err)
+	}
+	appendE(&event.UserEvent{Content: "after compaction"})
+	return runID
+}
+
+// A typed read returns just those events, in the order an untyped read gives
+// them, and combines with the other filters.
+func TestGetEvents_Types(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	runID := typedSession(t, s)
+	keys := func(recs []db.EventRecord) []string {
+		out := make([]string, len(recs))
+		for i, r := range recs {
+			out[i] = r.EventID
+		}
+		return out
+	}
+	types := db.EventTypes(&event.UserEvent{}, &event.ChildResultEvent{})
+	one, two := 1, 2
+	for _, f := range []db.EventFilter{
+		{},
+		{CurrentContextOnly: true},
+		{StartStep: &one},
+		{EndStep: &one},
+		{StartStep: &one, EndStep: &two, CurrentContextOnly: true},
+	} {
+		all, err := s.GetEvents(ctx, runID, "s1", f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var want []db.EventRecord
+		for _, r := range all {
+			if slices.Contains(types, r.Event.EventType()) {
+				want = append(want, r)
+			}
+		}
+		typed := f
+		typed.Types = types
+		got, err := s.GetEvents(ctx, runID, "s1", typed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(keys(got), keys(want)) || len(want) == 0 && f.EndStep == nil {
+			t.Errorf("%+v: typed read %v; want %v", f, keys(got), keys(want))
+		}
+		if n, err := s.GetEventCount(ctx, runID, "s1", typed); err != nil || n != len(want) {
+			t.Errorf("%+v: typed count %d, %v; want %d", f, n, err, len(want))
+		}
+	}
+	if got, _ := s.GetEvents(ctx, runID, "s1", db.EventFilter{Types: []string{"no-such-type"}}); len(got) != 0 {
+		t.Errorf("a type no event has read %d events", len(got))
+	}
+}
+
+// A typed read reads only the rows of those types: it goes through
+// idx_event_type, not through idx_event_step and every row of the session.
+func TestGetEvents_TypesReadThroughTheTypeIndex(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "plan.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	runID := typedSession(t, s)
+	f := db.EventFilter{Types: db.EventTypes(&event.UserEvent{}), CurrentContextOnly: true}
+	clause, args := eventFilterClause(runID, "s1", f)
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for _, q := range []string{
+		getEventsQueryHead + eventsFrom(f) + getEventsQueryWhere + clause + getEventsQueryTail,
+		`SELECT COUNT(*) FROM ` + eventsFrom(f) + ` WHERE run_id = ? AND session_id = ?` + clause,
+	} {
+		rows, err := raw.QueryContext(ctx, "EXPLAIN QUERY PLAN "+q, append([]any{runID, "s1"}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
+		}
+		rows.Close()
+		if !slices.ContainsFunc(plan, func(d string) bool { return strings.Contains(d, "USING INDEX idx_event_type") }) {
+			t.Errorf("plan for %q:\n%s\nwant it through idx_event_type", q, strings.Join(plan, "\n"))
+		}
+	}
+	// An untyped read still walks idx_event_step in order, with nothing to sort.
+	all := db.EventFilter{}
+	clause, args = eventFilterClause(runID, "s1", all)
+	q := getEventsQueryHead + eventsFrom(all) + getEventsQueryWhere + clause + getEventsQueryTail
+	rows, err := raw.QueryContext(ctx, "EXPLAIN QUERY PLAN "+q, append([]any{runID, "s1"}, args...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if p := strings.Join(plan, "\n"); !strings.Contains(p, "USING INDEX idx_event_step") || strings.Contains(p, "TEMP B-TREE") {
+		t.Errorf("plan for an untyped read:\n%s\nwant idx_event_step and no sort", p)
+	}
+}
+
+// A database from before the type index gets it when opened, over the events
+// it already holds.
+func TestOpen_AddsTheTypeIndex(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := typedSession(t, s)
+	s.Close()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.ExecContext(ctx, `DROP INDEX idx_event_type`); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_event_type'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("idx_event_type after reopening: %d, %v", n, err)
+	}
+	if got, err := s.GetEvents(ctx, runID, "s1", db.EventFilter{Types: db.EventTypes(&event.ChildResultEvent{})}); err != nil || len(got) != 1 {
+		t.Errorf("typed read of the old events: %d, %v; want the one child result", len(got), err)
+	}
+}
+
+// Events of a step written in the same millisecond read in the order they
+// were written, typed or not: the type index alone would group them by type.
+func TestGetEvents_TiesKeepTheWriteOrder(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ties.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	runID := db.NewRunID()
+	_ = s.CreateRun(ctx, db.RunRecord{RunID: runID, CreatedAt: time.Now().UTC()})
+	_ = s.CreateSession(ctx, db.SessionRecord{RunID: runID, SessionID: "s1", Status: db.SessionOngoing, CreatedAt: time.Now().UTC()})
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for i, typ := range []string{"user", "assistant", "user", "assistant"} {
+		if _, err := raw.ExecContext(ctx,
+			`INSERT INTO Event (run_id, session_id, event_id, step, generation, data, created_at)
+			 VALUES (?, 's1', ?, 2, 0, ?, '2026-11-17T12:00:00.000Z')`,
+			runID, fmt.Sprintf("e%d", i), fmt.Sprintf(`{"type":%q,"content":"%d"}`, typ, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []db.EventFilter{{}, {Types: db.EventTypes(&event.UserEvent{}, &event.AssistantEvent{})}} {
+		recs, err := s.GetEvents(ctx, runID, "s1", f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, r := range recs {
+			got = append(got, r.EventID)
+		}
+		if want := []string{"e0", "e1", "e2", "e3"}; !slices.Equal(got, want) {
+			t.Errorf("%+v: read %v; want the write order %v", f, got, want)
+		}
+	}
+}
+
+// AppendEventWithMetadata writes the event and the metadata in one transaction:
+// both land, or (an unwritable merge) neither does. The commit hook fires once.
+func TestAppendEventWithMetadata(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.CreateRun(ctx, db.RunRecord{RunID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, db.SessionRecord{RunID: "r1", SessionID: "a", Status: db.SessionIdle,
+		Metadata: map[string]any{"workspace": "keep"}}); err != nil {
+		t.Fatal(err)
+	}
+	var fired []event.Event
+	s.SetCommitListener(func(_, _ string, evt event.Event) { fired = append(fired, evt) })
+
+	if _, err := s.AppendEventWithMetadata(ctx, "r1", "a", &event.LoopEvent{Action: event.LoopSet, ID: "1"},
+		map[string]any{"loops": []map[string]any{{"id": "1"}}, "loop_seq": 1}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.GetSession(ctx, "r1", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Metadata["workspace"] != "keep" || sess.Metadata["loop_seq"] != float64(1) || sess.Metadata["loops"] == nil {
+		t.Errorf("metadata = %v", sess.Metadata)
+	}
+	if len(fired) != 1 || fired[0].(*event.LoopEvent).Step != 0 {
+		t.Errorf("commit hook fired %d times", len(fired))
+	}
+	read, err := s.GetEvents(ctx, "r1", "a", db.EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, ok := read[0].Event.(*event.LoopEvent); !ok || l.CreatedAt.IsZero() {
+		t.Errorf("a loop event reads back without its column fields: %+v", read[0].Event)
+	}
+
+	// A merge that can't be written rolls the event back with it.
+	if _, err := s.AppendEventWithMetadata(ctx, "r1", "a", &event.LoopEvent{Action: event.LoopStop, ID: "1"},
+		map[string]any{"bad": func() {}}); err == nil {
+		t.Fatal("an unmarshalable metadata value was accepted")
+	}
+	evs, err := s.GetEvents(ctx, "r1", "a", db.EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 {
+		t.Errorf("events after a failed append: %d, want 1 (the failed one rolled back)", len(evs))
+	}
+}
+
+// AppendEventsIf hands ok the session's lineage, nearest first, inside its
+// transaction; a refusal writes nothing, fires no hook, and comes back as ok's
+// own error (not a store error, which a real failure is).
+func TestAppendEventsIf(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.CreateRun(ctx, db.RunRecord{RunID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sr := range []db.SessionRecord{
+		{SessionID: "root", Status: db.SessionAwaiting},
+		{SessionID: "mid", Status: db.SessionCancelled, ParentID: "root"},
+		{SessionID: "leaf", Status: db.SessionConcluded, ParentID: "mid"},
+	} {
+		sr.RunID = "r1"
+		if err := s.CreateSession(ctx, sr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var fired []event.Event
+	s.SetCommitListener(func(_, _ string, evt event.Event) { fired = append(fired, evt) })
+
+	var seen []string
+	refused := errors.New("mid is cancelled")
+	err := s.AppendEventsIf(ctx, "r1", "leaf", func(lineage []db.SessionRecord) error {
+		for _, l := range lineage {
+			seen = append(seen, l.SessionID+":"+l.Status)
+		}
+		return refused
+	}, map[string]any{"loops": "x"}, &event.UserEvent{Content: "tick"})
+	if err != refused { // ok's error, as it is
+		t.Errorf("refused append = %v; want ok's error itself", err)
+	}
+	if want := []string{"leaf:concluded", "mid:cancelled", "root:awaiting"}; !slices.Equal(seen, want) {
+		t.Errorf("lineage %v; want %v", seen, want)
+	}
+	evs, err := s.GetEvents(ctx, "r1", "leaf", db.EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.GetSession(ctx, "r1", "leaf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 0 || len(fired) != 0 || sess.Metadata["loops"] != nil {
+		t.Errorf("a refused append wrote %d events, fired %d hooks, metadata %v", len(evs), len(fired), sess.Metadata)
+	}
+
+	tick, set := &event.UserEvent{Content: "tick"}, &event.LoopEvent{Action: event.LoopSet, ID: "1"}
+	if err := s.AppendEventsIf(ctx, "r1", "leaf", func([]db.SessionRecord) error { return nil },
+		map[string]any{"loops": "x"}, set, tick); err != nil {
+		t.Fatal(err)
+	}
+	if evs, _ := s.GetEvents(ctx, "r1", "leaf", db.EventFilter{}); len(evs) != 2 || len(fired) != 2 {
+		t.Errorf("accepted append: %d events, %d hooks; want 2 and 2", len(evs), len(fired))
+	}
+	if err := s.AppendEventsIf(ctx, "r1", "nobody", func([]db.SessionRecord) error { return nil }, nil, tick); !errors.Is(err, db.ErrStore) ||
+		!errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("append to a missing session = %v; want a store error wrapping ErrNoRows", err)
+	}
+}
+
+// Several events and a metadata merge are one write: in order, at the current
+// step, committed (and announced) together, or not at all.
+func TestAppendEventsIf_SeveralEvents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.CreateRun(ctx, db.RunRecord{RunID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, db.SessionRecord{RunID: "r1", SessionID: "a", Status: db.SessionIdle}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AdvanceStep(ctx, "r1", "a"); err != nil {
+		t.Fatal(err)
+	}
+	var seen []int // events in the store when each commit hook fired
+	s.SetCommitListener(func(_, _ string, evt event.Event) {
+		evs, _ := s.GetEvents(ctx, "r1", "a", db.EventFilter{})
+		seen = append(seen, len(evs))
+	})
+	set := &event.VerifyEvent{Action: event.VerifySet, By: "loop 1"}
+	tick := &event.UserEvent{Content: "tick", Loop: &event.LoopTick{ID: "1", N: 1, Version: 1}}
+	if err := s.AppendEventsIf(ctx, "r1", "a", nil, map[string]any{"loops": "x"}, set, tick); err != nil {
+		t.Fatal(err)
+	}
+	evs, err := s.GetEvents(ctx, "r1", "a", db.EventFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 2 || evs[0].Event.EventType() != "verify" || evs[1].Event.EventType() != "user" || evs[0].Step != 1 || evs[1].Step != 1 {
+		t.Fatalf("events = %+v", evs)
+	}
+	if fmt.Sprint(seen) != "[2 2]" || tick.Step != 1 {
+		t.Errorf("hooks saw %v events, tick step %d; want both committed before either hook", seen, tick.Step)
+	}
+	if sess, _ := s.GetSession(ctx, "r1", "a"); sess.Metadata["loops"] != "x" {
+		t.Errorf("metadata = %v", sess.Metadata)
+	}
+	if err := s.AppendEventsIf(ctx, "r1", "a", nil, map[string]any{"bad": func() {}}, set, tick); err == nil {
+		t.Fatal("an unmarshalable metadata value was accepted")
+	}
+	if evs, _ := s.GetEvents(ctx, "r1", "a", db.EventFilter{}); len(evs) != 2 {
+		t.Errorf("events after a failed append: %d, want 2", len(evs))
+	}
+}
+
+func TestListSessionsWithMetadata(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	for _, run := range []string{"r1", "r2"} {
+		if err := s.CreateRun(ctx, db.RunRecord{RunID: run}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk := func(run, sid string, meta map[string]any) {
+		t.Helper()
+		if err := s.CreateSession(ctx, db.SessionRecord{RunID: run, SessionID: sid, Status: db.SessionIdle, Metadata: meta}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("r1", "with", map[string]any{"loops": []any{"x"}})
+	mk("r1", "without", map[string]any{"workspace": "w"})
+	mk("r1", "none", nil)
+	mk("r2", "cleared", map[string]any{"loops": nil})
+	mk("r2", "also", map[string]any{"loops": []any{"y"}})
+	got, err := s.ListSessionsWithMetadata(ctx, "loops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.RunID+"/"+r.SessionID)
+	}
+	if want := []string{"r1/with", "r2/also"}; !slices.Equal(ids, want) {
+		t.Errorf("sessions with loops = %v; want %v", ids, want)
+	}
+}
+
+// A loop's changes are record-only: WakingEventsSince skips them, while a tick,
+// ordinary operator input, counts.
+func TestWakingEventsSince_SkipsLoopEvents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.CreateRun(ctx, db.RunRecord{RunID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, db.SessionRecord{RunID: "r1", SessionID: "a", Status: db.SessionAwaiting}); err != nil {
+		t.Fatal(err)
+	}
+	for _, evt := range []event.Event{
+		&event.LoopEvent{Action: event.LoopSet, ID: "1"},
+		&event.UserEvent{Content: "tick", Loop: &event.LoopTick{ID: "1", N: 1}},
+		&event.LoopEvent{Action: event.LoopEnded, ID: "1"},
+	} {
+		if _, err := s.AppendEvent(ctx, "r1", "a", evt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := db.WakingEventsSince(ctx, s, "r1", "a", 0); err != nil || n != 1 {
+		t.Errorf("waking events = %d, %v; want 1 (the tick)", n, err)
+	}
+}
+
+// A session whose metadata isn't valid JSON is skipped, not a failed query.
+func TestListSessionsWithMetadata_SkipsUnreadableMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "amplio.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	if err := s.CreateRun(ctx, db.RunRecord{RunID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	for sid, meta := range map[string]map[string]any{"good": {"loops": []any{"x"}}, "bad": nil} {
+		if err := s.CreateSession(ctx, db.SessionRecord{RunID: "r1", SessionID: sid, Status: db.SessionIdle, Metadata: meta}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.ExecContext(ctx, `UPDATE Session SET metadata = '{"loops": [' WHERE session_id = 'bad'`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListSessionsWithMetadata(ctx, "loops")
+	if err != nil || len(got) != 1 || got[0].SessionID != "good" {
+		t.Errorf("ListSessionsWithMetadata = %v, %v; want just the good session", got, err)
 	}
 }

@@ -92,15 +92,7 @@ func (o *Observer) Start(ctx context.Context) {
 	o.store.SetStepFinalizedListener(func(runID, sessionID string, _ int) {
 		o.enqueue(sessionKey{runID, sessionID})
 	})
-	// Settle trigger: force-close the trailing phase when a session reaches a
-	// terminal status. process() applies the precise !IsSpine && !idle rule, so
-	// a crashed root coarsely enqueued here just does normal work.
-	o.store.SetSessionStatusChangedListener(func(runID, sessionID, newStatus string) {
-		switch newStatus {
-		case db.SessionConcluded, db.SessionCancelled, db.SessionCrashed:
-			o.enqueue(sessionKey{runID, sessionID})
-		}
-	})
+	o.store.SetSessionStatusChangedListener(o.OnSessionStatus)
 	for range o.workers {
 		o.wg.Add(1)
 		go o.worker(ctx)
@@ -113,6 +105,18 @@ func (o *Observer) Start(ctx context.Context) {
 		o.mu.Unlock()
 	}()
 	o.sweep(ctx)
+}
+
+// OnSessionStatus is the settle trigger, the db.SessionStatusListener Start
+// installs: force-close the trailing phase when a session reaches a terminal
+// status. process() applies the precise !IsSpine && !idle rule, so a crashed
+// root coarsely enqueued here just does normal work. Exported so a process
+// that also wants status changes can compose it with its own listener.
+func (o *Observer) OnSessionStatus(runID, sessionID, newStatus string) {
+	switch newStatus {
+	case db.SessionConcluded, db.SessionCancelled, db.SessionCrashed:
+		o.enqueue(sessionKey{runID, sessionID})
+	}
 }
 
 // Stop captures any final finalized-but-unqueued steps, drains the work set, and

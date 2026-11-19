@@ -39,7 +39,18 @@ import type {
   BriefingInfo,
   ProcessSnapshot,
   SessionTools,
+  LoopDTO,
+  LoopSchedule,
+  VerifyReport,
 } from "./types";
+import type { VerifyRequest } from "./composerOptions";
+
+// The body of PATCH .../loops/{lid}: only what changes.
+export interface LoopPatch {
+  prompt?: string;
+  schedule?: LoopSchedule;
+  verify?: VerifyRequest | null;
+}
 
 // blobUrl builds a same-origin URL for a run's tool-result blob (e.g. an image),
 // usable directly in <img src>. These are open reads, and the browser sends the
@@ -215,6 +226,7 @@ export interface StartRunRequest {
    *  set, [] for deliberately none, [names] for an explicit choice. The server
    *  resolves it once, at run creation. */
   briefings?: string[];
+  verify?: VerifyRequest; // verification on the root agent (autonomous runs)
 }
 
 export interface RunUpdate {
@@ -318,11 +330,39 @@ export const api = {
   // Attach a chatbot co-pilot to an existing (autonomous) run; idempotent.
   startChatbot: (id: string) =>
     req<{ session_id: string }>(`/runs/${id}/chatbot`, { method: "POST" }),
-  sendMessage: (id: string, sid: string, content: string) =>
+  // verify, when given, sets (or replaces) the session's verification first.
+  sendMessage: (id: string, sid: string, content: string, verify?: VerifyRequest) =>
     req<void>(`/runs/${id}/sessions/${sid}/message`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, verify }),
     }),
+  // A session's verification: open read; set/replace and clear need the token.
+  getVerify: (id: string, sid: string) =>
+    req<VerifyReport>(`/runs/${id}/sessions/${sid}/verify`),
+  setVerify: (id: string, sid: string, body: VerifyRequest) =>
+    req<VerifyReport>(`/runs/${id}/sessions/${sid}/verify`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  clearVerify: (id: string, sid: string) =>
+    req<VerifyReport>(`/runs/${id}/sessions/${sid}/verify`, { method: "DELETE" }),
+  // A session's active loops: open read; add/edit/stop need the token.
+  listLoops: (id: string, sid: string) =>
+    req<LoopDTO[]>(`/runs/${id}/sessions/${sid}/loops`),
+  // verify: each tick starts a new verification with it.
+  addLoop: (id: string, sid: string, prompt: string, schedule: LoopSchedule, verify?: VerifyRequest) =>
+    req<LoopDTO>(`/runs/${id}/sessions/${sid}/loops`, {
+      method: "POST",
+      body: JSON.stringify({ prompt, schedule, verify }),
+    }),
+  // verify: a new request each tick verifies with; null stops verifying.
+  editLoop: (id: string, sid: string, lid: string, body: LoopPatch) =>
+    req<LoopDTO>(`/runs/${id}/sessions/${sid}/loops/${lid}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  stopLoop: (id: string, sid: string, lid: string) =>
+    req<void>(`/runs/${id}/sessions/${sid}/loops/${lid}`, { method: "DELETE" }),
   cancelRun: (id: string) =>
     req<void>(`/runs/${id}/cancel`, { method: "POST" }),
   // Permanently delete a run and all its data (DB rows + on-disk artifact/blob
@@ -383,7 +423,7 @@ export const api = {
   getSessionTools: (id: string, sid: string) =>
     req<SessionTools>(`/runs/${id}/sessions/${sid}/tools`),
   getAbout: () => req<AboutInfo>("/about"),
-  // The server's settings (its time zone). Open read.
+  // The server's settings (its time zone, verify and loop defaults). Open read.
   getSettings: () => req<ServerSettings>("/settings"),
   // One-time login code for "Open on phone" (requires auth; see pair.go).
   mintPairCode: () =>

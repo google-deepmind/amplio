@@ -11,4 +11,4 @@ When the task or operator references a prior run id (a short token such as `a1b2
 1. `view_run_report(run_id=…)` — the end-of-run report compresses what the run did, what it achieved, and where it struggled.
 2. `session_list(run_id=…)`, then `session_summary(run_id=…, session_id=…)` for phase-level narratives (the root session, if any, is `main-agent`).
 3. `session_search(run_id=…, query=…)` to find specific topics (matches both raw events and observer summaries).
-4. `session_steps(run_id=…, …)` for full event-level drill-down when summaries lack detail.
+4. `session_steps(run_id=…, …, full=true)` for full event-level drill-down when summaries lack detail.

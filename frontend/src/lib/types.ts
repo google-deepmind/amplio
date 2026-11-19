@@ -106,23 +106,29 @@ export interface ChatBubble {
   // operator/chatbot are the conversation; agent/environment are inbound
   // messages (peer send_message / amplio notify) projected into the chat;
   // child_result is a spawned sub-agent's terminal result posted back to the
-  // parent; compaction is a context-summary seam (expandable divider).
+  // parent; verdict is what the session's verifier said, as the session was
+  // told; compaction is a context-summary seam (expandable divider).
   kind:
     | "operator"
     | "chatbot"
     | "agent"
     | "environment"
     | "child_result"
+    | "verdict"
     | "compaction";
   content: string;
   thoughts?: string;
   from?: string;
-  // verdict is set only for kind==='child_result': the sub-agent's terminal
-  // status (concluded | crashed | cancelled).
+  // verdict is set for kind==='child_result': the sub-agent's terminal status
+  // (concluded | crashed | cancelled); and for kind==='verdict': PASS | FAIL,
+  // or the status of a verifier that stopped (from is the verifier, content
+  // its findings).
   verdict?: string;
+  outcome?: VerifyOutcome; // verdict only
+  stale?: boolean; // verdict only: on a candidate a newer version (or a clear) withdrew
   // notes, child_result only: facts about how the sub-agent concluded (e.g. what
   // it left running), each with its display label.
-  notes?: { label: string; text: string }[];
+  notes?: { kind: string; label: string; text: string }[];
   step: number;
   created_at: string;
   tool_calls: ChatToolCall[];
@@ -133,6 +139,8 @@ export interface ChatBubble {
   refusal?: Refusal;
   // Set when the turn stopped abnormally (output limit, malformed tool call, …).
   stop_notice?: StopNotice;
+  // operator only: set on a loop's tick (content still starts with its header).
+  loop?: LoopTick;
 }
 
 // StopNotice flags an assistant turn that ended abnormally. The server decides
@@ -220,6 +228,28 @@ export interface SessionDTO {
   // descendant of one), else the run's.
   llm?: string; // full spec (tooltip)
   llm_name?: string; // short display label derived from llm (display only)
+  interactive?: boolean; // never concludes (the chatbot), so can't be verified
+  verifier_for?: string; // set on a verifier: the session whose conclusions it checks
+  verify?: SessionVerify; // its verification at a glance; absent if never verified
+  loops?: SessionLoops; // its active loops at a glance; absent with none
+}
+
+// A session's verification as its metadata mirrors it (verify.Summary): the
+// state of its latest version. The stream (GET .../verify) stays the truth.
+export interface SessionVerify {
+  status: "on" | "verifying" | "passed" | "not_verified" | "off";
+  version: number;
+  round?: number;
+  max_rounds?: number; // absent / 0: unbounded
+  verifier?: string;
+  model?: string; // the request's; absent: the agent's own
+}
+
+// A session's active loops: how many, and the soonest next tick (RFC 3339; the
+// zero time when none of them has one).
+export interface SessionLoops {
+  count: number;
+  next_tick: string;
 }
 
 export interface RunDetail {
@@ -327,7 +357,27 @@ export interface AgentEvent {
   notes?: { kind: string; text: string }[]; // child_result: facts about how the child concluded
   leftover?: string; // child_result written before notes existed: what it left running
   check?: string; // user: set when the harness wrote it (a conclusion check), not the operator
+  loop?: LoopTick; // user: a loop's tick n (the operator's prompt, re-sent)
   refusal?: Refusal; // assistant only: the provider declined this turn
+  // verify (action verdict): the verifier's outcome, its own record; user (a
+  // verify message) and tool_result (a conclude call's result): the outcome
+  // as the harness told it.
+  outcome?: VerifyOutcome;
+  // verify: a change to the session's verification (see internal/verify);
+  // loop: loop `id` was set, changed, stopped or ended (`action`); set and edit
+  // carry the prompt and schedule after the change, ended its reason.
+  action?: string;
+  criteria?: string;
+  model?: string;
+  max_rounds?: number;
+  by?: string;
+  verifier?: string;
+  round?: number;
+  id?: string;
+  prompt?: string;
+  schedule?: { kind: string; spec: string };
+  verify?: LoopVerify; // loop: the verification each tick starts, after a set or an edit
+  reason?: string;
 }
 
 // Artifact browser (run Files tab).
@@ -542,6 +592,91 @@ export interface AboutInfo {
 // ServerSettings is GET /api/settings.
 export interface ServerSettings {
   timezone: string; // IANA name of the server's zone; timestamps render in it
+  // [verify] defaults: what the verification form fills in.
+  verify?: { max_rounds: number; model: string }; // model "" = the agent's own
+  // [loop] defaults: expiry is a Go duration ("168h") or "never".
+  loop?: { expiry: string; min_interval_seconds: number };
+  now?: string; // the server's clock (RFC 3339), for a loop's "send now"
+}
+
+// A loop's schedule: kind "rrule", spec an iCalendar DTSTART + RRULE.
+export interface LoopSchedule {
+  kind: string;
+  spec: string;
+}
+
+// A loop's tick: which loop, its number (1 = first), and the verification
+// version it started, for a loop that verifies each tick.
+export interface LoopTick {
+  id: string;
+  n: number;
+  version?: number;
+}
+
+// The verification each tick of a loop starts (event.LoopVerify), with the
+// server's defaults filled in when the loop was set.
+export interface LoopVerify {
+  criteria?: string; // absent: the tick's prompt
+  model?: string; // absent: the agent's own
+  max_rounds: number; // 0 = unbounded
+}
+
+// LoopDTO is one active loop (GET .../loops). Times are RFC 3339.
+export interface LoopDTO {
+  id: string;
+  session_id: string;
+  prompt: string;
+  schedule: LoopSchedule;
+  verify?: LoopVerify; // each tick is verified
+  summary: string; // the server's few words, or the rule itself
+  created_at: string;
+  ticks: number;
+  last_tick?: string;
+  next_tick?: string;
+}
+
+// VerifyOutcome is what a verifier said about a conclusion (event.VerifyOutcome).
+export interface VerifyOutcome {
+  verifier: string;
+  verdict: string; // PASS | FAIL, or the status of a verifier that stopped without one (crashed | cancelled)
+  findings?: string; // its findings; for a stop, why it stopped
+  round?: number; // as told to the agent
+  max_rounds?: number; // 0 / absent = unbounded
+  at?: string; // when the verifier concluded or stopped
+  earlier?: boolean; // a verdict on an earlier conclusion, told as information (no round)
+}
+
+// One VerifyEvent in VerifyReport.history.
+export interface VerifyChange {
+  action: string; // set | replace | clear | verifying | rejected | passed | exhausted | verdict | withdrawn | stale
+  criteria?: string;
+  model?: string;
+  max_rounds: number;
+  by?: string;
+  verifier?: string;
+  round?: number;
+  reason?: string; // exhausted: why it ended (not always the rounds); withdrawn, stale: which candidate, and why
+  outcome?: VerifyOutcome; // verdict: what the verifier said, or how it stopped; stale: the verdict ignored
+  step: number;
+  created_at: string;
+  // What it is about: the version a set, replace or clear started or ended,
+  // the candidate of a harness step, the candidate before a verdict.
+  version?: number;
+  candidate?: number;
+  stale?: boolean; // a verdict that didn't count (its candidate was withdrawn)
+}
+
+// VerifyReport is GET .../verify: a session's verification.
+export interface VerifyReport {
+  state: "off" | "on" | "verifying" | "passed" | "not_verified";
+  criteria: string;
+  model: string;
+  max_rounds: number;
+  round: number;
+  verifier: string;
+  version?: number; // every set or replace starts one (v1, v2, …); 0 if never on
+  candidate?: number; // the version's latest candidate given to the verifier (0: none yet)
+  history: VerifyChange[];
 }
 
 // TestLLMResult is the outcome of the About page's LLM pre-flight test.

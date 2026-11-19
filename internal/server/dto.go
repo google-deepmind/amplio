@@ -19,17 +19,27 @@ import (
 	"net/http"
 	"time"
 
+	"amplio/internal/agent"
 	"amplio/internal/config"
 	"amplio/internal/db"
 	"amplio/internal/event"
 	"amplio/internal/llm"
+	"amplio/internal/loop"
+	"amplio/internal/verify"
 	"amplio/internal/workspace"
 )
 
+// writeJSON encodes v before it commits to code, so a value JSON can't carry
+// (a time past year 9999, say) is a 500 rather than a 200 with an empty body.
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		code = http.StatusInternalServerError
+		body, _ = json.Marshal(map[string]string{"error": "encode the response: " + err.Error()})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v) //nolint:errcheck // response already committed
+	_, _ = w.Write(append(body, '\n'))
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
@@ -278,6 +288,40 @@ type sessionDTO struct {
 	// compare.
 	LLM     string `json:"llm,omitempty"`      // full spec (tooltip)
 	LLMName string `json:"llm_name,omitempty"` // cheap display label, derived — never show it without llm reachable
+	// Interactive agents (the chatbot) never conclude, so they can't be
+	// verified; the UI offers verification only on the others.
+	Interactive bool `json:"interactive,omitempty"`
+	// VerifierFor is set on a verifier: the session whose conclusions it
+	// checks. A verifier is never verified and has no loops.
+	VerifierFor string `json:"verifier_for,omitempty"`
+	// Verify is the session's verification as its metadata mirrors it
+	// (verify.Summary); absent for a session never verified.
+	Verify *verify.Summary `json:"verify,omitempty"`
+	// Loops summarizes the session's active loops; absent when it has none.
+	Loops *loopsSummary `json:"loops,omitempty"`
+}
+
+// loopsSummary is a session's active loops at a glance.
+type loopsSummary struct {
+	Count    int       `json:"count"`
+	NextTick time.Time `json:"next_tick"` // the earliest of their next ticks
+}
+
+// summarizeLoops groups a run's active loops by session.
+func summarizeLoops(infos []loop.Info) map[string]*loopsSummary {
+	out := map[string]*loopsSummary{}
+	for _, in := range infos {
+		ls := out[in.SessionID]
+		if ls == nil {
+			ls = &loopsSummary{NextTick: in.NextTick}
+			out[in.SessionID] = ls
+		}
+		ls.Count++
+		if !in.NextTick.IsZero() && (ls.NextTick.IsZero() || in.NextTick.Before(ls.NextTick)) {
+			ls.NextTick = in.NextTick
+		}
+	}
+	return out
 }
 
 // toSessionDTO renders a session of a run whose model is runLLM.
@@ -300,6 +344,9 @@ func toSessionDTO(s db.SessionRecord, runLLM string) sessionDTO {
 		WorkspaceName:   name,
 		LLM:             spec,
 		LLMName:         llm.ShortLabel(spec),
+		Interactive:     agent.IsInteractive(s.AgentType),
+		VerifierFor:     verify.VerifierFor(&s),
+		Verify:          verify.SummaryFrom(s.Metadata),
 	}
 }
 

@@ -718,10 +718,39 @@ func (s *sqliteStore) UpdateSessionStatus(ctx context.Context, runID, sessionID,
 	return nil
 }
 
-func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, selfEvent event.Event, selfEventStep int) error {
+func (s *sqliteStore) SetStatusUnlessTerminal(ctx context.Context, runID, sessionID, status string) (bool, error) {
+	set := false
+	if err := func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		res, err := s.sqlDB.ExecContext(ctx,
+			`UPDATE Session SET status = ?, status_changed_at = ?
+			 WHERE run_id = ? AND session_id = ?
+			   AND status NOT IN ('concluded', 'crashed', 'cancelled')`,
+			status, formatTime(time.Now()), runID, sessionID,
+		)
+		if err != nil {
+			return fmt.Errorf("update session status: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			set = true
+			s.emit(db.SessionStatusChanged{RunID: runID, SessionID: sessionID, NewStatus: status})
+		}
+		return nil
+	}(); err != nil || !set {
+		return false, err
+	}
+	s.fireSessionStatusChanged(runID, sessionID, status)
+	return true, nil
+}
+
+func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, self ...db.SelfEvent) (bool, error) {
 	notify := parentID != ""
 	var notifyEvt event.Event
 	transitioned := false
+	// The transition's time, as stored (to the millisecond): a verifier's
+	// outcome record carries it too.
+	now := parseTime(formatTime(time.Now()))
 
 	if err := func() error {
 		s.mu.Lock()
@@ -741,7 +770,7 @@ func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessi
 			`UPDATE Session SET status = ?, status_changed_at = ?
 			 WHERE run_id = ? AND session_id = ?
 			   AND status NOT IN ('concluded', 'crashed', 'cancelled')`,
-			status, formatTime(time.Now()), runID, sessionID,
+			status, formatTime(now), runID, sessionID,
 		)
 		if err != nil {
 			return fmt.Errorf("update session status: %w", err)
@@ -751,30 +780,33 @@ func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessi
 		}
 		transitioned = true
 
-		// Optional self-marker (cancel/error) on the terminating session's own
-		// stream. Defaults to the current step; a non-negative selfEventStep pins
-		// it (e.g. a crash recorded at the failed turn's call step).
-		if selfEvent != nil {
-			var step, gen int
+		// Self events (a cancel/error marker, a conclude call's result) on the
+		// terminating session's own stream, each at its pinned step or else the
+		// current one.
+		if len(self) > 0 {
+			var current, gen int
 			if err := tx.QueryRowContext(ctx,
 				`SELECT current_step, current_generation FROM Session WHERE run_id = ? AND session_id = ?`,
 				runID, sessionID,
-			).Scan(&step, &gen); err != nil {
+			).Scan(&current, &gen); err != nil {
 				return fmt.Errorf("read self step: %w", err)
 			}
-			if selfEventStep >= 0 {
-				step = selfEventStep
-			}
-			data, err := event.Marshal(selfEvent)
-			if err != nil {
-				return fmt.Errorf("marshal self event: %w", err)
-			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO Event (run_id, session_id, event_id, step, generation, data)
-				 VALUES (?, ?, ?, ?, ?, ?)`,
-				runID, sessionID, db.NewEventID(), step, gen, string(data),
-			); err != nil {
-				return fmt.Errorf("insert self event: %w", err)
+			for _, se := range self {
+				step := current
+				if se.Step >= 0 {
+					step = se.Step
+				}
+				data, err := event.Marshal(se.Event)
+				if err != nil {
+					return fmt.Errorf("marshal self event: %w", err)
+				}
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO Event (run_id, session_id, event_id, step, generation, data)
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					runID, sessionID, db.NewEventID(), step, gen, string(data),
+				); err != nil {
+					return fmt.Errorf("insert self event: %w", err)
+				}
 			}
 		}
 
@@ -788,7 +820,18 @@ func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessi
 			).Scan(&pStep, &pGen); err != nil {
 				return fmt.Errorf("read parent step: %w", err)
 			}
-			evt := &event.ChildResultEvent{ChildSessionID: sessionID, Verdict: status, Content: content, Notes: notes}
+			verifies, err := verifierOf(ctx, tx, runID, sessionID)
+			if err != nil {
+				return err
+			}
+			var evt event.Event = &event.ChildResultEvent{ChildSessionID: sessionID, Verdict: status, Content: content, Notes: notes}
+			if verifies == parentID {
+				stopped := status
+				if status == db.SessionConcluded {
+					stopped = ""
+				}
+				evt = event.VerifierOutcome(sessionID, content, stopped, now)
+			}
 			data, err := event.Marshal(evt)
 			if err != nil {
 				return fmt.Errorf("marshal child result: %w", err)
@@ -813,11 +856,11 @@ func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessi
 		}
 		return nil
 	}(); err != nil {
-		return err
+		return false, err
 	}
 
 	if !transitioned {
-		return nil // already terminal — the first terminator fired the hooks
+		return false, nil // already terminal — the first terminator fired the hooks
 	}
 	// Fire the status hook for the just-settled session (outside the lock) so
 	// the observer can force-close its trailing phase. Then wake/respawn the
@@ -826,17 +869,54 @@ func (s *sqliteStore) TerminateAndNotifyParent(ctx context.Context, runID, sessi
 	if notify {
 		s.fireCommit(runID, parentID, notifyEvt)
 	}
+	return true, nil
+}
+
+// verifierOf returns the session a verifier verifies (its metadata's
+// db.MetadataVerifierFor), or "" for any other session.
+func verifierOf(ctx context.Context, tx *sql.Tx, runID, sessionID string) (string, error) {
+	var metaJSON sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT metadata FROM Session WHERE run_id = ? AND session_id = ?`,
+		runID, sessionID).Scan(&metaJSON); err != nil {
+		return "", fmt.Errorf("read session metadata: %w", err)
+	}
+	var meta map[string]any
+	if metaJSON.Valid && metaJSON.String != "" {
+		_ = json.Unmarshal([]byte(metaJSON.String), &meta)
+	}
+	v, _ := meta[db.MetadataVerifierFor].(string)
+	return v, nil
+}
+
+// MergeSessionMetadata writes updates into a session's metadata and announces
+// it as a run update: the run detail shows what it holds (a session's
+// verification summary, say), and no event of its own goes with the write.
+func (s *sqliteStore) MergeSessionMetadata(ctx context.Context, runID, sessionID string, updates map[string]any) error {
+	if err := func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		tx, err := s.sqlDB.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin metadata tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := mergeMetadataTx(ctx, tx, runID, sessionID, updates); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}(); err != nil {
+		return err
+	}
+	s.emit(db.RunUpdated{RunID: runID})
 	return nil
 }
 
-func (s *sqliteStore) MergeSessionMetadata(ctx context.Context, runID, sessionID string, updates map[string]any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Read-modify-write under the write lock.
+// mergeMetadataTx is MergeSessionMetadata's read-modify-write, inside the
+// caller's transaction (and under its write lock).
+func mergeMetadataTx(ctx context.Context, tx *sql.Tx, runID, sessionID string, updates map[string]any) error {
 	var existing map[string]any
 	var metaJSON sql.NullString
-	err := s.sqlDB.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`SELECT metadata FROM Session WHERE run_id = ? AND session_id = ?`,
 		runID, sessionID,
 	).Scan(&metaJSON)
@@ -857,22 +937,77 @@ func (s *sqliteStore) MergeSessionMetadata(ctx context.Context, runID, sessionID
 	for k, v := range updates {
 		existing[k] = v
 	}
-	merged, _ := json.Marshal(existing)
-	_, err = s.sqlDB.ExecContext(ctx,
+	merged, err := json.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE Session SET metadata = ? WHERE run_id = ? AND session_id = ?`,
 		string(merged), runID, sessionID,
+	); err != nil {
+		return fmt.Errorf("write session metadata: %w", err)
+	}
+	return nil
+}
+
+// ListSessionsWithMetadata returns every session, across all runs, whose
+// metadata has a non-null value under key.
+func (s *sqliteStore) ListSessionsWithMetadata(ctx context.Context, key string) ([]db.SessionRecord, error) {
+	path, err := json.Marshal(key) // a quoted JSON path label, so any key is safe
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.sqlDB.QueryContext(ctx,
+		`SELECT `+sessionCols+` FROM Session
+		 WHERE CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.' || ?) END IS NOT NULL
+		 ORDER BY run_id, created_at ASC`, string(path),
 	)
-	return err
+	if err != nil {
+		return nil, fmt.Errorf("list sessions with metadata %q: %w", key, err)
+	}
+	defer rows.Close()
+	return scanSessions(rows)
 }
 
 // --- Event operations ---
 
 func (s *sqliteStore) AppendEvent(ctx context.Context, runID, sessionID string, evt event.Event) (string, error) {
-	data, err := event.Marshal(evt)
+	ids, err := s.appendEvents(ctx, runID, sessionID, nil, nil, evt)
 	if err != nil {
-		return "", fmt.Errorf("marshal event: %w", err)
+		return "", err
 	}
-	eventID := db.NewEventID()
+	return ids[0], nil
+}
+
+func (s *sqliteStore) AppendEventWithMetadata(ctx context.Context, runID, sessionID string, evt event.Event, updates map[string]any) (string, error) {
+	ids, err := s.appendEvents(ctx, runID, sessionID, nil, updates, evt)
+	if err != nil {
+		return "", err
+	}
+	return ids[0], nil
+}
+
+func (s *sqliteStore) AppendEventsIf(ctx context.Context, runID, sessionID string, ok func(lineage []db.SessionRecord) error,
+	updates map[string]any, evts ...event.Event) error {
+	_, err := s.appendEvents(ctx, runID, sessionID, ok, updates, evts...)
+	return err
+}
+
+// appendEvents writes evts, in order, at the session's current step and, when
+// updates is non-empty, merges them into its metadata, all in one transaction,
+// which ok (if not nil) may refuse. It returns the events' ids. A metadata
+// change is announced as a run update too.
+func (s *sqliteStore) appendEvents(ctx context.Context, runID, sessionID string, ok func([]db.SessionRecord) error,
+	updates map[string]any, evts ...event.Event) ([]string, error) {
+	datas := make([]string, len(evts))
+	ids := make([]string, len(evts))
+	for i, evt := range evts {
+		data, err := event.Marshal(evt)
+		if err != nil {
+			return nil, fmt.Errorf("marshal event: %w", err)
+		}
+		datas[i], ids[i] = string(data), db.NewEventID()
+	}
 	committedStep := 0
 
 	if err := func() error {
@@ -890,6 +1025,15 @@ func (s *sqliteStore) AppendEvent(ctx context.Context, runID, sessionID string, 
 		}
 		defer tx.Rollback() //nolint:errcheck
 
+		if ok != nil {
+			lineage, err := lineageTx(ctx, tx, runID, sessionID)
+			if err != nil {
+				return err
+			}
+			if err := ok(lineage); err != nil {
+				return err
+			}
+		}
 		var step, gen int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT current_step, current_generation FROM Session WHERE run_id = ? AND session_id = ?`,
@@ -898,57 +1042,103 @@ func (s *sqliteStore) AppendEvent(ctx context.Context, runID, sessionID string, 
 			return fmt.Errorf("read session step: %w", err)
 		}
 		committedStep = step
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO Event (run_id, session_id, event_id, step, generation, data)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			runID, sessionID, eventID, step, gen, string(data),
-		); err != nil {
-			return fmt.Errorf("insert event: %w", err)
+		for i := range evts {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO Event (run_id, session_id, event_id, step, generation, data)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+				runID, sessionID, ids[i], step, gen, datas[i],
+			); err != nil {
+				return fmt.Errorf("insert event: %w", err)
+			}
+		}
+		if len(updates) > 0 {
+			if err := mergeMetadataTx(ctx, tx, runID, sessionID, updates); err != nil {
+				return err
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit append: %w", err)
 		}
 		s.emit(db.EventAppended{RunID: runID, SessionID: sessionID})
+		if len(updates) > 0 {
+			// The metadata changed too (a loop's mirror, say), which the run
+			// detail shows: announce it as MergeSessionMetadata does.
+			s.emit(db.RunUpdated{RunID: runID})
+		}
 		return nil
 	}(); err != nil {
-		return "", err
+		return nil, err
 	}
-	setEventStep(evt, committedStep)
-	s.fireCommit(runID, sessionID, evt)
-	return eventID, nil
+	for _, evt := range evts {
+		setEventStep(evt, committedStep)
+		s.fireCommit(runID, sessionID, evt)
+	}
+	return ids, nil
+}
+
+// lineageTx reads a session and its ancestors, nearest first, in tx.
+func lineageTx(ctx context.Context, tx *sql.Tx, runID, sessionID string) ([]db.SessionRecord, error) {
+	var lineage []db.SessionRecord
+	seen := map[string]bool{}
+	for id := sessionID; id != "" && !seen[id]; {
+		seen[id] = true
+		sess, err := scanSession(tx.QueryRowContext(ctx,
+			`SELECT `+sessionCols+` FROM Session WHERE run_id = ? AND session_id = ?`, runID, id))
+		if err != nil {
+			return nil, fmt.Errorf("read session %s: %w", id, err)
+		}
+		lineage = append(lineage, *sess)
+		id = sess.ParentID
+	}
+	return lineage, nil
 }
 
 func (s *sqliteStore) AppendEventAtStep(ctx context.Context, runID, sessionID string, step int, evt event.Event) error {
-	data, err := event.Marshal(evt)
-	if err != nil {
-		return fmt.Errorf("marshal event: %w", err)
+	return s.AppendEvents(ctx, runID, sessionID, db.SelfEvent{Event: evt, Step: step})
+}
+
+func (s *sqliteStore) AppendEvents(ctx context.Context, runID, sessionID string, evts ...db.SelfEvent) error {
+	datas := make([]string, len(evts))
+	for i, se := range evts {
+		data, err := event.Marshal(se.Event)
+		if err != nil {
+			return fmt.Errorf("marshal event: %w", err)
+		}
+		datas[i] = string(data)
 	}
+	steps := make([]int, len(evts))
 
 	if err := func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		// Read-then-insert in one transaction (see AppendEvent). The step is
-		// explicitly provided; only the generation is read from the session.
+		// Read-then-insert in one transaction (see AppendEvent): the current
+		// step for the events that take it, and the generation.
 		tx, err := s.sqlDB.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin append tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
 
-		var gen int
+		var current, gen int
 		if err := tx.QueryRowContext(ctx,
-			`SELECT current_generation FROM Session WHERE run_id = ? AND session_id = ?`,
+			`SELECT current_step, current_generation FROM Session WHERE run_id = ? AND session_id = ?`,
 			runID, sessionID,
-		).Scan(&gen); err != nil {
-			return fmt.Errorf("read session generation: %w", err)
+		).Scan(&current, &gen); err != nil {
+			return fmt.Errorf("read session step: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO Event (run_id, session_id, event_id, step, generation, data)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			runID, sessionID, db.NewEventID(), step, gen, string(data),
-		); err != nil {
-			return fmt.Errorf("insert event at step: %w", err)
+		for i, se := range evts {
+			steps[i] = current
+			if se.Step >= 0 {
+				steps[i] = se.Step
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO Event (run_id, session_id, event_id, step, generation, data)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+				runID, sessionID, db.NewEventID(), steps[i], gen, datas[i],
+			); err != nil {
+				return fmt.Errorf("insert event at step: %w", err)
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit append: %w", err)
@@ -958,8 +1148,10 @@ func (s *sqliteStore) AppendEventAtStep(ctx context.Context, runID, sessionID st
 	}(); err != nil {
 		return err
 	}
-	setEventStep(evt, step)
-	s.fireCommit(runID, sessionID, evt)
+	for i, se := range evts {
+		setEventStep(se.Event, steps[i])
+		s.fireCommit(runID, sessionID, se.Event)
+	}
 	return nil
 }
 
@@ -1210,20 +1402,41 @@ func eventFilterClause(runID, sessionID string, opts db.EventFilter) (string, []
 		clause += " AND step <= ?"
 		args = append(args, *opts.EndStep)
 	}
+	if len(opts.Types) > 0 {
+		// The expression idx_event_type is on, verbatim, or the index can't serve it.
+		clause += " AND json_extract(data, '$.type') IN (?" + strings.Repeat(", ?", len(opts.Types)-1) + ")"
+		for _, t := range opts.Types {
+			args = append(args, t)
+		}
+	}
 	return clause, args
 }
 
+// eventsFrom names the table a filtered read takes its rows from. With Types,
+// it names idx_event_type: without statistics (no ANALYZE), SQLite prefers
+// idx_event_step, which the ORDER BY matches, and reads the whole session to
+// find a handful of rows; through the type index it reads only those, and sorts
+// them.
+func eventsFrom(opts db.EventFilter) string {
+	if len(opts.Types) > 0 {
+		return "Event INDEXED BY idx_event_type"
+	}
+	return "Event"
+}
+
 const (
-	getEventsQueryHead = `SELECT run_id, session_id, event_id, step, generation, data, created_at
-	          FROM Event WHERE run_id = ? AND session_id = ?`
-	getEventsQueryTail = " ORDER BY step ASC, created_at ASC"
+	getEventsQueryHead  = `SELECT run_id, session_id, event_id, step, generation, data, created_at FROM `
+	getEventsQueryWhere = ` WHERE run_id = ? AND session_id = ?`
+	// rowid last: events of a step written in the same millisecond come in the
+	// order they were written, whichever index a read goes through.
+	getEventsQueryTail = " ORDER BY step ASC, created_at ASC, rowid ASC"
 )
 
 func (s *sqliteStore) GetEvents(ctx context.Context, runID, sessionID string, opts db.EventFilter) ([]db.EventRecord, error) {
 	clause, filterArgs := eventFilterClause(runID, sessionID, opts)
 	// clause is built from static fragments only (no user input — all values are
 	// bound via ? placeholders in filterArgs), so the concatenation is injection-safe.
-	query := getEventsQueryHead + clause + getEventsQueryTail //nolint:gosec // static fragments; values are bound params
+	query := getEventsQueryHead + eventsFrom(opts) + getEventsQueryWhere + clause + getEventsQueryTail //nolint:gosec // static fragments; values are bound params
 	args := append([]any{runID, sessionID}, filterArgs...)
 
 	rows, err := s.sqlDB.QueryContext(ctx, query, args...)
@@ -1236,7 +1449,7 @@ func (s *sqliteStore) GetEvents(ctx context.Context, runID, sessionID string, op
 
 func (s *sqliteStore) GetEventCount(ctx context.Context, runID, sessionID string, opts db.EventFilter) (int, error) {
 	clause, filterArgs := eventFilterClause(runID, sessionID, opts)
-	query := `SELECT COUNT(*) FROM Event WHERE run_id = ? AND session_id = ?` + clause
+	query := `SELECT COUNT(*) FROM ` + eventsFrom(opts) + ` WHERE run_id = ? AND session_id = ?` + clause //nolint:gosec // static fragments; values are bound params
 	args := append([]any{runID, sessionID}, filterArgs...)
 	var count int
 	err := s.sqlDB.QueryRowContext(ctx, query, args...).Scan(&count)
@@ -1459,6 +1672,10 @@ func columnFields(evt event.Event) *event.ColumnFields {
 	case *event.RecoverEvent:
 		return &e.ColumnFields
 	case *event.UnknownEvent:
+		return &e.ColumnFields
+	case *event.VerifyEvent:
+		return &e.ColumnFields
+	case *event.LoopEvent:
 		return &e.ColumnFields
 	}
 	return nil

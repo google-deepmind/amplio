@@ -123,8 +123,99 @@ amplio client restart <run-id>   # revive a crashed run's sessions
 ```
 
 `cancel` returns once the request is accepted, not once cancellation has
-propagated. `restart` is the same path the server takes at boot for crashed
-runs and is idempotent — a healthy run revives zero sessions and prints `0`.
+propagated; the run's loops end at once. `restart` is the same path the server
+takes at boot for crashed runs and is idempotent — a healthy run revives zero
+sessions and prints `0`.
+
+### loop
+
+```bash
+amplio client loop add <run-id> main-agent --every 30m "check the eval and report changes"
+amplio client loop add <run-id> main-agent --every 2h --no-send-now --times 5 "summarize new failures"
+amplio client loop add <run-id> main-agent --every 1d --verify-criteria "go test ./... passes" "run the integration tests"
+amplio client loop edit <run-id> main-agent 1 --prompt "check the eval and the logs"
+amplio client loop edit <run-id> main-agent 1 --no-verify
+amplio client loop list <run-id>              # every session's active loops
+amplio client loop list <run-id> main-agent --json
+amplio client loop stop <run-id> main-agent 1
+```
+
+Sets a [loop](runs.md#loops): the prompt is sent to the session now and again
+every interval. `add` prints the loop id on stdout. The flags are the loop
+form's fields:
+
+| flag | meaning |
+|---|---|
+| `--every D` | interval, at least `1m`, in whole minutes: `30m`, `90m`, `2h`, `1d` |
+| `--no-send-now` | first tick after one interval instead of at once |
+| `--ends D` | end this long from now (`7d`, `12h`; more than zero) |
+| `--times N` | end after N ticks; with send-now, the first counts |
+| `--never` | never end |
+| `--rrule SPEC` | the whole schedule as iCalendar text, instead of all of the above |
+| `--verify` | [verify each tick](runs.md#verifying-each-tick) with the server's `[verify]` defaults |
+| `--verify-criteria T`, `--verify-model M`, `--verify-max-rounds N` | the request each tick's verification uses (each implies `--verify`) |
+
+With none of `--ends`, `--times` and `--never`, the loop ends after the
+server's `[loop] expiry` (7 days unless configured), which the client writes
+into the rule. An `--rrule` spec is a `DTSTART` line followed by an `RRULE`
+and any `RDATE`/`EXDATE` lines; separate them with newlines, spaces or a
+literal `\n`. A `DTSTART` ending in `Z` is UTC; one without is the server's
+local time. Times the command prints are the server's too.
+
+The server accepts a subset of iCalendar whose evaluation is always quick:
+`FREQ` MINUTELY to YEARLY with `INTERVAL` up to 100000; `COUNT` (1 to
+1000000) or `UNTIL`, not both; `WKST`; and the filters `BYMONTH`, `BYMONTHDAY`,
+`BYDAY`, `BYHOUR`, `BYMINUTE` and `BYSECOND=0`, each naming a value once
+(`9` and `09` are the same value). MINUTELY and HOURLY rules take
+no day filters (for "every 2 hours on weekdays", use DAILY with a `BYHOUR`
+list), and must reach their `BYHOUR`/`BYMINUTE` values from `DTSTART` in steps
+of `INTERVAL`. `BYDAY` ordinals (`1MO`, `-1FR`) are for MONTHLY and YEARLY and
+can't be mixed with plain days. `DTSTART` may be at most a year in the past,
+and it and any `RDATE` at most 100 years ahead:
+
+```bash
+amplio client loop add <run-id> main-agent \
+  --rrule 'DTSTART:20261116T090000 RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=9;BYMINUTE=0' \
+  "post the status update"
+```
+
+`edit` changes a loop from its next tick: `--prompt`, `--rrule` (a whole new
+schedule; the tick count carries on), `--verify` and the `--verify-*` flags, or
+`--no-verify`. Each `--verify-*` flag changes only its part of the loop's
+request: `--verify-max-rounds 2` keeps the loop's criteria and model (a loop
+that doesn't verify yet takes the server's defaults for the rest). Only one of
+a session's loops can verify its ticks.
+
+The same operations are on the API: `GET`/`POST
+/api/runs/<run>/sessions/<session>/loops` with `{prompt, schedule: {kind:
+"rrule", spec}, verify?: {criteria?, model?, max_rounds?}}`, and `PATCH`
+(`{prompt?, schedule?, verify?}`; `verify` replaces the whole request, and
+`"verify": null` stops verifying the ticks)
+and `DELETE` on `.../loops/<id>`. A loop's `verify` reads back with the
+defaults filled in. `GET /api/settings` reports the defaults a client fills in.
+
+### verify
+
+```bash
+amplio client verify <run-id> <session>                          # on, with the [verify] defaults
+amplio client verify <run-id> main-agent --criteria="go test ./... passes" --max-rounds=2
+amplio client verify <run-id> <session> --off
+```
+
+Has an independent verifier check the session's next conclusion before it is
+delivered (see [verified conclusions](runs.md#verified-conclusions)). Each run
+starts a new version of the request (v1, v2, ...): a conclusion still with the
+verifier for the old one is withdrawn, and the same verifier checks the next
+one. Unset flags take
+the server's `[verify]` defaults: `--criteria` (default: the session's current
+request), `--model` (a spec or `#nickname`; default: `[verify] model`, else the
+session's own model) and `--max-rounds` (default: the server's `[verify]
+max_rounds`, 3 unless configured; `0` = unbounded). `--off`
+turns it off, withdrawing a conclusion still with the verifier. The resulting
+state (`on`, `verifying`,
+`passed`, `not_verified`, `off`) goes to stdout. To read a session's
+verification and its history: `amplio client api
+/api/runs/<run-id>/sessions/<session>/verify`.
 
 ## amplio headless
 
@@ -166,6 +257,18 @@ instead. It stops the run's agents without changing their status, so a later
 `resume` picks the run up where it stopped. In the second or so before this
 `headless` process exits, nothing revives them: a notification that arrives
 then is stored, and the agent sees it when the run is resumed.
+
+`--verify` on `run`, or on `resume` with `--message`, has an independent
+verifier check the root agent's conclusion (to the task, or to the message)
+before the root concludes; `--verify-criteria`, `--verify-model` and
+`--verify-max-rounds` set the request and imply `--verify` (see [verified
+conclusions](runs.md#verified-conclusions)). The run is at rest only once the
+root really concludes, verified or not (a verifier that never answers can't
+hold it forever: three stops in a row without a verdict, or one that can't be
+started, conclude it not verified). The exit code keeps its meaning; the root's
+outcome is logged at info level before `run at rest`: `verification passed`,
+`not verified after N rejections`, or `not verified` with a `reason`. Verified
+sub-agents log theirs at debug level only.
 
 Once the run is at rest, the process writes the run report (a critic pass on
 the HQ model) before it exits. `--no-report`, on `run` or `resume`, skips it

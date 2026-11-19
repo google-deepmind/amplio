@@ -35,18 +35,23 @@ var systemPrompt string
 
 // completionSnippet ends the assembled prompt: how an autonomous agent concludes.
 const completionSnippet = "\n\n## Completion\n\n" +
-	"When the overarching task is completely finished, give your final summary in " +
-	"plain text with NO tool calls — the absence of tool calls signals completion. " +
-	"Be concise and direct about the final state. If you are then told that work you " +
-	"started is still running, decide whether to wait for it, stop it, or leave it; " +
-	"when you conclude after that, give your full final summary again, since your " +
-	"final message is your result."
+	"When the overarching task is completely finished, call `conclude` with your final " +
+	"result: a concise, self-contained account of the final state; it is what whoever " +
+	"asked receives. Call it on its own, once the results of your last actions are in. " +
+	"If it reports that background jobs or sub-agents you started are still running, " +
+	"decide whether to wait for them, stop them, or leave them, then call `conclude` again.\n\n" +
+	"If your conclusion is verified, `conclude` waits for the verifier's verdict: a pass " +
+	"delivers your result; a rejection comes back with the findings, to address before " +
+	"you conclude again with a new result. Anything else that arrives meanwhile ends " +
+	"the wait early: deal with it, then call `conclude()` without a result to keep " +
+	"waiting. A verdict that reaches you while you are not waiting arrives as a message " +
+	"saying where you stand."
 
 const AgentType = "standard_agent"
 
 func init() {
 	agent.Register(AgentType, factory, agent.Traits{})
-	agent.RegisterTools(AgentType, toolset.Defs)
+	agent.RegisterTools(AgentType, toolset.Lister(toolset.ConcludesWithResult))
 }
 
 func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
@@ -72,6 +77,7 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		Handle:      func() *session.Handle { return ag.Handle() },
 		SkillIndex:  env.SkillIndex,
 		LessonIndex: env.LessonIndex,
+		Conclusion:  toolset.ConcludesWithResult,
 	})
 	// Session-start seeding over whichever corpora exist (pinned skills plus
 	// the task-relevant ones). Gated on the same condition as the recall TOOLS
@@ -84,6 +90,8 @@ func factory(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
 		FirstMessage: cfg.FirstMessage,
 		ParentID:     cfg.ParentID,
 		Handle:       cfg.Handle,
+		VerifierFor:  cfg.VerifierFor,
+		Verify:       cfg.Verify,
 		AgentType:    AgentType,
 		SystemPrompt: systemPrompt +
 			eventloop.ExecutionPrinciplesPromptSnippet +

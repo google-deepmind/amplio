@@ -20,6 +20,7 @@ import (
 
 	"amplio/internal/agent"
 	"amplio/internal/db/sqlite"
+	"amplio/internal/event"
 	"amplio/internal/lessons"
 	"amplio/internal/session"
 	"amplio/internal/skills"
@@ -92,10 +93,49 @@ func TestBuild_RecallGating(t *testing.T) {
 	}
 }
 
-// Defs is what the API serves: every entry needs the three fields a viewer
-// renders, or the page shows blanks.
+// Only an autonomous agent type finishes with conclude; an interactive one
+// goes idle, so offering it the tool would end a conversation. A verifier's
+// conclude takes a verdict. The display lister agrees with what the factory
+// builds.
+func TestBuild_ConcludePerConclusion(t *testing.T) {
+	concludeParams := func(tools []*tool.Tool) string {
+		for _, tl := range tools {
+			if tl.Name == event.ConcludeTool {
+				return string(tl.Def().Schema)
+			}
+		}
+		return ""
+	}
+	if p := concludeParams(Build(Deps{Cwd: "/w"})); p != "" {
+		t.Error("an interactive agent type is offered conclude")
+	}
+	if p := concludeParams(Build(Deps{Cwd: "/w", Conclusion: ConcludesWithResult})); !strings.Contains(p, `"result"`) {
+		t.Errorf("an autonomous agent type's conclude = %s, want conclude(result)", p)
+	}
+	if p := concludeParams(Build(Deps{Cwd: "/w", Conclusion: ConcludesWithVerdict})); !strings.Contains(p, `"verdict"`) ||
+		strings.Contains(p, `"result"`) {
+		t.Errorf("a verifier's conclude = %s, want conclude(verdict, findings)", p)
+	}
+	tc := agent.ToolContext{Cwd: "/w"}
+	listed := func(c Conclusion) string {
+		for _, d := range Lister(c)(tc) {
+			if d.Name == event.ConcludeTool {
+				return string(d.Schema)
+			}
+		}
+		return ""
+	}
+	if listed(GoesIdle) != "" || !strings.Contains(listed(ConcludesWithResult), `"result"`) ||
+		!strings.Contains(listed(ConcludesWithVerdict), `"verdict"`) {
+		t.Errorf("listers: idle %q, result %q, verdict %q", listed(GoesIdle), listed(ConcludesWithResult),
+			listed(ConcludesWithVerdict))
+	}
+}
+
+// The lister is what the API serves: every entry needs the three fields a
+// viewer renders, or the page shows blanks.
 func TestDefs_Complete(t *testing.T) {
-	defs := Defs(agent.ToolContext{
+	defs := Lister(ConcludesWithResult)(agent.ToolContext{
 		RunID: "r1", SessionID: "s1", Cwd: "/work/repo", ArtifactDir: "/a",
 		SkillIndex: &skills.Index{},
 	})

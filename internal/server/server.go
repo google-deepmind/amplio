@@ -25,6 +25,7 @@ import (
 	"amplio/internal/eventstream"
 	"amplio/internal/lessons"
 	"amplio/internal/llm"
+	"amplio/internal/loop"
 	"amplio/internal/runtime"
 	"amplio/internal/skills"
 	"amplio/internal/sysstat"
@@ -93,6 +94,9 @@ type Server struct {
 	procCache procCache
 
 	pairs pairCodes // one-time "Open on phone" login codes (see pair.go)
+
+	loops        *loop.Scheduler // nil = loops unavailable (see SetLoops)
+	loopDefaults LoopDefaults
 }
 
 // SetSysStat installs the server-host status watcher behind GET /api/sysstat.
@@ -200,11 +204,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sysstat", s.handleSysStat)
 	mux.HandleFunc("GET /api/models", s.handleListModels)
 	mux.HandleFunc("GET /api/settings", s.handleSettings)
+	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/verify", s.handleGetVerify)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/chat", s.handleChat)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/tools", s.handleSessionTools)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/trajectory", s.handleTrajectory)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/events", s.handleEvents)
 	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/observations", s.handleObservations)
+	mux.HandleFunc("GET /api/runs/{id}/sessions/{sid}/loops", s.handleListLoops)
 	mux.HandleFunc("GET /api/runs/{id}/blobs/{key}", s.handleBlob)
 	mux.HandleFunc("GET /api/runs/{id}/processes", s.requireAuth(s.handleProcesses))
 	mux.HandleFunc("GET /api/runs/{id}/artifacts", s.handleArtifacts)
@@ -222,7 +228,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/models", s.requireAuth(s.handleAddModel))
 	mux.HandleFunc("DELETE /api/models", s.requireAuth(s.handleRemoveModel))
 	mux.HandleFunc("POST /api/runs/{id}/sessions/{sid}/message", s.requireAuth(s.handleSendMessage))
+	mux.HandleFunc("PUT /api/runs/{id}/sessions/{sid}/verify", s.requireAuth(s.handlePutVerify))
+	mux.HandleFunc("DELETE /api/runs/{id}/sessions/{sid}/verify", s.requireAuth(s.handleDeleteVerify))
 	mux.HandleFunc("POST /api/runs/{id}/sessions/{sid}/notify", s.requireAuth(s.handleNotify))
+	mux.HandleFunc("POST /api/runs/{id}/sessions/{sid}/loops", s.requireAuth(s.handleAddLoop))
+	mux.HandleFunc("PATCH /api/runs/{id}/sessions/{sid}/loops/{lid}", s.requireAuth(s.handleEditLoop))
+	mux.HandleFunc("DELETE /api/runs/{id}/sessions/{sid}/loops/{lid}", s.requireAuth(s.handleStopLoop))
 	mux.HandleFunc("POST /api/runs/{id}/chatbot", s.requireAuth(s.handleStartChatbot))
 	mux.HandleFunc("POST /api/runs/{id}/report", s.requireAuth(s.handleGenerateReport))
 	mux.HandleFunc("POST /api/runs/{id}/followup-suggest", s.requireAuth(s.handleSuggestFollowup))

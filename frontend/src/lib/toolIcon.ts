@@ -28,6 +28,7 @@ import ListBulletsIcon from 'phosphor-svelte/lib/ListBullets';
 import NotepadIcon from 'phosphor-svelte/lib/Notepad';
 import NotebookIcon from 'phosphor-svelte/lib/Notebook';
 import WrenchIcon from 'phosphor-svelte/lib/Wrench';
+import FlagCheckeredIcon from 'phosphor-svelte/lib/FlagCheckered';
 
 export type ToolIcon = Component<IconComponentProps>;
 
@@ -47,7 +48,8 @@ const TOOL_ICONS: Record<string, ToolIcon> = {
 	session_list: ListBulletsIcon,
 	session_summary: NotepadIcon,
 	session_search: MagnifyingGlassIcon,
-	view_run_report: NotebookIcon
+	view_run_report: NotebookIcon,
+	conclude: FlagCheckeredIcon
 };
 
 export const toolIcon = (name: string): ToolIcon => TOOL_ICONS[name] ?? WrenchIcon;

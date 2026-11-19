@@ -32,7 +32,7 @@
 	//      gradient (the fisheye pattern) is what makes it ambiguous which one
 	//      you are about to get.
 	import type { ChatBubble } from '$lib/types';
-	import { SparkleIcon, GraphIcon, ChatCircleIcon, BellIcon } from 'phosphor-svelte';
+	import { SparkleIcon, GraphIcon, ChatCircleIcon, BellIcon, SealCheckIcon } from 'phosphor-svelte';
 	import { viewport } from '$lib/viewport.svelte';
 	import { formatMinute } from '$lib/time';
 
@@ -50,7 +50,7 @@
 	} = $props();
 
 	type Row = {
-		kind: 'summary' | 'child_result' | 'agent' | 'environment';
+		kind: 'summary' | 'child_result' | 'agent' | 'environment' | 'verdict';
 		eid: string;
 		text: string;
 		who?: string;
@@ -126,11 +126,15 @@
 				const last = cur.rows.find((r) => r.kind === 'environment');
 				if (last) last.n = (last.n ?? 1) + 1;
 				else cur.rows.push({ kind: 'environment', eid: m.event_id, text: '', n: 1 });
-			} else if (m.kind === 'child_result' || m.kind === 'agent') {
+			} else if (m.kind === 'child_result' || m.kind === 'agent' || m.kind === 'verdict') {
 				cur.rows.push({
 					kind: m.kind,
 					eid: m.event_id,
-					text: m.content ?? '',
+					text: m.stale
+						? `stale: ${m.content ?? ''}`
+						: m.outcome?.earlier
+							? `on an earlier conclusion: ${m.content ?? ''}`
+							: (m.content ?? ''),
 					who: m.from,
 					verdict: m.verdict
 				});
@@ -380,7 +384,8 @@
 		if (!card) return { who: '', text: '' };
 		const said = card.rows.find((x) => x.big) ?? card.lastSaid;
 		if (said) return { who: 'Chatbot', text: plain(said.text) };
-		const child = card.rows.find((x) => x.kind === 'child_result' || x.kind === 'agent');
+		const child = card.rows.find((x) => x.kind === 'child_result' || x.kind === 'agent' || x.kind === 'verdict');
+		if (child?.kind === 'verdict') return { who: child.who ?? 'Verifier', text: `${child.verdict}: ${plain(child.text)}` };
 		if (child) return { who: child.who ?? 'Agent', text: plain(child.text) };
 		if (working && cardIdx === segments.length - 1) return { who: 'Chatbot', text: 'still working…' };
 		const t = card.tools;
@@ -636,6 +641,7 @@
 						{#if r.kind === 'summary'}<SparkleIcon size={12} />
 						{:else if r.kind === 'child_result'}<GraphIcon size={12} />
 						{:else if r.kind === 'agent'}<ChatCircleIcon size={12} />
+						{:else if r.kind === 'verdict'}<SealCheckIcon size={12} />
 						{:else}<BellIcon size={12} />{/if}
 					</span>
 					<span class="tx" style:-webkit-line-clamp={r.big ? quota.sum : 1}>
@@ -646,7 +652,7 @@
 							     weight. Spacing comes from the span's margin, not from template
 							     whitespace, which HTML collapses asymmetrically around inline
 							     elements (the source of the lopsided " ·" this replaces). -->
-							{#if r.who}<span class="who">{r.who}</span>{/if}{#if r.verdict && r.verdict !== 'concluded'}<span
+							{#if r.who}<span class="who">{r.who}</span>{/if}{#if r.verdict && r.verdict !== 'concluded' && r.verdict !== 'PASS'}<span
 									class="bad">{r.verdict}</span
 								>{/if}{firstLine(r.text, r.big ? 600 : 240)}
 						{/if}

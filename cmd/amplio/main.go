@@ -34,12 +34,14 @@ import (
 	"amplio/internal/observer"
 	"amplio/internal/runspec"
 	"amplio/internal/runtime"
+	"amplio/internal/verify"
 	"amplio/internal/version"
 	"amplio/internal/workspace/resolver"
 
 	// Register agent types.
 	_ "amplio/internal/agent/chatbot"
 	_ "amplio/internal/agent/standard"
+	_ "amplio/internal/agent/verifier"
 
 	"github.com/spf13/cobra"
 )
@@ -206,6 +208,36 @@ func exitCodeFor(err error) int {
 	return 1
 }
 
+// verifyFlags are --verify and the flags that refine it (headless run and
+// resume, client loop add and edit).
+type verifyFlags struct {
+	on        bool
+	criteria  string
+	model     string
+	maxRounds int
+}
+
+// register adds the flags; usage is --verify's.
+func (f *verifyFlags) register(cmd *cobra.Command, usage string) {
+	cmd.Flags().BoolVar(&f.on, "verify", false, usage)
+	cmd.Flags().StringVar(&f.criteria, "verify-criteria", "", "What the verifier checks against (implies --verify; default: the agent's current request)")
+	cmd.Flags().StringVar(&f.model, "verify-model", "", "The verifier's model (implies --verify; default: [verify] model, else the agent's own)")
+	cmd.Flags().IntVar(&f.maxRounds, "verify-max-rounds", 0, "Rejections before the agent concludes unverified (implies --verify; default: [verify] max_rounds; 0 = unbounded)")
+}
+
+// request is the verification asked for, or nil.
+func (f *verifyFlags) request(cmd *cobra.Command) *verify.Request {
+	changed := cmd.Flags().Changed
+	if !f.on && !changed("verify-criteria") && !changed("verify-model") && !changed("verify-max-rounds") {
+		return nil
+	}
+	r := &verify.Request{Criteria: f.criteria, Model: f.model}
+	if changed("verify-max-rounds") {
+		r.MaxRounds = &f.maxRounds
+	}
+	return r
+}
+
 // runCmd is `headless run`; noReport is the parent's --no-report.
 func runCmd(noReport *bool) *cobra.Command {
 	var (
@@ -213,6 +245,7 @@ func runCmd(noReport *bool) *cobra.Command {
 		workspace string
 		llmSpec   string
 		agentType string
+		vf        verifyFlags
 	)
 	cmd := &cobra.Command{
 		Use:   "run [task]",
@@ -229,17 +262,18 @@ func runCmd(noReport *bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return executeRun(cfg, task, workspace, llmSpec, agentType, *noReport)
+			return executeRun(cfg, task, workspace, llmSpec, agentType, vf.request(cmd), *noReport)
 		},
 	}
 	cmd.Flags().StringVar(&task, "task", "", "Task description (or pass as a positional arg)")
 	cmd.Flags().StringVar(&workspace, "workspace", "", "Working directory (default \".\")")
 	cmd.Flags().StringVar(&llmSpec, "llm", "", "Agent LLM spec (default: first entry of config [run] llms)")
 	cmd.Flags().StringVar(&agentType, "agent", "", "Agent type: standard_agent | chatbot (default standard_agent)")
+	vf.register(cmd, "Have an independent verifier check the root agent's conclusion before it concludes ([verify] defaults)")
 	return cmd
 }
 
-func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string, noReport bool) error {
+func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string, verifyReq *verify.Request, noReport bool) error {
 	if task == "" {
 		return fmt.Errorf("a task is required (positional arg or --task)")
 	}
@@ -289,11 +323,12 @@ func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string, n
 			AgentsMD:  agentsMD,
 		},
 		RootSessionID: config.RootAgentSessionID,
+		Verify:        verifyReq,
 	})
 	if err != nil {
 		return err
 	}
-	slog.Info("run started", "run_id", runID, "agent", agentType, "model", llmSpec)
+	slog.Info("run started", "run_id", runID, "agent", agentType, "model", llmSpec, "verify", verifyReq != nil)
 	waitForRun(ctx, mgr, runID)
 	// Deterministically produce the run report for this headless run: the observer
 	// may exit before processing the conclude. No-op if not autonomous / already
@@ -306,25 +341,33 @@ func executeRun(cfg config.Config, task, workspace, llmSpec, agentType string, n
 
 // resumeCmd is `headless resume`; noReport is the parent's --no-report.
 func resumeCmd(noReport *bool) *cobra.Command {
-	var message string
+	var (
+		message string
+		vf      verifyFlags
+	)
 	cmd := &cobra.Command{
 		Use:   "resume <run-id>",
 		Short: "Resume a previously interrupted run (headless)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			verifyReq := vf.request(cmd)
+			if verifyReq != nil && message == "" {
+				return fmt.Errorf("--verify goes with --message: it verifies the conclusion the message asks for")
+			}
 			cfg, err := resolveConfig(cmd)
 			if err != nil {
 				return err
 			}
-			return executeResume(cfg, args[0], message, *noReport)
+			return executeResume(cfg, args[0], message, verifyReq, *noReport)
 		},
 	}
 	cmd.Flags().StringVar(&message, "message", "",
 		"Give the root agent this message (as user input) and resume it, even if it had concluded")
+	vf.register(cmd, "Have an independent verifier check the root agent's conclusion to the --message before it concludes ([verify] defaults)")
 	return cmd
 }
 
-func executeResume(cfg config.Config, runID, message string, noReport bool) error {
+func executeResume(cfg config.Config, runID, message string, verifyReq *verify.Request, noReport bool) error {
 	dataDir := config.DataDir()
 
 	lock, err := lockDataDir(dataDir)
@@ -366,9 +409,29 @@ func executeResume(cfg config.Config, runID, message string, noReport bool) erro
 		if err != nil {
 			return fmt.Errorf("run %q has no %s to give the message to: %w", runID, config.RootAgentSessionID, err)
 		}
-		id, err := store.AppendEvent(ctx, runID, config.RootAgentSessionID, &event.UserEvent{Content: message})
-		if err != nil {
-			return fmt.Errorf("post resume message: %w", err)
+		// With a verification change, the message is written under its lock once
+		// the change is in place (verify.SetThen), so the root wakes to both.
+		var id string
+		var postErr error
+		sent := false
+		post := func() {
+			sent = true
+			id, postErr = store.AppendEvent(ctx, runID, config.RootAgentSessionID, &event.UserEvent{Content: message})
+		}
+		if verifyReq != nil {
+			e, err := verifyReq.Resolve(ctx, event.ByOperator, mgr.VerifyDefaults(), mgr.ResolveLLM)
+			if err != nil {
+				return err
+			}
+			if _, err := verify.SetThen(ctx, store, mgr.RunRegistry().GetOrCreate(runID), runID, config.RootAgentSessionID, e, post); err != nil {
+				return err
+			}
+		}
+		if !sent {
+			post()
+		}
+		if postErr != nil {
+			return fmt.Errorf("post resume message: %w", postErr)
 		}
 		posted = &postedMessage{eventID: id, before: *root}
 	}
@@ -379,7 +442,8 @@ func executeResume(cfg config.Config, runID, message string, noReport bool) erro
 	if revived == 0 && message == "" {
 		slog.Info("run is already at rest; nothing to resume", "run_id", runID)
 	} else {
-		slog.Info("run resumed", "run_id", runID, "sessions", revived, "with_message", message != "", "model", run.Config.LLM)
+		slog.Info("run resumed", "run_id", runID, "sessions", revived, "with_message", message != "",
+			"verify", verifyReq != nil, "model", run.Config.LLM)
 	}
 	waitForRun(ctx, mgr, runID) // returns at once if nothing was revived
 	if !noReport {
@@ -460,7 +524,7 @@ func buildManager(store db.Store, extra ...db.CommitListener) *runtime.RunManage
 	// There is one commit listener, and the wake path owns it — so anything else
 	// that wants commits is composed in here rather than replacing it. Extras run
 	// AFTER the notifier and must not block: this is the write path.
-	notifier := runtime.NewCommitNotifier(mgr.RunRegistry(), mgr.RespawnSession, mgr.SessionStatus)
+	notifier := runtime.NewCommitNotifier(mgr.RunRegistry(), mgr.RespawnSession, mgr.SessionStatus, mgr.AwaitsVerdict)
 	store.SetCommitListener(func(runID, sessionID string, evt event.Event) {
 		notifier(runID, sessionID, evt)
 		for _, fn := range extra {

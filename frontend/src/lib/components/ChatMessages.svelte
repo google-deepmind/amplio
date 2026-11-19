@@ -36,7 +36,9 @@
 	import Thoughts from './Thoughts.svelte';
 	import RefusalNotice from './Refusal.svelte';
 	import StopNoticeView from './StopNotice.svelte';
+	import VerdictBadge from './VerdictBadge.svelte';
 	import { renderMarkdown } from '$lib/markdown';
+	import { serverSettings } from '$lib/serverSettings.svelte';
 	import { formatTimestamp } from '$lib/time';
 	import {
 		CircleNotchIcon,
@@ -47,8 +49,12 @@
 		CheckCircleIcon,
 		WarningCircleIcon,
 		ProhibitIcon,
-		TranslateIcon
+		TranslateIcon,
+		RepeatIcon,
+		SealCheckIcon,
+		WarningIcon
 	} from 'phosphor-svelte';
+	import { splitTick, tickLabel } from '$lib/loopSchedule';
 	import { iconForName } from '$lib/sessionIcon';
 	import { toolIcon } from '$lib/toolIcon';
 
@@ -88,14 +94,14 @@
 		working?: boolean;
 	} = $props();
 
-	let now = $state(Date.now()); // ticks in-flight so pending gap timestamps update live
+	let now = $state(serverSettings.now()); // ticks in-flight so pending gap timestamps update live
 
 	// Tick `now` once a second while a turn is in flight (a tool may be running),
 	// so the pending gap timestamp appears as the wait gets long. A settled
 	// transcript (the log viewer) never starts the interval.
 	$effect(() => {
 		if (!working && !preview) return;
-		const t = setInterval(() => (now = Date.now()), 1000);
+		const t = setInterval(() => (now = serverSettings.now()), 1000);
 		return () => clearInterval(t);
 	});
 
@@ -171,6 +177,7 @@
 		result?: string;
 		isError: boolean;
 		attachments: AgentEvent['attachments'];
+		outcome?: AgentEvent['outcome'];
 	};
 	let toolDetail = $state<ToolDetail | null>(null);
 	let toolDetailLoading = $state(false);
@@ -217,7 +224,8 @@
 				args,
 				result: res?.event.content,
 				isError: res?.event.is_error ?? errored,
-				attachments: res?.event.attachments ?? []
+				attachments: res?.event.attachments ?? [],
+				outcome: res?.event.outcome
 			};
 		} catch (e) {
 			toolDetailErr = String(e);
@@ -348,7 +356,22 @@
 			{#if previewAt === 0}{@render previewBubble()}{/if}
 			{#each rows as row, i (row.m.event_id)}
 				{@const m = row.m}
-				{#if m.kind === 'operator'}
+				{#if m.kind === 'operator' && m.loop}
+					<!-- A loop's tick: the operator's prompt, re-sent on its schedule. The
+					     header names the loop and the tick; the server's prefix is dropped. -->
+					{@const tick = splitTick(m.content, m.loop.id, m.loop.n)}
+					<div class="row user" data-eid={m.event_id}>
+						<div class="bubble tick">
+							<span class="bubble-copy"><CopyButton text={tick?.prompt ?? m.content} /></span>
+							<div class="ihead small">
+								<RepeatIcon size={13} weight="bold" />{tickLabel(m.loop)}
+								{#if tick}<span class="dim">· {tick.summary}</span>{/if}
+							</div>
+							<span class="content">{tick?.prompt ?? m.content}</span>
+							<div class="time dim">{formatTimestamp(m.created_at)}</div>
+						</div>
+					</div>
+				{:else if m.kind === 'operator'}
 					<div class="row user" data-eid={m.event_id}>
 						<div class="bubble">
 							<span class="bubble-copy"><CopyButton text={m.content} /></span>
@@ -408,9 +431,35 @@
 								</span>
 							</div>
 							{#each m.notes ?? [] as n (n.label + n.text)}
-								<div class="dim small note">{n.label}: {n.text}</div>
+								{#if n.kind === 'verified'}
+									<div class="small note note-verified">
+										<SealCheckIcon size={14} weight="fill" /><span>Verified by {n.text}</span>
+									</div>
+								{:else if n.kind === 'not_verified'}
+									<div class="small note note-unverified">
+										<WarningIcon size={14} weight="fill" /><span><b>Not verified</b>: {n.text}</span>
+									</div>
+								{:else}
+									<div class="dim small note">{n.label}: {n.text}</div>
+								{/if}
 							{/each}
 							<div class="md">{@html renderMarkdown(m.content)}</div>
+							<div class="time dim">{formatTimestamp(m.created_at)}</div>
+						</div>
+					</div>
+				{:else if m.kind === 'verdict' && m.outcome}
+					<!-- What the session's verifier said, as the session was told: its
+					     verdict (or how it stopped) and findings. -->
+					<div class="row inbound" data-eid={m.event_id}>
+						<div class="bubble verdict-bubble verdict-{m.outcome.verdict.toLowerCase()}" class:earlier={m.outcome.earlier}>
+							<span class="bubble-copy"><CopyButton text={m.content} /></span>
+							<div class="ihead dim small">
+								<SealCheckIcon size={13} />
+								<span>verifier</span>
+								<a href={`/runs/${runId}/sessions/${m.from}`}>{m.from}</a>
+								<VerdictBadge outcome={m.outcome} stale={m.stale} />
+							</div>
+							{#if m.content}<div class="md">{@html renderMarkdown(m.content)}</div>{/if}
 							<div class="time dim">{formatTimestamp(m.created_at)}</div>
 						</div>
 					</div>
@@ -488,6 +537,7 @@
 					result={toolDetail.result}
 					isError={toolDetail.isError}
 					attachments={toolDetail.attachments ?? []}
+					outcome={toolDetail.outcome}
 					{runId}
 				/>
 			{/if}
@@ -640,6 +690,57 @@
 	.bubble.env {
 		background: color-mix(in srgb, var(--warn) 12%, transparent);
 		border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+	}
+	/* A loop's tick: still the operator's (right-aligned), dashed so it reads as
+	   sent by the schedule rather than typed. */
+	.user .bubble.tick {
+		border-style: dashed;
+	}
+	.bubble.tick .ihead {
+		color: var(--chat);
+		flex-wrap: wrap;
+	}
+	/* Verification notes on a sub-agent's result: the outcome first, readable. */
+	.note-verified,
+	.note-unverified {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.35rem;
+		margin: 0.15rem 0 0.3rem;
+		overflow-wrap: anywhere;
+	}
+	.note-verified :global(svg),
+	.note-unverified :global(svg) {
+		flex-shrink: 0;
+		margin-top: 0.15rem;
+	}
+	.note-verified {
+		color: var(--ok);
+	}
+	.note-unverified {
+		color: var(--warn);
+	}
+	.note-unverified span {
+		color: var(--text);
+	}
+	/* A verifier's verdict: tinted by it (a pass ok, a rejection warn, a stop err). */
+	.bubble.verdict-bubble {
+		background: color-mix(in srgb, var(--warn) 10%, transparent);
+		border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+	}
+	.bubble.verdict-bubble.verdict-pass {
+		background: color-mix(in srgb, var(--ok) 10%, transparent);
+		border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+	}
+	.bubble.verdict-bubble.verdict-crashed,
+	.bubble.verdict-bubble.verdict-cancelled {
+		background: color-mix(in srgb, var(--err) 10%, transparent);
+		border-color: color-mix(in srgb, var(--err) 40%, transparent);
+	}
+	/* A verdict on an earlier conclusion: information, not the pending one's. */
+	.bubble.verdict-bubble.earlier {
+		background: transparent;
+		border-style: dashed;
 	}
 	/* Sub-agent terminal result: same base as an agent bubble, tinted by verdict
 	   (concluded keeps the agent/accent tint; crashed/cancelled shift to error). */

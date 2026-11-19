@@ -23,9 +23,12 @@
 	// captured state. The edit_file diff is parsed from the RESULT (the authoritative
 	// outcome, which resolves anchors and knows the removed text), NOT the args.
 	import { formatToolArgs } from '$lib/toolargs';
+	import { renderMarkdown } from '$lib/markdown';
 	import { blobUrl } from '$lib/api';
 	import { toolIcon } from '$lib/toolIcon';
-	import type { Attachment } from '$lib/types';
+	import type { Attachment, VerifyOutcome } from '$lib/types';
+	import { typedVerdict } from '$lib/verifyText';
+	import VerdictBadge from './VerdictBadge.svelte';
 
 	let {
 		name,
@@ -36,7 +39,9 @@
 		// attempted args (there's no diff/output to show) and tint everything red.
 		isError = false,
 		attachments = [],
-		runId = ''
+		runId = '',
+		// outcome: what the verifier said, when a conclude call's result tells it.
+		outcome = undefined
 	}: {
 		name: string;
 		args?: string;
@@ -44,6 +49,7 @@
 		isError?: boolean;
 		attachments?: Attachment[];
 		runId?: string;
+		outcome?: VerifyOutcome;
 	} = $props();
 
 	const done = $derived(result !== undefined);
@@ -83,6 +89,17 @@
 
 	// --- bash specialization: command from args, output from result. ---
 	const bashCommand = $derived(name === 'bash' && parsed ? String(parsed.command ?? '') : '');
+
+	// --- conclude specialization: the result it gives is the session's result,
+	//     so it reads as a reply does (markdown); the call's own result says
+	//     what became of it. ---
+	// A verifier's conclude gives a verdict and findings instead. A call with
+	// both forms, or with no verdict the backend takes, shows its raw args.
+	const bothForms = $derived(!!parsed && 'result' in parsed && ('verdict' in parsed || 'findings' in parsed));
+	const concludeResult = $derived(
+		name === 'conclude' && parsed && !bothForms ? String(parsed.result ?? '') : ''
+	);
+	const concludeVerdict = $derived(name === 'conclude' ? typedVerdict(parsed) : null);
 </script>
 
 <div class="tc" class:running={!done} class:error={isError}>
@@ -113,6 +130,21 @@
 		<pre class="pre block cmd">{bashCommand}</pre>
 		{#if done && result}
 			<div class="result-label dim small">output</div>
+			<pre class="pre block result">{result}</pre>
+		{/if}
+	{:else if concludeResult || concludeVerdict}
+		<!-- conclude: the result (a verifier's verdict) as markdown, then what
+		     became of it, badged with the verifier's verdict when it tells one. -->
+		{#if concludeVerdict}
+			<div class="verdict-line"><VerdictBadge outcome={{ verifier: '', verdict: concludeVerdict.verdict }} /></div>
+			<div class="md">{@html renderMarkdown(concludeVerdict.findings)}</div>
+		{:else}
+			<div class="md">{@html renderMarkdown(concludeResult)}</div>
+		{/if}
+		{#if done && result}
+			<div class="result-label dim small">
+				outcome{#if outcome}<span class="outcome-badge"><VerdictBadge {outcome} /></span>{/if}
+			</div>
 			<pre class="pre block result">{result}</pre>
 		{/if}
 	{:else}
@@ -207,6 +239,15 @@
 	}
 	.result {
 		background: var(--bg-elev);
+	}
+	.verdict-line {
+		margin-bottom: 0.25rem;
+	}
+	.outcome-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		margin-left: 0.4rem;
 	}
 	.result-label {
 		margin-top: 0.4rem;

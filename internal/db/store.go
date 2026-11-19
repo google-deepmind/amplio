@@ -98,23 +98,33 @@ type Store interface {
 	UpdateSessionStatus(ctx context.Context, runID, sessionID, status string) error
 
 	// TerminateAndNotifyParent atomically transitions a session to a terminal
-	// status (concluded/crashed/cancelled), optionally writes selfEvent to the
-	// session's own stream (e.g. a cancel/error SystemEvent marker), and — if
-	// parentID is non-empty — appends a ChildResultEvent (verdict=status,
-	// content) to the parent's stream, all in one transaction.
-	//
-	// selfEventStep pins the step for selfEvent: a negative value uses the
-	// session's current step (the natural place for an async cancel marker); a
-	// non-negative value places it at that step (e.g. an agent records a turn's
-	// crash at the turn's call step, not the bumped current step).
+	// status (concluded/crashed/cancelled), writes the self events to the
+	// session's own stream (e.g. a cancel/error SystemEvent marker, or the
+	// result of the conclude call that ends it), and — if parentID is non-empty
+	// — appends a ChildResultEvent (verdict=status, content) to the parent's
+	// stream, all in one transaction. A verifier (metadata MetadataVerifierFor
+	// naming the parent) posts its outcome instead (event.VerifierOutcome):
+	// the parent's harness, not the parent itself, reads its result.
 	//
 	// The transition is conditional: if the session is ALREADY terminal the call
-	// is a no-op (no writes, no notify). Status is thus the dedupe token. The
-	// commit handler fires for the PARENT only — never for the terminating
-	// session itself, so it never self-wakes the session being stopped.
-	TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, selfEvent event.Event, selfEventStep int) error
+	// is a no-op (no writes, no notify) and reports false. Status is thus the
+	// dedupe token. The commit handler fires for the PARENT only — never for the
+	// terminating session itself, so it never self-wakes the session being
+	// stopped.
+	TerminateAndNotifyParent(ctx context.Context, runID, sessionID, parentID, status, content string, notes []event.ResultNote, self ...SelfEvent) (bool, error)
+
+	// SetStatusUnlessTerminal sets a live session's status (ongoing, awaiting)
+	// unless it went terminal meanwhile, as a cancel can while the session waits;
+	// it reports whether it did. UpdateSessionStatus is for a revival, which
+	// leaves a terminal status on purpose.
+	SetStatusUnlessTerminal(ctx context.Context, runID, sessionID, status string) (bool, error)
 
 	MergeSessionMetadata(ctx context.Context, runID, sessionID string, updates map[string]any) error
+
+	// ListSessionsWithMetadata returns every session, across all runs, whose
+	// metadata holds a non-null value under key (e.g. the loop scheduler finds
+	// sessions with active loops at startup).
+	ListSessionsWithMetadata(ctx context.Context, key string) ([]SessionRecord, error)
 
 	// --- Event operations ---
 
@@ -123,10 +133,31 @@ type Store interface {
 	// without re-reading the stream).
 	AppendEvent(ctx context.Context, runID, sessionID string, evt event.Event) (string, error)
 
+	// AppendEventWithMetadata is AppendEvent plus MergeSessionMetadata(updates)
+	// in one transaction, for state mirrored from the stream into metadata.
+	AppendEventWithMetadata(ctx context.Context, runID, sessionID string, evt event.Event, updates map[string]any) (string, error)
+
+	// AppendEventsIf writes evts, in order, at the session's current step and
+	// merges updates into its metadata, in one transaction (a loop's tick and
+	// the verification version it starts, which nothing may read apart), if ok
+	// accepts the session's lineage as that transaction reads it (the session,
+	// then each ancestor up to the root); otherwise it writes nothing and
+	// returns ok's error. ok runs under the store's write lock, so it must not
+	// call the store; a nil ok accepts. It is for a write that a concurrent
+	// change must be able to forbid: a loop's tick may not land once its
+	// session or an ancestor is cancelled, however close the cancel.
+	AppendEventsIf(ctx context.Context, runID, sessionID string, ok func(lineage []SessionRecord) error,
+		updates map[string]any, evts ...event.Event) error
+
 	// AppendEventAtStep writes an event at a specific step, regardless of
 	// current_step. Used by the event loop to write the AssistantEvent of a
 	// tool-calling step (before tools run); the results land via FinalizeStep.
 	AppendEventAtStep(ctx context.Context, runID, sessionID string, step int, evt event.Event) error
+
+	// AppendEvents writes events to a session's stream in one transaction, each
+	// at its own step (SelfEvent.Step; negative: the current step): a record
+	// with the answer it goes with, which belong to different steps.
+	AppendEvents(ctx context.Context, runID, sessionID string, evts ...SelfEvent) error
 
 	// FinalizeStep atomically appends the step's remaining events (tool results,
 	// or the lone assistant of a no-tool turn), bumps last_finalized_step to the
@@ -284,6 +315,17 @@ const runIDAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 // CreateRun retry guarding the astronomically-rare collision. Ordering is by
 // created_at, so the id needn't encode time.
 const runIDLen = 8
+
+// SelfEvent is an event for a session's own stream, written with others in
+// one transaction (TerminateAndNotifyParent, AppendEvents). Step pins its
+// step: a negative value uses the session's current step (the natural place
+// for an async cancel marker); a non-negative one places it there (e.g. a
+// turn's crash, or the result of the conclude call that ends the session, at
+// the turn's call step).
+type SelfEvent struct {
+	Event event.Event
+	Step  int
+}
 
 func NewRunID() string {
 	b := make([]byte, runIDLen)

@@ -33,6 +33,7 @@ import (
 	"amplio/internal/responserewrite"
 	"amplio/internal/runtime"
 	"amplio/internal/skills"
+	"amplio/internal/verify"
 )
 
 // system is the initialized, run-INDEPENDENT object graph shared by every mode
@@ -51,10 +52,14 @@ type system struct {
 	embedder    embed.Embedder
 	lessonIndex *lessons.Index
 	systemHQ    llm.Provider // shared HQ provider (finalizer/observer); reused by serve for the follow-up suggester
+	// summaries keeps verification summaries in session metadata; serve
+	// composes its status listener with the loop scheduler's.
+	summaries *verify.SummaryWriter
 	// cleanup tears down everything setupSystem started, in reverse order:
-	// drain the observer, reap bridge subprocesses, close the DB. The data-dir
-	// lock and signal context are owned by the caller (each mode's entrypoint),
-	// not here, so setupSystem stays a pure object-builder.
+	// drain the observer and the verification summaries, reap bridge
+	// subprocesses, close the DB. The data-dir lock and signal context are owned
+	// by the caller (each mode's entrypoint), not here, so setupSystem stays a
+	// pure object-builder.
 	cleanup func(ctx context.Context)
 }
 
@@ -116,9 +121,16 @@ func setupSystem(ctx context.Context, cfg config.Config, opts systemOpts) (*syst
 		slog.Info("response rewrite enabled", "model", cfg.ResponseRewrite.Model,
 			"for", cfg.ResponseRewrite.For)
 	}
+	// Each verified session's summary in its metadata (verify.Summary), kept
+	// from its stream off the write path: what the UI's icons and badges read.
+	summaries := verify.NewSummaryWriter(store)
+	extra = append(extra, summaries.Observe)
+	go summaries.Run(ctx)
 	mgr := buildManager(store, extra...)
 	mgr.SetSystemProviders(systemFast, systemHQ)
 	mgr.SetModelMenu(cfg.Run.LLMs)
+	mgr.SetVerifyDefaults(cfg.VerifyDefaults())
+	mgr.SetRequireConclude(cfg.Agent.RequireConclude)
 	bindCLITools(cfg)
 	if opts.broadcaster != nil {
 		mgr.SetBroadcaster(opts.broadcaster)
@@ -142,12 +154,21 @@ func setupSystem(ctx context.Context, cfg config.Config, opts systemOpts) (*syst
 		reportTrigger = func(c context.Context, runID string) { go safeFinalize(fin, c, runID) }
 	}
 	obs := startObserver(ctx, store, systemFast, systemHQ, reportTrigger)
+	// The store has one status listener, which the observer just installed:
+	// compose (serve composes it again, adding the loop scheduler).
+	store.SetSessionStatusChangedListener(func(runID, sessionID, status string) {
+		obs.OnSessionStatus(runID, sessionID, status)
+		summaries.OnSessionStatus(runID, sessionID, status)
+	})
 
 	// Title generator reuses the shared fast provider.
 	mgr.SetTitleGenerator(makeTitleGenerator(store, systemFast))
 
 	cleanup := func(ctx context.Context) {
-		obs.Stop(ctx)             // drain final summaries before exit
+		obs.Stop(ctx) // drain final summaries before exit
+		// The last verification summaries: past the signal that may have ended
+		// ctx, or the writes would fail before they start.
+		summaries.Drain(context.WithoutCancel(ctx))
 		bridgeprovider.Shutdown() // reap any bridge subprocesses
 		_ = store.Close()
 	}
@@ -162,6 +183,7 @@ func setupSystem(ctx context.Context, cfg config.Config, opts systemOpts) (*syst
 		embedder:    embedder,
 		lessonIndex: lessonIndex,
 		systemHQ:    systemHQ,
+		summaries:   summaries,
 		cleanup:     cleanup,
 	}, nil
 }

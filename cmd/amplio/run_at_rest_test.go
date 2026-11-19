@@ -103,7 +103,7 @@ func TestWaitForRun_InterruptWaitIsBounded(t *testing.T) {
 func TestExecuteResume_AtRestRunLogsRunAtRest(t *testing.T) {
 	cfg := restingRunConfig(t, stubHQ{})
 	logs := captureLogs(t, "json")
-	if err := executeResume(cfg, "r", "", false); err != nil {
+	if err := executeResume(cfg, "r", "", nil, false); err != nil {
 		t.Fatalf("executeResume: %v", err)
 	}
 	if n := countRunAtRest(t, logs.String(), "json", "r"); n != 1 {

@@ -315,7 +315,7 @@
 		}
 		/* A deep tree would push the trajectory a screen down: show the open
 		   session and let "All N sessions" expand the rest in place. */
-		.selector.collapsed :global(.sess:not(.selected)) {
+		.selector.collapsed :global(.sess-row:not(.selected)) {
 			display: none;
 		}
 		.selector.collapsed :global(.child) {

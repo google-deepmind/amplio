@@ -41,6 +41,10 @@ below). Other useful configs:
 | `[lessons] search` | `true` | let agents search lessons mined from past runs (below) |
 | `[bridge.<name>]` | — | a named LLM bridge endpoint ([models](models.md)) |
 | `[response_rewrite]` | off | plain-prose restatement of chat conclusions (below) |
+| `[verify] model` | the agent's own | the model verifiers run on, when a request names none ([verified conclusions](runs.md#verified-conclusions)) |
+| `[verify] max_rounds` | `3` | rejections before a verified agent concludes anyway, marked not verified; `0` = unbounded |
+| `[loop] expiry` | `7d` | how long a new [loop](runs.md#loops) runs when you don't say: a duration (`36h`, `14d`) or `never` |
+| `[agent] require_conclude` | `false` | only the `conclude` tool finishes an autonomous agent: a reply without tool calls gets a note asking for `conclude`, and the fifth such reply in a row, with no tool call between them, fails the session as crashed (the fourth note warns). Off, a reply finishes it ([sessions](runs.md#sessions-sub-agents-and-status)) |
 
 Spec syntax for LLM models is in [models](models.md). Example skills, such as one that coordinates
 many runs through a shared to-do list, are in `examples/skills`.

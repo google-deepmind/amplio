@@ -23,9 +23,15 @@
 	import { pageTitle } from '$lib/title';
 	import type { ChatBubble, ChatFeed, PhaseCard, ChatUsage, SessionDTO } from '$lib/types';
 	import MessageBox from '$lib/components/MessageBox.svelte';
+	import SessionStateBadges from '$lib/components/SessionStateBadges.svelte';
+	import { ComposerState } from '$lib/composer.svelte';
+	import { deliver, type MessageOptions } from '$lib/composerSend';
+	import { serverSettings } from '$lib/serverSettings.svelte';
 	import { auth } from '$lib/auth.svelte';
 	import ChatMessages from '$lib/components/ChatMessages.svelte';
 	import StatusBadge from '$lib/components/StatusBadge.svelte';
+	import SessionStateIcons from '$lib/components/SessionStateIcons.svelte';
+	import { subagentTree } from '$lib/subagentTree';
 	import ArtifactBrowser from '$lib/components/ArtifactBrowser.svelte';
 	import { goto } from '$app/navigation';
 	import { renderMarkdown } from '$lib/markdown';
@@ -45,46 +51,8 @@
 	const working = $derived(chatbotSession?.status === 'ongoing');
 	const unhealthy = $derived(chatbotSession?.status === 'crashed');
 	const step = $derived(chatbotSession?.current_step ?? 0);
-	const ACTIVE = new Set(['ongoing', 'awaiting']);
-	// The live subtree below this chatbot, not just its direct children: agents
-	// spawn agents that spawn agents, so a one-level list reports three sub-agents
-	// while a dozen are running.
-	// A node is kept if it is active itself OR leads to one. The second case is a
-	// crashed parent whose children were left running — conclude() cascade-cancels
-	// its children, recordFailure() deliberately does not — which is exactly the
-	// situation worth seeing, so those rows render normally and their own status
-	// pill says "crashed".
-	const liveTree = $derived.by(() => {
-		const kids = new Map<string, SessionDTO[]>();
-		for (const s of store.detail?.sessions ?? []) {
-			if (!s.parent_id) continue;
-			const list = kids.get(s.parent_id);
-			if (list) list.push(s);
-			else kids.set(s.parent_id, [s]);
-		}
-		const kept = new Map<string, SessionDTO[]>();
-		const seen = new Set<string>(); // a malformed parent cycle must not hang the UI
-		let live = 0;
-		let depth = 0;
-		const walk = (id: string, level: number): boolean => {
-			if (seen.has(id)) return false;
-			seen.add(id);
-			const out: SessionDTO[] = [];
-			for (const c of kids.get(id) ?? []) {
-				const leadsToLive = walk(c.session_id, level + 1);
-				const self = ACTIVE.has(c.status);
-				if (self) live++;
-				if (self || leadsToLive) {
-					out.push(c);
-					depth = Math.max(depth, level);
-				}
-			}
-			if (out.length) kept.set(id, out);
-			return out.length > 0;
-		};
-		if (chatbotSid) walk(chatbotSid, 1);
-		return { kept, live, depth };
-	});
+	// The sub-agents worth showing below this chatbot (see subagentTree).
+	const liveTree = $derived(subagentTree(store.detail?.sessions ?? [], chatbotSid));
 
 	// Indentation: levels 1-3 cost 12px each, deeper levels 4px, total capped at
 	// 64px. A normal two-or-three-level tree is indented exactly; a runaway nine
@@ -219,15 +187,21 @@
 		requestAnimationFrame(() => (el.scrollTop = el.scrollHeight));
 	}
 
+	// The message's options. The chatbot never concludes, so it's never offered
+	// verification.
+	const composerState = new ComposerState(() => !!chatbotSession && !chatbotSession.interactive);
+
 	// Wrap send with an optimistic echo; rollback + rethrow on failure so the
-	// MessageBox keeps the draft for retry.
-	async function sendMessage(content: string) {
+	// MessageBox keeps the draft for retry. A repeat has no echo: the loop's
+	// first tick is the message, labelled as a tick.
+	async function sendMessage(content: string, opts: MessageOptions) {
 		const opt = { key: crypto.randomUUID(), content, at: Date.now() };
-		optimistic = [...optimistic, opt];
+		if (!opts.loop) optimistic = [...optimistic, opt];
 		pinned = true; // sending jumps back to the bottom
 		maybeScroll();
 		try {
-			await api.sendMessage(store.runId, chatbotSid, content);
+			const sent = await deliver(api, store.runId, chatbotSid, content, opts, serverSettings.now());
+			if (sent.kind === 'loop') void store.refresh(); // its badge, at once
 			error = ''; // a successful send clears any stale transient-error banner
 		} catch (e) {
 			optimistic = optimistic.filter((o) => o.key !== opt.key);
@@ -325,7 +299,7 @@
 	const panelMode = $derived(sidePanelRoom.current);
 	// The aside renders when there's room AND something to show — either ambient
 	// content or the artifacts browser. Never shown just because it COULD be.
-	const asideVisible = $derived(panelMode && (liveTree.live > 0 || artifactsOpen));
+	const asideVisible = $derived(panelMode && (liveTree.rows || artifactsOpen));
 
 	// --- Draggable split between the conversation column and the aside ---
 	// The conversation column is a fixed 54rem by default (see .chat) and the
@@ -537,6 +511,7 @@
 		compacting = false;
 		error = '';
 		pinned = true;
+		composerState.reset();
 		if (!sid) return;
 		load(sid);
 		const off = store.on((ev) => {
@@ -603,9 +578,12 @@
 			if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
 			if (e.key.length !== 1 || e.key === ' ') return; // visible char only
 			const el = document.activeElement as HTMLElement | null;
-			if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
-				return; // already typing somewhere
+			if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) {
+				return; // already typing somewhere (a select types ahead)
 			}
+			// An option's form is open: a key there is the form's, even with the
+			// focus on <body> after a press on its label or padding.
+			if (composerState.open || el?.closest('[role="dialog"], dialog')) return;
 			composer?.focus();
 		};
 		window.addEventListener('keydown', onKey);
@@ -678,7 +656,8 @@
 		<!-- Sub-agent status, as snippets sharing one data source so the aside and
 		     its compact footer / the status bar never duplicate the rendering logic:
 		       - subagentsRows: one line per sub-agent (icon, name, task fade, status
-		         badge) — used in the aside where there's room, one row per line.
+		         badge, step, then its verification and loop icons) — used in the
+		         aside where there's room, one row per line.
 		       - subagentsCompact: a one-line count — used in the status bar
 		         (always: whether the aside is showing the full rows elsewhere, or
 		         there's no room for an aside at all) and in the aside's own footer
@@ -693,22 +672,27 @@
 		{#snippet subagentBranch(parentId: string, level: number)}
 			{#each liveTree.kept.get(parentId) ?? [] as s (s.session_id)}
 				{@const SubIcon = iconForName(s.session_id) ?? AndroidLogoIcon}
-				<a
-					class="sa-row"
-					href={`/runs/${store.runId}/sessions/${s.session_id}`}
-					title={level > 1 ? `spawned by ${parentId}` : undefined}
-				>
-					<SubIcon size={14} />
-					<span class="sa-name mono">{s.session_id}</span>
-					{#if s.task}<span class="sa-task dim small" title={s.task}>{s.task}</span>{/if}
-					<StatusBadge status={s.status} />
-					<!-- Step count: the icon form costs ~3 characters, which the row can
-					     afford where the word "step" could not. How far along a sub-agent
-					     is, is the second question after whether it is still running. -->
-					<span class="sa-step dim small" title="step {s.current_step}">
-						<PathIcon size={12} weight="bold" />{s.current_step}
-					</span>
-				</a>
+				<!-- The row is a link, so its verification and loop icons (links to the
+				     Inspector) sit beside it rather than inside, as in SessionTree. -->
+				<div class="sa-line">
+					<a
+						class="sa-row"
+						href={`/runs/${store.runId}/sessions/${s.session_id}`}
+						title={level > 1 ? `spawned by ${parentId}` : undefined}
+					>
+						<SubIcon size={14} />
+						<span class="sa-name mono">{s.session_id}</span>
+						{#if s.task}<span class="sa-task dim small" title={s.task}>{s.task}</span>{/if}
+						<StatusBadge status={s.status} />
+						<!-- Step count: the icon form costs ~3 characters, which the row can
+						     afford where the word "step" could not. How far along a sub-agent
+						     is, is the second question after whether it is still running. -->
+						<span class="sa-step dim small" title="step {s.current_step}">
+							<PathIcon size={12} weight="bold" />{s.current_step}
+						</span>
+					</a>
+					<SessionStateIcons runId={store.runId} session={s} />
+				</div>
 				{#if liveTree.kept.has(s.session_id)}
 					<div class="sa-kids" style="margin-left: {indentStep(level)}px">
 						{@render subagentBranch(s.session_id, level + 1)}
@@ -818,6 +802,8 @@
 					<span class="dot ok"></span>
 					<span class="dim small">chatbot online</span>
 				{/if}
+				<!-- Its loops (the chatbot never concludes, so it has no verification). -->
+				{#if chatbotSession}<SessionStateBadges runId={store.runId} session={chatbotSession} />{/if}
 			</div>
 			<div class="sb-rhs dim small">
 				<span>step {step}</span>
@@ -837,6 +823,7 @@
 			<MessageBox
 				bind:element={composer}
 				onSend={sendMessage}
+				composer={composerState}
 				draftKey={`amplio-chat-draft:${store.runId}:${chatbotSid}`}
 				placeholder="Message the chatbot"
 			/>
@@ -885,9 +872,15 @@
 					{@render artifactsToggle(false)}
 				</header>
 				<div class="sp-body">
-					{#if liveTree.live > 0}
+					{#if liveTree.rows}
 						<div class="sp-ambient-head dim small">
-							Sub-agents ({liveTree.live}{liveTree.depth > 1 ? ` \u00b7 ${liveTree.depth} levels` : ''})
+							Sub-agents ({[
+								liveTree.live ? `${liveTree.live}` : '',
+								liveTree.looping ? `${liveTree.looping} looping` : '',
+								liveTree.depth > 1 ? `${liveTree.depth} levels` : ''
+							]
+								.filter(Boolean)
+								.join(' \u00b7 ')})
 						</div>
 						<div class="sp-ambient-list">
 						{@render subagentsRows()}
@@ -1091,7 +1084,15 @@
 	   badge), mirroring SessionTree's row layout so a session reads identically
 	   in both places. Task truncates via mask-fade (not clipped text), so
 	   hovering the row still surfaces the full string via title=. */
+	/* The row and, at its end, the session's state icons. */
+	.sa-line {
+		display: flex;
+		align-items: center;
+		gap: 0.1rem;
+	}
 	.sa-row {
+		flex: 1 1 auto;
+		min-width: 0;
 		/* A container so the step can drop out when the panel is narrow. The panel
 		   is flex: 1 1 0 — its width is whatever is left over, not a breakpoint — so
 		   a viewport media query would only be a guess at this row's width. */
@@ -1363,7 +1364,12 @@
 			flex-wrap: nowrap;
 			overflow: hidden;
 		}
-		.sb-lhs > span:last-child,
+		/* The session's state wins the room: step and tokens are on the full
+		   stream, which stays. */
+		.sb-rhs > :not(a) {
+			display: none;
+		}
+		.sb-lhs > span:last-of-type,
 		.sa-compact > span:last-child {
 			min-width: 0;
 			overflow: hidden;

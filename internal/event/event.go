@@ -144,13 +144,36 @@ type UserEvent struct {
 	// CheckOutputLimit). The model sees it as any user message; the loop finds it
 	// by Check rather than by its text, and UIs show it as the harness's.
 	Check string `json:"check,omitempty"`
+	// Loop is set on a loop's tick: the operator's prompt, re-sent on the
+	// loop's schedule (see LoopEvent). Still operator input, not the harness's.
+	Loop *LoopTick `json:"loop,omitempty"`
+	// Outcome is set on a verify message that tells the agent what its
+	// verifier said (Check is CheckVerify).
+	Outcome *VerifyOutcome `json:"outcome,omitempty"`
 }
 
-// Conclusion checks that write a UserEvent (see UserEvent.Check).
+// LoopTick identifies a tick: which loop sent it, and its number (1 = first).
+type LoopTick struct {
+	ID string `json:"id"`
+	N  int    `json:"n"`
+	// Version is the verification version the tick started, for a loop that
+	// verifies each tick (LoopEvent.Verify); 0 otherwise.
+	Version int `json:"version,omitempty"`
+}
+
+// Conclusion checks that write a UserEvent, or answer a conclude call (see
+// UserEvent.Check, ToolResultEvent.Check).
 const (
 	CheckLeftovers   = "leftovers"    // the end-of-run reminder: work still running
 	CheckEmptyTurn   = "empty_turn"   // a final turn with no text
 	CheckOutputLimit = "output_limit" // a final turn cut off by the output-token limit
+	CheckVerify      = "verify"       // verification: a candidate given to a verifier, its outcome
+	CheckConclude    = "conclude"     // a reply without tool calls while a conclusion awaits its verdict
+	CheckReply       = "reply"        // a reply without tool calls, which doesn't conclude ([agent] require_conclude)
+	// CheckWithdrawn tells a verifier that the candidate it has was withdrawn
+	// (its version superseded, or verification turned off): it stands by for
+	// the next one.
+	CheckWithdrawn = "withdrawn"
 )
 
 // IsHarness reports whether the harness wrote this message. Events written
@@ -197,13 +220,18 @@ func (e *AssistantEvent) ToText() string {
 	if e.Content != "" {
 		body.WriteString(e.Content)
 	}
+	conclusion, concludes := e.ConcludeCall()
 	for _, tc := range e.ToolCalls {
 		if body.Len() > 0 {
 			body.WriteByte('\n')
 		}
 		// A lighter rule so a nested call reads as part of the assistant block,
 		// not a new top-level section.
-		fmt.Fprintf(&body, "---- tool_call · name=%s · id=%s ----\n%s", tc.Name, tc.ID, tc.Arguments)
+		args := tc.Arguments
+		if r := ConcludeResult(args); concludes && tc.ID == conclusion.ID && r != "" {
+			args = r // the result as written, not JSON-escaped
+		}
+		fmt.Fprintf(&body, "---- tool_call · name=%s · id=%s ----\n%s", tc.Name, tc.ID, args)
 	}
 	// Surface a refusal so a refused turn doesn't read as a silent empty reply.
 	if r := e.Refusal; r != nil {
@@ -230,6 +258,62 @@ func IsNoToolAssistant(e Event) bool {
 	return ok && len(a.ToolCalls) == 0
 }
 
+// ConcludeTool is the tool an autonomous agent finishes with. Its "result"
+// argument is the session's result; called without one, it waits for the
+// verdict on the result it gave before. A verifier's conclude takes a verdict
+// and findings instead.
+const ConcludeTool = "conclude"
+
+// ConcludeArgs are the conclude tool's arguments, in either form: a result, or
+// a verifier's verdict (VerdictPass or VerdictFail) and findings.
+type ConcludeArgs struct {
+	Result   string `json:"result,omitempty"`
+	Verdict  string `json:"verdict,omitempty"`
+	Findings string `json:"findings,omitempty"`
+}
+
+// ConcludeResult reads the result from a conclude call's arguments; a
+// verifier's verdict reads as its result text (FormatVerdict). "" when they
+// give none (or don't parse). A call that gives both forms is refused, so it
+// never concludes whichever this shows.
+func ConcludeResult(args string) string {
+	var a ConcludeArgs
+	if json.Unmarshal([]byte(args), &a) != nil {
+		return ""
+	}
+	if pass, findings, ok := VerdictArgs(args); ok && a.Result == "" {
+		return FormatVerdict(pass, findings)
+	}
+	return a.Result
+}
+
+// ConcludeCall returns the turn's conclude call if that is its only call. A
+// conclude call made alongside others fails on its own (the tool is
+// exclusive): it is no attempt to conclude.
+func (e *AssistantEvent) ConcludeCall() (ToolCall, bool) {
+	if len(e.ToolCalls) == 1 && e.ToolCalls[0].Name == ConcludeTool {
+		return e.ToolCalls[0], true
+	}
+	return ToolCall{}, false
+}
+
+// Offered returns the result this turn offers as the session's result: the
+// text of a turn without tool calls (the way an agent without the conclude
+// tool, or one that replies instead of calling it, concludes), or the result
+// a conclude call gives. ok is false for a working turn and for a conclude
+// call without a result.
+func (e *AssistantEvent) Offered() (result string, ok bool) {
+	if len(e.ToolCalls) == 0 {
+		return e.Content, true
+	}
+	if tc, found := e.ConcludeCall(); found {
+		if r := ConcludeResult(tc.Arguments); strings.TrimSpace(r) != "" {
+			return r, true
+		}
+	}
+	return "", false
+}
+
 type ToolResultEvent struct {
 	ColumnFields
 	Content     string       `json:"content"`
@@ -241,6 +325,13 @@ type ToolResultEvent struct {
 	// pre-field rows, so this is a backward-compatible additive change (absent key
 	// → false → "not an error", the correct default for historical events).
 	IsError bool `json:"is_error,omitempty"`
+	// Check names the conclusion check that answered a conclude call instead
+	// of letting it conclude (CheckLeftovers, CheckVerify), as UserEvent.Check
+	// does for a reply without tool calls.
+	Check string `json:"check,omitempty"`
+	// Outcome is set on a conclude call's result that tells the agent what its
+	// verifier said.
+	Outcome *VerifyOutcome `json:"outcome,omitempty"`
 }
 
 func (*ToolResultEvent) eventTag()         {}
@@ -338,7 +429,9 @@ type ResultNote struct {
 
 // Kinds of ResultNote.
 const (
-	NoteLeftover = "leftover" // what the child left running when it concluded
+	NoteLeftover    = "leftover"     // what the child left running when it concluded
+	NoteVerified    = "verified"     // a verifier passed its conclusion
+	NoteNotVerified = "not_verified" // its verification ran out of rounds
 )
 
 // NoteLabel is how a note kind reads in a header or a UI.
@@ -346,6 +439,10 @@ func NoteLabel(kind string) string {
 	switch kind {
 	case NoteLeftover:
 		return "left running"
+	case NoteVerified:
+		return "verified by"
+	case NoteNotVerified:
+		return "not verified"
 	default:
 		return kind
 	}
@@ -414,6 +511,256 @@ func (e *UnknownEvent) ToText() string { return banner("unknown", []string{"type
 func IsUnknown(e Event) bool {
 	_, ok := e.(*UnknownEvent)
 	return ok
+}
+
+// Who changed a verification or a loop (VerifyEvent.By, LoopEvent.By), besides
+// a parent, named by its session id, and a loop (ByLoop).
+const (
+	ByOperator = "operator"
+	ByHarness  = "harness"
+)
+
+// ByLoop is VerifyEvent.By for a version a loop's tick started: "loop 3", on
+// the operator's behalf. A session id has no spaces, so it can't be one.
+func ByLoop(id string) string { return "loop " + id }
+
+// LoopOf returns the loop a VerifyEvent.By names (see ByLoop), or "".
+func LoopOf(by string) string {
+	id, ok := strings.CutPrefix(by, "loop ")
+	if !ok {
+		return ""
+	}
+	return id
+}
+
+// VerifyEvent records a change to a session's verification: a standing request
+// that its next conclusion pass an independent verifier first (see
+// internal/verify). The stream of these is the verification's state and
+// history.
+type VerifyEvent struct {
+	ColumnFields
+	Action string `json:"action"` // a Verify* action
+	// Set by set and replace: what the verifier checks against ("" = the
+	// agent's current request), its model ("" = the agent's own), and how many
+	// rejections end it (0 = unbounded).
+	Criteria  string `json:"criteria,omitempty"`
+	Model     string `json:"model,omitempty"`
+	MaxRounds int    `json:"max_rounds,omitempty"`
+	// By is who made the change: ByOperator, the parent's session id, or
+	// ByHarness.
+	By string `json:"by,omitempty"`
+	// Verifier and Round are set by the harness's own actions: the verifier
+	// session, and the round (1 + the rejections before it).
+	Verifier string `json:"verifier,omitempty"`
+	Round    int    `json:"round,omitempty"`
+	// Reason is set by exhausted: why verification ended unverified (the
+	// not_verified note's text), since it isn't always the rounds; and by
+	// withdrawn and stale: which candidate, and why.
+	Reason string `json:"reason,omitempty"`
+	// Candidate is set by verifying: the conclusion given to the verifier, the
+	// one a pass delivers.
+	Candidate string `json:"candidate,omitempty"`
+	// Outcome is set by verdict: what the verifier said, or how it stopped;
+	// and by stale: the verdict that doesn't count.
+	Outcome *VerifyOutcome `json:"outcome,omitempty"`
+}
+
+// VerifyEvent actions. Set, replace and clear are the operator's or parent's;
+// the rest are the harness's. Every set or replace starts a new version of the
+// verification (v1, v2, …), counted from the stream.
+const (
+	VerifySet       = "set"       // verification turned on: a new version
+	VerifyReplace   = "replace"   // a new request while it was on: a new version, which supersedes the old one
+	VerifyClear     = "clear"     // turned off before a verdict
+	VerifyVerifying = "verifying" // a candidate conclusion given to the verifier
+	VerifyRejected  = "rejected"  // the verifier rejected the latest candidate: one round
+	VerifyPassed    = "passed"    // the verifier passed it; recorded with the conclusion
+	VerifyExhausted = "exhausted" // the rounds ran out; recorded with the conclusion
+	// The verifier finished (Outcome): its own terminal transition posts this
+	// to the agent instead of a child_result, so its verdict reaches the agent
+	// only as the harness tells it.
+	VerifyVerdict = "verdict"
+	// A newer version or a clear withdrew the candidate the verifier had; it
+	// is never delivered. Written right after the change (Round: the round it
+	// was in; Reason: which candidate, and why). Unlike the other records it
+	// wakes a live agent, ending a conclude call that waits for that candidate.
+	VerifyWithdrawn = "withdrawn"
+	// A verifier's verdict that doesn't count (Outcome: whose, and which): on
+	// a candidate a newer version or a clear withdrew before the harness acted
+	// on it (Reason: which candidate, and what withdrew it). It changes nothing.
+	VerifyStale = "stale"
+)
+
+// verifyActions are the VerifyEvent actions this binary knows. A stored
+// VerifyEvent with another (a newer binary's) reads as an UnknownEvent
+// placeholder: misread as a known one, it would change the state derived from
+// the stream.
+var verifyActions = map[string]bool{VerifySet: true, VerifyReplace: true, VerifyClear: true, VerifyVerifying: true,
+	VerifyRejected: true, VerifyPassed: true, VerifyExhausted: true, VerifyVerdict: true, VerifyWithdrawn: true,
+	VerifyStale: true}
+
+func (*VerifyEvent) eventTag()         {}
+func (*VerifyEvent) EventType() string { return "verify" }
+
+func (e *VerifyEvent) ToText() string {
+	attrs := []string{"action=" + e.Action}
+	if e.By != "" {
+		attrs = append(attrs, "by="+e.By)
+	}
+	if e.Verifier != "" {
+		attrs = append(attrs, "verifier="+e.Verifier)
+	}
+	if e.Round > 0 {
+		attrs = append(attrs, fmt.Sprintf("round=%d", e.Round))
+	}
+	var body []string
+	if e.Action == VerifySet || e.Action == VerifyReplace {
+		criteria := e.Criteria
+		if criteria == "" {
+			criteria = "(the agent's current request)"
+		}
+		model := e.Model
+		if model == "" {
+			model = "(the agent's own)"
+		}
+		rounds := "unbounded"
+		if e.MaxRounds > 0 {
+			rounds = fmt.Sprint(e.MaxRounds)
+		}
+		body = append(body, "criteria: "+criteria, "model: "+model, "max rounds: "+rounds)
+	}
+	if o := e.Outcome; o != nil {
+		attrs = append(attrs, "verdict="+o.Verdict)
+		if o.Findings != "" {
+			body = append(body, o.Findings)
+		}
+	}
+	if e.Reason != "" {
+		body = append(body, "reason: "+e.Reason)
+	}
+	return banner("verify", attrs, strings.Join(body, "\n"))
+}
+
+// LoopEvent records a change to one of a session's loops: a prompt the
+// operator asked to have re-sent on a schedule (internal/loop). It wakes
+// nothing (db.IsRecordOnly), and the agent isn't shown it: its ticks,
+// UserEvents with Loop set, wake the agent and name their loop.
+type LoopEvent struct {
+	ColumnFields
+	Action string `json:"action"` // LoopSet, LoopEdit, LoopStop or LoopEnded
+	ID     string `json:"id"`
+	// Prompt and Schedule are the loop's after a set or an edit, and Summary
+	// the schedule in words, as its ticks' labels give it.
+	Prompt   string    `json:"prompt,omitempty"`
+	Schedule *Schedule `json:"schedule,omitempty"`
+	Summary  string    `json:"summary,omitempty"`
+	// Verify is the loop's verification request after a set or an edit (nil:
+	// its ticks aren't verified); VerifyStopped marks the edit that stopped it.
+	Verify        *LoopVerify `json:"verify,omitempty"`
+	VerifyStopped bool        `json:"verify_stopped,omitempty"`
+	By            string      `json:"by,omitempty"`     // ByOperator or ByHarness
+	Reason        string      `json:"reason,omitempty"` // why it ended
+}
+
+// LoopVerify is a loop's verification request, its defaults filled in when
+// the loop was set: each tick is a new task, so each starts a new version of
+// the session's verification with it, just before the tick's message.
+type LoopVerify struct {
+	Criteria  string `json:"criteria,omitempty"` // "" = the agent's current request: the tick
+	Model     string `json:"model,omitempty"`    // a resolved spec; "" = the agent's own
+	MaxRounds int    `json:"max_rounds"`         // 0 = unbounded
+}
+
+// maxCriteriaRunes caps the criteria LoopVerify.String shows.
+const maxCriteriaRunes = 200
+
+// Event is the set (verify.Set makes it a replace if verification is on) by
+// which loop id starts a tick's version.
+func (v LoopVerify) Event(id string) *VerifyEvent {
+	return &VerifyEvent{Action: VerifySet, Criteria: v.Criteria, Model: v.Model, MaxRounds: v.MaxRounds, By: ByLoop(id)}
+}
+
+// String is the request on one line: "criteria: …; model: …; up to 3
+// rounds", long criteria cut short.
+func (v LoopVerify) String() string {
+	var parts []string
+	if c := strings.Join(strings.Fields(v.Criteria), " "); c != "" {
+		if r := []rune(c); len(r) > maxCriteriaRunes {
+			c = string(r[:maxCriteriaRunes-1]) + "…"
+		}
+		parts = append(parts, "criteria: "+c)
+	}
+	if v.Model != "" {
+		parts = append(parts, "model: "+v.Model)
+	}
+	switch v.MaxRounds {
+	case 0:
+		parts = append(parts, "unbounded rounds")
+	case 1:
+		parts = append(parts, "up to 1 round")
+	default:
+		parts = append(parts, fmt.Sprintf("up to %d rounds", v.MaxRounds))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// LoopEvent actions.
+const (
+	LoopSet   = "set"
+	LoopEdit  = "edit"
+	LoopStop  = "stop"
+	LoopEnded = "ended"
+)
+
+// loopActions are the LoopEvent actions this binary knows; a stored LoopEvent
+// with another (a newer binary's) reads as an UnknownEvent placeholder, as an
+// unknown VerifyEvent action does.
+var loopActions = map[string]bool{LoopSet: true, LoopEdit: true, LoopStop: true, LoopEnded: true}
+
+// Schedule says when a loop ticks. Kind names its evaluator; the one kind is
+// ScheduleRRule, whose Spec is an iCalendar recurrence: a DTSTART line, then
+// RRULE, RDATE and EXDATE lines.
+type Schedule struct {
+	Kind string `json:"kind"`
+	Spec string `json:"spec"`
+}
+
+// ScheduleRRule is the iCalendar-recurrence Schedule kind.
+const ScheduleRRule = "rrule"
+
+func (*LoopEvent) eventTag()         {}
+func (*LoopEvent) EventType() string { return "loop" }
+
+func (e *LoopEvent) ToText() string {
+	attrs := []string{"id=" + e.ID, "action=" + e.Action}
+	if e.By != "" {
+		attrs = append(attrs, "by="+e.By)
+	}
+	return banner("loop", attrs, e.Body())
+}
+
+// Body is the event's content without a header: the schedule in words (its
+// spec on one line, in an event written before Summary), the verification
+// each tick starts, and why it ended. It leaves out the prompt: agents read
+// this through the inspection tools, and would take it for a request.
+func (e *LoopEvent) Body() string {
+	var body []string
+	switch {
+	case e.Summary != "":
+		body = append(body, "schedule: "+e.Summary)
+	case e.Schedule != nil:
+		body = append(body, "schedule: "+strings.Join(strings.Fields(e.Schedule.Spec), " "))
+	}
+	switch {
+	case e.Verify != nil:
+		body = append(body, "verify each tick: "+e.Verify.String())
+	case e.VerifyStopped:
+		body = append(body, "verify each tick: stopped")
+	}
+	if e.Reason != "" {
+		body = append(body, e.Reason)
+	}
+	return strings.Join(body, "\n")
 }
 
 // --- Serialization ---
@@ -495,6 +842,24 @@ func Unmarshal(data []byte) (Event, error) {
 		var e RecoverEvent
 		if err := json.Unmarshal(data, &e); err != nil {
 			return nil, err
+		}
+		return &e, nil
+	case "verify":
+		var e VerifyEvent
+		if err := json.Unmarshal(data, &e); err != nil {
+			return nil, err
+		}
+		if !verifyActions[e.Action] {
+			return &UnknownEvent{Type: probe.Type, Raw: append(json.RawMessage(nil), data...)}, nil
+		}
+		return &e, nil
+	case "loop":
+		var e LoopEvent
+		if err := json.Unmarshal(data, &e); err != nil {
+			return nil, err
+		}
+		if !loopActions[e.Action] {
+			return &UnknownEvent{Type: probe.Type, Raw: append(json.RawMessage(nil), data...)}, nil
 		}
 		return &e, nil
 	case "":

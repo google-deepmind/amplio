@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS Event (
     FOREIGN KEY (run_id, session_id) REFERENCES Session(run_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_event_step ON Event(run_id, session_id, step, created_at);
+-- A session's events of some types (EventFilter.Types), without reading the
+-- rest: a session's few verification records, say, among thousands of turns
+-- and tool results. On the type in the JSON, so the table is unchanged and an
+-- older binary's writes keep it current. Every data is JSON (event.Marshal):
+-- data that isn't would fail its insert here, as a bug should.
+CREATE INDEX IF NOT EXISTS idx_event_type ON Event(run_id, session_id, json_extract(data, '$.type'));
 
 CREATE VIRTUAL TABLE IF NOT EXISTS EventFTS USING fts5(
     data,

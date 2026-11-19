@@ -23,6 +23,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"amplio/internal/util"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -54,10 +57,15 @@ type Config struct {
 	LendLLMTokenEnv string        `toml:"lend_llm_token_env"`
 	Skills          SkillsConfig  `toml:"skills"`  // skill corpus sources
 	Lessons         LessonsConfig `toml:"lessons"` // lesson corpus policy
+	Verify          VerifyConfig  `toml:"verify"`  // defaults for verified conclusions
 	// ResponseRewrite optionally restates a chatbot's conclusion messages in
 	// plainer prose, shown alongside the original in the UI. Opt-in per model:
 	// an empty For list (or an absent block) disables it entirely.
 	ResponseRewrite ResponseRewrite `toml:"response_rewrite"`
+	// Loop holds the defaults the loop form fills in (see LoopConfig).
+	Loop LoopConfig `toml:"loop"`
+	// Agent holds settings for how agents behave (see AgentConfig).
+	Agent AgentConfig `toml:"agent"`
 	// AmplioBinPaths are directories prepended to $PATH at startup so amplio's
 	// shipped 1p CLI tools (e.g. web_search) resolve by bare name for both our
 	// probes and the agent's bash subprocesses. Omitted → the built-in default;
@@ -113,6 +121,41 @@ type SkillsConfig struct {
 	Pinned []string `toml:"pinned"`
 }
 
+// LoopConfig is the [loop] section.
+type LoopConfig struct {
+	// Expiry is how long a new loop runs when its form doesn't say: a duration
+	// such as "7d" or "36h", or "never". Omitted → DefaultLoopExpiry. The
+	// server only reports it (GET /api/settings); clients fill it into the rule
+	// they send, so what the form shows is what is stored.
+	Expiry string `toml:"expiry"`
+}
+
+// DefaultLoopExpiry is [loop] expiry when omitted.
+const DefaultLoopExpiry = "7d"
+
+// LoopExpiryNever is the [loop] expiry value for loops that don't end by default.
+const LoopExpiryNever = "never"
+
+// LoopExpiry returns [loop] expiry: how long a new loop runs by default, or
+// never = true.
+func (c Config) LoopExpiry() (d time.Duration, never bool, err error) {
+	raw := strings.TrimSpace(c.Loop.Expiry)
+	switch raw {
+	case "":
+		raw = DefaultLoopExpiry
+	case LoopExpiryNever:
+		return 0, true, nil
+	}
+	d, err = util.ParseDuration(raw)
+	if err == nil && d <= 0 {
+		err = fmt.Errorf("must be positive")
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("[loop] expiry = %q: %w (or %q)", c.Loop.Expiry, err, LoopExpiryNever)
+	}
+	return d, false, nil
+}
+
 // DefaultSkillsInitial is how many relevance-ranked skills are listed at
 // session start when [skills].initial is omitted.
 const DefaultSkillsInitial = 5
@@ -140,6 +183,44 @@ type LessonsConfig struct {
 	// A pointer so an absent key is distinguishable from an explicit false: a
 	// plain bool would make every zero-valued Config silently mean "off".
 	Search *bool `toml:"search"`
+}
+
+// AgentConfig is the [agent] section.
+type AgentConfig struct {
+	// RequireConclude makes the conclude tool the only way an autonomous agent
+	// finishes. Off (the default), a reply without tool calls is an attempt to
+	// conclude with its text. On, such a reply gets a note asking for conclude,
+	// and the fifth in a row with no tool call between them fails the session.
+	RequireConclude bool `toml:"require_conclude"`
+}
+
+// VerifyConfig is the [verify] section: the defaults a request to verify an
+// agent's conclusion falls back to (see internal/verify).
+type VerifyConfig struct {
+	// Model runs the verifier. Empty: the verified agent's own model.
+	Model string `toml:"model"`
+	// MaxRounds is how many rejections end a verification (the agent then
+	// concludes, marked not verified). Omitted (nil) → DefaultVerifyMaxRounds;
+	// 0 = unbounded. A pointer so an absent key is distinguishable from 0.
+	MaxRounds *int `toml:"max_rounds"`
+}
+
+// DefaultVerifyMaxRounds is [verify].max_rounds when omitted.
+const DefaultVerifyMaxRounds = 3
+
+// VerifyDefaults are the resolved [verify] defaults.
+type VerifyDefaults struct {
+	Model     string // "" = the verified agent's own model
+	MaxRounds int    // 0 = unbounded
+}
+
+// VerifyDefaults resolves the [verify] section.
+func (c Config) VerifyDefaults() VerifyDefaults {
+	d := VerifyDefaults{Model: c.Verify.Model, MaxRounds: DefaultVerifyMaxRounds}
+	if c.Verify.MaxRounds != nil {
+		d.MaxRounds = *c.Verify.MaxRounds
+	}
+	return d
 }
 
 // DefaultSkillsDir is the fallback when [skills].dirs is omitted from
@@ -341,6 +422,12 @@ func Resolve(dataDir string, o Overrides) (Config, error) {
 	}
 	if cfg.SystemLLMFast == "" {
 		return Config{}, requiredErr("--system-llm-fast", EnvSystemLLMFast, "system_llm_fast")
+	}
+	if r := cfg.Verify.MaxRounds; r != nil && *r < 0 {
+		return Config{}, fmt.Errorf("[verify] max_rounds = %d: want 0 (unbounded) or more", *r)
+	}
+	if _, _, err := cfg.LoopExpiry(); err != nil {
+		return Config{}, err
 	}
 	// Fail fast rather than falling back to a system tier: the rewrite is shown
 	// to the operator as the agent's own words restated, so which model produced

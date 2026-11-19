@@ -33,13 +33,15 @@ import (
 type llmSeen struct {
 	sid, model, spec string
 	canResolve       bool
+	requireConclude  bool
 }
 
 var llmCaptured = make(chan llmSeen, 16)
 
 func init() {
 	agent.Register("llm_capture_test_agent", func(env *agent.Env, cfg *agent.Config) (agent.Agent, error) {
-		llmCaptured <- llmSeen{sid: cfg.SessionID, model: env.LLM.ModelID(), spec: env.LLMSpec, canResolve: env.ResolveLLM != nil}
+		llmCaptured <- llmSeen{sid: cfg.SessionID, model: env.LLM.ModelID(), spec: env.LLMSpec, canResolve: env.ResolveLLM != nil,
+			requireConclude: env.RequireConclude}
 		return &noopRunAgent{sid: cfg.SessionID}, nil
 	}, agent.Traits{})
 }
@@ -192,5 +194,35 @@ func TestResolveLLM(t *testing.T) {
 	_, _, err = mgr.resolveLLM(ctx, "vertex-gemini:unbuildable")
 	if err == nil || !strings.Contains(err.Error(), "build vertex-gemini:unbuildable") {
 		t.Errorf("resolveLLM(unbuildable) error = %v, want the build failure", err)
+	}
+}
+
+// [agent] require_conclude reaches the Env of a run's root and of a revived
+// session.
+func TestRequireConclude_InEveryEnv(t *testing.T) {
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	mgr := NewRunManager(store, specFactory, NewRunRegistry(), plain.Factory)
+	mgr.SetRequireConclude(true)
+	runID, err := mgr.StartRun(context.Background(), StartRunConfig{
+		RunConfig:     config.RunConfig{Task: "t", Workspace: ".", LLM: "vertex-claude:run-model", AgentType: "llm_capture_test_agent"},
+		RootSessionID: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := awaitLLMSeen(t, "root"); !got.requireConclude {
+		t.Error("the root's Env doesn't require conclude")
+	}
+	if err := store.CreateSession(context.Background(), db.SessionRecord{RunID: runID, SessionID: "helper",
+		AgentType: "llm_capture_test_agent", Status: db.SessionIdle, ParentID: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	mgr.RespawnSession(runID, "helper")
+	if got := awaitLLMSeen(t, "helper"); !got.requireConclude {
+		t.Error("a revived session's Env doesn't require conclude")
 	}
 }

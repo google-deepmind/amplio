@@ -31,13 +31,16 @@ import (
 	"amplio/internal/config"
 	"amplio/internal/db"
 	"amplio/internal/embed"
+	"amplio/internal/event"
 	"amplio/internal/eventstream"
 	"amplio/internal/llm"
 	"amplio/internal/llm/bridge"
 	amlog "amplio/internal/log"
+	"amplio/internal/loop"
 	"amplio/internal/runtime"
 	"amplio/internal/server"
 	"amplio/internal/sysstat"
+	"amplio/internal/verify"
 
 	"github.com/spf13/cobra"
 )
@@ -209,6 +212,28 @@ func executeServe(cfg config.Config, listenOverride, lendOverride string) error 
 	// load). Idempotent: runs already covered by a report are cheap no-ops.
 	go backfillReports(ctx, store, fin)
 
+	// Loops: re-arm the ones mirrored in session metadata. Only serve runs the
+	// scheduler (headless runs don't arm loops). Shut down before the store
+	// closes (defers run in reverse), so no tick fires into a closed DB. A loop
+	// that verifies each tick starts each tick's version through verify.Tick.
+	loops := loop.New(store, loop.Options{
+		Verify: func(ctx context.Context, runID, sessionID, loopID string, v *event.LoopVerify,
+			write func(*event.VerifyEvent, int) error) (int, error) {
+			return verify.Tick(ctx, store, mgr.RunRegistry().GetOrCreate(runID), runID, sessionID, loopID, v, write)
+		},
+	})
+	if err := loops.Start(ctx); err != nil {
+		return err
+	}
+	defer loops.Shutdown()
+	// A cancelled session's loops end at once, whoever cancelled it. The store
+	// has one status listener, which the observer installed: compose, not replace.
+	store.SetSessionStatusChangedListener(func(runID, sessionID, status string) {
+		sysEnv.obs.OnSessionStatus(runID, sessionID, status)
+		sysEnv.summaries.OnSessionStatus(runID, sessionID, status)
+		loops.OnSessionStatus(runID, sessionID, status)
+	})
+
 	// Web auth: reads are open (the readonly share view); writes need this token,
 	// presented as an HttpOnly cookie (browser, after the magic-link exchange) or
 	// a Bearer header (CLI). An explicit config token wins; otherwise we use a
@@ -280,6 +305,8 @@ func executeServe(cfg config.Config, listenOverride, lendOverride string) error 
 	srv.SetSecureCookie(useTLS)
 	srv.SetLLMTester(testLLM)
 	srv.SetFollowupSuggester(makeFollowupSuggester(store, sysEnv.systemHQ))
+	expiry, never, _ := cfg.LoopExpiry() // validated by config.Resolve
+	srv.SetLoops(loops, server.LoopDefaults{Expiry: expiry, Never: never})
 	if lendAddr := addrFrom(lendOverride, os.Getenv(config.EnvLendLLM), cfg.LendLLM); lendAddr != "" {
 		stopLending, err := serveLending(lendAddr, cfg, srv, sysEnv.embedder)
 		if err != nil {

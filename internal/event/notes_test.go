@@ -68,3 +68,31 @@ func TestChildResult_Notes(t *testing.T) {
 		t.Errorf("legacy header = %q", old.ToText())
 	}
 }
+
+// A VerifyEvent round-trips, and reads in the inspect tools as its action,
+// who, verifier and round, with the request spelled out for set and replace.
+func TestVerifyEvent(t *testing.T) {
+	ev := &VerifyEvent{Action: VerifySet, Criteria: "tests pass", MaxRounds: 3, By: "boss"}
+	data, err := Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := Unmarshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *back.(*VerifyEvent); got != *ev {
+		t.Errorf("round trip = %+v", got)
+	}
+	if text := back.ToText(); !strings.HasPrefix(text, "==== verify · action=set · by=boss ====\ncriteria: tests pass\nmodel: (the agent's own)\nmax rounds: 3") {
+		t.Errorf("text = %q", text)
+	}
+	unbounded := (&VerifyEvent{Action: VerifyReplace, By: "operator"}).ToText()
+	if !strings.Contains(unbounded, "criteria: (the agent's current request)") || !strings.Contains(unbounded, "max rounds: unbounded") {
+		t.Errorf("replace text = %q", unbounded)
+	}
+	if got := (&VerifyEvent{Action: VerifyPassed, By: ByHarness, Verifier: "quick-rabbit", Round: 2}).ToText(); got !=
+		"==== verify · action=passed · by=harness · verifier=quick-rabbit · round=2 ====\n" {
+		t.Errorf("passed text = %q", got)
+	}
+}

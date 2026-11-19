@@ -104,6 +104,7 @@ The step model makes crash recovery deterministic from DB state alone:
 |---|---|---|---|
 | During LLM generation | current_step=T+1, step T has no AssistantEvent | `step T has no AssistantEvent` | Re-do LLM call for step T |
 | During tool execution | step T has AssistantEvent, missing ToolResults | Orphan tool_call IDs with no matching ToolResult | Insert placeholder ToolResults, continue |
+| During a `conclude` call (waiting for a verdict) | step T's AssistantEvent is a `conclude` call with no ToolResult; events at T+1 | `db.OpenConclude` | Run the call again (no placeholder): its result completes step T |
 | After tools, before next call | step T complete | Step T has AssistantEvent + all ToolResults | Normal next iteration |
 | During park | current_step=T, step T-1 complete | Session status = completed | Re-enter park or check for pending messages |
 
@@ -115,7 +116,10 @@ The step model makes crash recovery deterministic from DB state alone:
   call-step window — every new event then lands at the bumped step — so no event
   can slip into the call step after context was gathered.
 - AssistantEvent and ToolResults are written at the call step (an explicit step
-  parameter); events arriving after the bump land at the bumped step.
+  parameter); events arriving after the bump land at the bumped step. The one
+  other write at the call step is a harness note made after the bump and
+  before the context is gathered (what a verifier said, when its outcome
+  arrived since the last turn), so the turn reads it where the outcome landed.
 - The within-step order is: input events (chronological) → AssistantEvent
   → ToolResults. Tool results are appended per-tool as each finishes (so a
   slow/blocking tool like `await_event` doesn't hide the others' completion),

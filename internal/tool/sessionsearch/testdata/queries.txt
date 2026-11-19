@@ -1,0 +1,309 @@
+Insufficient query-cost-per-user quota code search throttled
+"query-cost-per-user" OR "Insufficient" OR throttled textgrep
+RPC error TextgrepService Search Insufficient quota query-cost
+"Insufficient" quota Search RPC error
+tool_call_id is_error thoughts attachments AgentEvent
+edit_file types.ts is_error tool_call_id replace
+"is_error" "tool_call_id" replace at_from
+image too large 2576 pixel dimension 400 Bad Request vertex
+jobrunner OR local run model inference
+31324
+PID setsid nohup supervisor pid
+mixblend ema_tool blend checkpoint average
+run_ema.sh gate-blend EMA3
+gate-blend EMA3 run_ema
+"gate-blend EMA3"
+mv_sketch line-art 10 examples blind cannot see E4B failing select
+mv_sketch select blind wrong line-art examples E4B
+REVIEW Milestone headroom accuracy margin levers
+jr_launch experiment_config experiment_dir trainlib main headroom launch command
+jr_launch experiment_dir headroom launch
+jr_resource_alloc platform hw_2x2x1 experiment_config launch pkg
+cot chain of thought evaluation eval format accuracy gain
+cot eval format hr_cot think step by step
+hr_cot_lr1e6 eval_accuracy baseline_repro batch 1 results
+1200 steps horizon dynamic range discrimination cosine floor 2575 3434
+shorter token budget H=1200 completed cosine decay optimizers differ converge floor last steps
+shorter horizon 1200 completed cosine decay optimizers converge floor discrimination
+grad_accum_steps train_batch_size weak strong filter_zero_variance ppo_clip_eps config
+probe_strong_pt eval_accuracy final_result headroom PT gemma2 0.3
+probe_strong_pt eval_accuracy headroom step budget plateau
+experiment_dir store sweep_pt_strong final_result eval_accuracy
+weak strong train_batch_size grad_accum_steps filter_zero_variance sweep_pt config
+def _sm_gemma3_1b weak strong seed dataclasses.replace ppo_clip_eps_high filter_zero_variance
+sm_gemma3_1b weak strong seed ppo_clip_eps_high filter_zero_variance model_seed
+train_batch_size 32 grad_accum_steps ppo_clip_eps sampling_temperature filter_zero_variance PT probe weak strong
+insert_after new_text def _sm_gemma3_1b_gsm8k_base RLTrialConfig override_from apply_simple_rl gsm8k_train
+jr_launch experiment_config platform hw_2x2x1 experiment_dir nojr_monitor jr_skip_launch
+jr_resource_alloc research-team demo-agents-research-jr jr_use_buildcache jr_use_remotebuild launched
+generation dump step-0 decode sample gemma3 270m boxed few-shot eval
+generation dump decode sample boxed few-shot eval diagnostic
+generation dump decode sample boxed fewshot diagnostic
+GPT-5.5 debate perspective ensemble sampling qwen4b
+debate perspective ensemble
+evaluate_async model_fn output_text response result dict shape sampling class
+approve full run design CodePoolDump32 167 objections verdict AGREE
+tool_use baseline launch platform hw_2x2x1 jobrunner
+jobrunner_tool get_experiment command path invocation
+final_result.json experiment_dir store path unit_1 accuracy avg_generation_time
+final_result.json unit_1 accuracy avg_generation_time
+jobrunner_tool get_experiment
+seq parallel decode garbage intermediate_steps 512 mesh_shape 1,1,2,4
+seq parallelism decode corruption qwen3 30b aime25
+intermediate_steps seq parallel decode garbage 512
+mesh_shape seq sharding garbage aime
+jr_eval batch_size max_seq_len experiment_config qwen3_30b_a3b_thinking datasource aime25 mesh_shape
+100001234 79% mesh_shape 1,1,4 works intermediate_steps
+100002468 lcb baseline 30b accuracy pass mesh 1,1,4,2 seq
+falcon gemini flash port candidate_run cheating
+port_falcon_h1_0p5b eval_accuracy_all summary record pilot
+best run per agent per task leaderboard max average
+sha256 length-prefixed records digest
+sha256 digest hashlib update len to_bytes
+sha256
+promptkit project
+recall_search gcloud TPU skill
+websearch query
+recall_load
+cloud.google.com docs
+docs/gcloud.md
+"--help"
+websearch num_results
+org-policies list vmExternalIpAccess
+jobrunner stop kill job 100003702
+alloc floor BLOWFISH quota saturated resource_alloc
+KV collections
+google-logview GhostFinder
+"Task no longer exists in DNS"
+launch-cobalt-v2c launch_kayak_eval.sh
+"launch_kayak_eval.sh" kayak_dataset_path
+OVERALL_ROLLOUT_TIMEOUT
+language server tar
+"language_server" ttl=90d deleted restored
+harness binary deleted restored retries
+dump_100004936 dump f1.sh
+dump_examples chat_example input_output_auxiliary_repeat_index
+"scores_100004936"
+jr_eval ada_mini datasource_name launch
+"AdaMiniS1Think" jr_eval enable_prefix_caching
+"Round 7"
+launch_bench_full.sh trainlib_amplio bench_cmp7b_amplio
+"bench_cmp7b_amplio"
+RESOURCE_EXHAUSTED evaluator log
+logview remote_evaluator
+RFC SI Bench recursive
+"self improvement" benchmark GSM8K
+"Round 4" checkpoint
+synthetic-nobody
+"synthetic-nobody"
+kvdump all.json dump_examples
+"kvdump" chat_example
+all.json chat_example kvdump
+"kvdump/all"
+kv_cli read collection json chat_example input_example_ids
+follow-up Qwen3-4B thinking noise transfer
+"in-job noise" thinking transfer
+Spearman first eval final
+hidden_test_exact after RL
+contamination
+ada_mini pivot weights
+"zs2p1b_100006170_unit_1_step_0.jsonl"
+fteval seed 91
+fteval_random_s43
+round 2 decode cap teacher 1.7B budget 120
+"decode cap" teacher round
+0.7443
+"0.7443"
+100007404
+clusterctl_tool.par analyze_timeline
+"analyze_timeline"
+clusterctl_tool lookup_uid JOBRUNNER_EXPERIMENT
+vcs change upload autoflow
+"vcs change" multichange
+1000008638
+review client md5 identical pr
+proxy.py#9 sync screenshot mayfly run
+"proxy.py" screenshot
+server.sh port_offset seed_demo
+port_offset seed_demo dev_user
+contrib/amplio workspace monorepo cloud
+amplio_agent_runner cloudws workspace path
+amplio_bridge.py
+"amplio-compass-build"
+analyze_timeline clusterctl_tool command
+"seeded chat" webview chat-sidebar
+"seeded chat"
+google-logview job_regex remote user
+"google-logview"
+reattach validator lineage proposed plan smoke test forced disconnect
+"reattach"
+NO_EXT_PORT launch_th.sh
+NO_EXT_PORT
+amplio_binary store
+sandbox_jrid server experiment
+get_experiment status job pending sandbox_server
+"Cell:" get_experiment
+CGO_ENABLED go build amplio-compass-build
+"CGO_ENABLED=0"
+Graphite-G
+graphite
+self/evals mountain PREEMPTIBLE allocation
+mountain PREEMPTIBLE allocation bucket
+vetting precheck soak npm
+RUNNING NOT_RUNNING 100009872
+mutate
+"git fetch" OR "git pull" OR "jj " OR "send --type"
+reviewer readonly list-comments
+"list-comments"
+permcheck bobsmith
+"vcs change" desc_6 reopen upload
+send_message round
+"double-stamp" OR "idempotent" OR "checkpoint_dir_override"
+docsctl mutate replace Six PRs
+missing-now.txt
+"missing-now"
+ABC migration 1000011106
+"Integrate the chip migration"
+"Integrate the chip migration" send_message
+reviewer snapshot pr/1000012340 remote
+snapshot 1000012340
+presubmit CI enqueued 1000013574
+rl_bfcl final_result.json eval_accuracy_by_category
+"rl_bfcl" leaderboard jid
+headroom saturate base model
+math base selection gsm8k floor ceiling gap
+compare_resource_allocs
+token_stats_cleaned tokenizer gemma3 qwen3
+amplio_time_budget_secs v3
+TASK 2 forbidden otherplace
+"TASK 2"
+config_lib.py:383 gemma end to end
+two tasks from alice forbidden locations
+jj upload kqzvmlxp B_body
+"gh pr create"
+pull/279 gh pr create body-private
+"12.6" BFCL SD correlation 0.63
+tightest BFCL correlate rest benchmark rollout study
+steadiest tasks PTB instability
+"SHOULD-FIX" round-1
+"round-1 reviews are in"
+"SHA256SUMS" should-fix pinned
+"Proxy-Authorization" Optional "Overall LGTM"
+presubmit ci command 1000014808
+presubmit PASSED
+"reply-comment" publish-comments
+amplio-staging push staging
+"git push staging"
+"vcs changes"
+reviewer snapshot number latest PR cli
+stop experiment jobrunner command stopped jid smoke
+launch-smoke-r1b-aa.out
+"launch-smoke-r1b-aa"
+"_flash_smoke_r1"
+"jobrunner.par stop"
+"experiment_id=100016042"
+judge_error_mean cheated_mean Evalboard metrics
+run_f10b2c7d3e9-R.txt
+evalboard run lookup execution_id compass
+"We are help reviewing code for amplio"
+critical bugs corner cases organization
+check_capacity QX
+jobrunner_tool check_capacity need
+"spare_after_need" OR "Allocs whose floor covers need"
+filecp cp trainlib_bench language_server
+100017276 calls latency logview regex
+100017276
+"post-comment" snapshot line
+"6.26" Mountain port_falcon wall
+median top port_recurrentgemma_2b_1 wall
+median
+submit 1000018510
+rebase 1000019744
+untangling landing 1000020978
+launch_e2e2.sh tbt CHAOS TARZ
+"launch_e2e2" CHAOS tbt
+smoke2_100022212_logs
+logview remote_evaluator restore_sandbox csv
+D7 checkpoints carol
+repoint checkpoint copy carol data-gemini
+"keep pointing"
+STOPPING SUCCESS stop experiment
+create_trainlib_tarz trainlib_full_v0p4_hw_e2e2
+"0.153"
+post-and-publish agent_metadata
+"post-and-publish"
+"posted by Amplio on behalf of alice"
+create_trainlib_tarz probe_inplace
+create_trainlib_tarz dataset_name ext1_premail_smoke
+"--dataset_name"
+stop jid 100023446
+jj_safe_describe
+"dry run 13"
+CheckNoMergeDescription disable_reconcile presubmit
+r9trial scores jsonl
+100024680 reward
+finish watcher pilot score v32k
+dogfood DB runs verify check
+amplio-verify-dogfood-data amplio.db
+"dogfood-data"
+dogfood runs verifier verdict
+"verify-dogfood" reset hard origin
+decode "system prompt"
+mdx.py
+"mdx"
+ci_presubmit 1000025914
+ci_watch_b.py presubmit
+"ci_watch_b"
+"W6 → Lead"
+create_trainlib_tarz dataset_name smoke_tarz
+lint command pylint vcs lint ce_guard OR scored_eval lint
+loop notice leaked final answer
+loop notice sub-agent final answer
+"loop" notice "final answer"
+leaked
+leak OR leaks OR leaking
+"final answer"
+mail OR upload OR submit OR reviewer OR spawn_agent
+1000027148
+sitemap map hopscotch.textproto
+sitemap OR "Compass map" OR "hopscotch textproto"
+upload OR mail OR submit OR reviewer OR "jj git" OR "hg mail" OR "vcs mail"
+"44" "13" "64"
+upload OR mail OR submit OR depot OR vcs
+"ci-for-agents"
+go test
+AMPLIO_DATA_DIR
+report.css
+"report.css"
+spawn_agent
+opus-5-5
+"opus-5-5"
+"work/amplio"
+reviewer
+edit_file OR "jj" OR "cat >" OR "cp -"
+"list-comments"
+reviewer
+"$C" -readonly
+lgtm OR reply OR draft OR post
+tracer.py tracer_events
+reviewer
+"reviewer readonly"
+branch coverage 83
+differential mismatches
+bazel build sqlkit_validator_test
+repro.py sqlkit_validator_test runfiles python
+"run_head" runfiles
+Testing sqlkit_referee_main_test
+reviewer
+Buildifier deps variables anti-pattern
+"_SQLKIT_REFEREE_DEPS" inline
+Buildifier
+"Please inline"
+filecp
+MAX_ARG_STRLEN E2BIG printf heredoc
+"Argument list too long"
+bash -c quoting LaTeX test
+reviewer readonly findings
+reviewer comment OR post OR draft OR lgtm OR reply
+"demo-agents-reviewer"
+reviewer

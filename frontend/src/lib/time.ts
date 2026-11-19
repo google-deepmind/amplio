@@ -104,12 +104,13 @@ export function formatLocaleDate(t: string | number): string {
 }
 
 // Compact relative time for list rows ("just now", "3m", "5h", "2d", then a
-// locale date; with `compact`, "3w" / "5mo" / "2y" instead). Shared by the run
-// card and the session rows.
+// locale date; with `compact`, "3w" / "5mo" / "2y" instead), measured on the
+// server's clock, which wrote the timestamp. Shared by the run card and the
+// session rows.
 export function timeAgo(iso: string, compact = false): string {
 	const t = new Date(iso).getTime();
 	if (!t) return '';
-	const s = Math.floor((Date.now() - t) / 1000);
+	const s = Math.floor((serverSettings.now() - t) / 1000);
 	if (s < 60) return 'just now';
 	const m = Math.floor(s / 60);
 	if (m < 60) return `${m}m`;
@@ -125,7 +126,8 @@ export function timeAgo(iso: string, compact = false): string {
 
 // Compact elapsed duration since a timestamp, for live "running for…" tickers
 // (the chat's working indicator, the overview's report-generation banner). Caller
-// passes `nowMs` (usually a 1s-ticking $state) so the value updates reactively.
+// passes `nowMs` (usually a 1s-ticking $state of serverSettings.now(), the clock
+// the timestamp is on) so the value updates reactively.
 // Format: "Ns" under a minute, "Nm Ns" under an hour, "Nh Nm" beyond.
 export function formatElapsed(sinceIso: string, nowMs: number): string {
 	const t = new Date(sinceIso).getTime();

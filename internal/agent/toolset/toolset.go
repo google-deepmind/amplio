@@ -33,6 +33,7 @@ import (
 	"amplio/internal/skills"
 	"amplio/internal/tool"
 	"amplio/internal/tool/bash"
+	"amplio/internal/tool/conclude"
 	"amplio/internal/tool/coordination"
 	"amplio/internal/tool/editfile"
 	"amplio/internal/tool/inspect"
@@ -60,11 +61,26 @@ type Deps struct {
 
 	SkillIndex  *skills.Index
 	LessonIndex *lessons.Index
+
+	// Conclusion decides the conclude tool: none for an agent that goes idle.
+	Conclusion Conclusion
 }
+
+// Conclusion is how an agent type finishes, which decides its conclude tool.
+type Conclusion int
+
+const (
+	GoesIdle             Conclusion = iota // interactive: no conclude tool
+	ConcludesWithResult                    // conclude(result)
+	ConcludesWithVerdict                   // a verifier's conclude(verdict, findings)
+)
 
 // Build returns the tools in the order an agent receives them.
 func Build(d Deps) []*tool.Tool {
 	coordDeps := &coordination.Deps{Store: d.Store, RunID: d.RunID, Registry: d.Registry}
+	if d.Env != nil {
+		coordDeps.VerifyDefaults, coordDeps.ResolveLLM = d.Env.Verify, d.Env.ResolveLLM
+	}
 	inspectDeps := &inspect.Deps{Store: d.Store, RunID: d.RunID}
 
 	tools := []*tool.Tool{
@@ -72,7 +88,7 @@ func Build(d Deps) []*tool.Tool {
 		viewfile.New(d.Cwd, d.ArtifactDir),
 		editfile.New(d.Cwd, d.ArtifactDir),
 		coordination.SendMessage(coordDeps, d.SessionID),
-		coordination.SessionCancel(coordDeps),
+		coordination.SessionCancel(coordDeps, d.SessionID),
 		coordination.AwaitEvent(coordDeps, d.SessionID, d.Handle),
 		inspect.SessionList(inspectDeps),
 		inspect.SessionSteps(inspectDeps),
@@ -89,24 +105,35 @@ func Build(d Deps) []*tool.Tool {
 	if d.SkillIndex != nil || d.LessonIndex != nil {
 		tools = append(tools, recall.Search(d.SkillIndex, d.LessonIndex), recall.Load(d.SkillIndex, d.LessonIndex))
 	}
+	switch d.Conclusion {
+	case GoesIdle: // a turn without tool calls rests it
+	case ConcludesWithResult:
+		tools = append(tools, conclude.New())
+	case ConcludesWithVerdict:
+		tools = append(tools, conclude.NewVerdict())
+	}
 	return tools
 }
 
-// Defs describes the toolset for display. Registered as the tool lister for
-// both agent types; see agent.ToolLister for why this is a live view rather
-// than a record of what a past session had.
-func Defs(tc agent.ToolContext) []llm.ToolDef {
-	tools := Build(Deps{
-		RunID:       tc.RunID,
-		SessionID:   tc.SessionID,
-		Cwd:         tc.Cwd,
-		ArtifactDir: tc.ArtifactDir,
-		SkillIndex:  tc.SkillIndex,
-		LessonIndex: tc.LessonIndex,
-	})
-	defs := make([]llm.ToolDef, 0, len(tools))
-	for _, t := range tools {
-		defs = append(defs, t.Def())
+// Lister describes the toolset for display, as Build gives it to an agent
+// type that finishes as c says. Registered as the tool lister for every agent
+// type built on this toolset; see agent.ToolLister for why this is a live view
+// rather than a record of what a past session had.
+func Lister(c Conclusion) agent.ToolLister {
+	return func(tc agent.ToolContext) []llm.ToolDef {
+		tools := Build(Deps{
+			RunID:       tc.RunID,
+			SessionID:   tc.SessionID,
+			Cwd:         tc.Cwd,
+			ArtifactDir: tc.ArtifactDir,
+			SkillIndex:  tc.SkillIndex,
+			LessonIndex: tc.LessonIndex,
+			Conclusion:  c,
+		})
+		defs := make([]llm.ToolDef, 0, len(tools))
+		for _, t := range tools {
+			defs = append(defs, t.Def())
+		}
+		return defs
 	}
-	return defs
 }

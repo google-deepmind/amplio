@@ -48,6 +48,7 @@ import (
 	// Register agent types so StartRun can resolve them.
 	_ "amplio/internal/agent/chatbot"
 	_ "amplio/internal/agent/standard"
+	_ "amplio/internal/agent/verifier"
 )
 
 const testRun = "r1"
@@ -1194,7 +1195,7 @@ func TestServer_ChatProjection_ChildResult(t *testing.T) {
 	concluded, crashed := feed.Messages[0], feed.Messages[1]
 	if concluded.Kind != "child_result" || concluded.Verdict != db.SessionConcluded ||
 		concluded.From != "worker-3" || concluded.Content != "found the bug" ||
-		len(concluded.Notes) != 1 || concluded.Notes[0] != (chatNote{Label: "left running", Text: "1 background process group"}) {
+		len(concluded.Notes) != 1 || concluded.Notes[0] != (chatNote{Kind: event.NoteLeftover, Label: "left running", Text: "1 background process group"}) {
 		t.Errorf("concluded bubble = %+v, want child_result concluded from worker-3", concluded)
 	}
 	if crashed.Kind != "child_result" || crashed.Verdict != db.SessionCrashed || crashed.From != "worker-9" {
@@ -2233,6 +2234,147 @@ func TestServer_ChatProjection_HarnessNudges(t *testing.T) {
 	}
 }
 
+// A conclude call's result reads as its turn's message (after any text the
+// turn has), with the call's chip kept; conclude() without a result adds
+// nothing, and a turn with only that call still shows its chip.
+func TestServer_ChatProjection_ConcludeResult(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, db.SessionRecord{RunID: testRun, SessionID: "worker", AgentType: "standard_agent", Status: db.SessionOngoing}); err != nil {
+		t.Fatal(err)
+	}
+	call := func(id, args string) []event.ToolCall {
+		return []event.ToolCall{{ID: id, Name: event.ConcludeTool, Arguments: args}}
+	}
+	for _, e := range []event.Event{
+		&event.AssistantEvent{Content: "All checks done.", ToolCalls: call("c1", `{"result":"It is 42 m tall."}`)},
+		&event.ToolResultEvent{ToolCallID: "c1", Content: "Concluded."},
+		&event.AssistantEvent{ToolCalls: call("c2", `{"result":"Only the result."}`)},
+		&event.AssistantEvent{ToolCalls: call("c3", `{}`)},
+	} {
+		if _, err := store.AppendEvent(ctx, testRun, "worker", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	_, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/worker/chat?token=secret", "")
+	var feed chatFeed
+	if err := json.Unmarshal(body, &feed); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Messages) != 3 {
+		t.Fatalf("bubbles = %+v, want 3", feed.Messages)
+	}
+	for i, want := range []string{"All checks done.\n\nIt is 42 m tall.", "Only the result.", ""} {
+		m := feed.Messages[i]
+		if m.Content != want || len(m.ToolCalls) != 1 || m.ToolCalls[0].Name != event.ConcludeTool {
+			t.Errorf("bubble %d = %q with %+v, want %q and the conclude chip", i, m.Content, m.ToolCalls, want)
+		}
+	}
+	if !feed.Messages[0].ToolCalls[0].Completed {
+		t.Error("the answered call's chip isn't completed")
+	}
+}
+
+// What a session's verifier said shows in its chat as the harness told it: a
+// verify message, or a conclude call's result, each a verdict bubble. The
+// verifier's own outcome record isn't shown (a verdict for an earlier
+// conclusion is never told), nor is a conclude result that told none.
+func TestServer_ChatProjection_Verdicts(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, db.SessionRecord{RunID: testRun, SessionID: "worker", AgentType: "standard_agent", Status: db.SessionOngoing}); err != nil {
+		t.Fatal(err)
+	}
+	fail := &event.VerifyOutcome{Verifier: "v", Verdict: event.VerdictFail, Findings: "no unit", Round: 1, MaxRounds: 3}
+	pass := &event.VerifyOutcome{Verifier: "v", Verdict: event.VerdictPass, Findings: "42 m", Round: 2, MaxRounds: 3}
+	earlier := &event.VerifyOutcome{Verifier: "v", Verdict: event.VerdictFail, Findings: "no unit", Earlier: true}
+	for _, e := range []event.Event{
+		&event.AssistantEvent{ToolCalls: []event.ToolCall{{ID: "c1", Name: event.ConcludeTool, Arguments: `{"result":"It is 42."}`}}},
+		event.VerifierOutcome("v", "FAIL: no unit", "", time.Time{}),
+		&event.ToolResultEvent{ToolCallID: "c1", Content: "`v` rejected your conclusion …", Check: event.CheckVerify, Outcome: fail},
+		&event.UserEvent{Content: "[system] `v` passed your conclusion (round 2) …", Check: event.CheckVerify, Outcome: pass},
+		&event.ToolResultEvent{ToolCallID: "x", Content: "Not concluded yet …", Check: event.CheckVerify},
+		&event.UserEvent{Content: "[system] `v` rejected an earlier conclusion of yours …", Check: event.CheckVerify,
+			Outcome: earlier},
+	} {
+		if _, err := store.AppendEvent(ctx, testRun, "worker", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	_, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/worker/chat?token=secret", "")
+	var feed chatFeed
+	if err := json.Unmarshal(body, &feed); err != nil {
+		t.Fatal(err)
+	}
+	if len(feed.Messages) != 4 {
+		t.Fatalf("bubbles = %+v, want the turn and three verdicts", feed.Messages)
+	}
+	for i, want := range []*event.VerifyOutcome{fail, pass, earlier} {
+		m := feed.Messages[i+1]
+		if m.Kind != "verdict" || m.From != "v" || m.Verdict != want.Verdict || m.Content != want.Findings ||
+			m.Outcome == nil || *m.Outcome != *want || m.Stale {
+			t.Errorf("bubble %d = %+v, want the verdict %+v", i+1, m, want)
+		}
+	}
+}
+
+// A verdict told as information because its candidate was withdrawn (a newer
+// version) is marked stale in the chat; one on an earlier candidate isn't.
+func TestServer_ChatProjection_StaleVerdict(t *testing.T) {
+	t.Parallel()
+	srv, _, store := newTestServer(t)
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, db.RunRecord{RunID: testRun}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, db.SessionRecord{RunID: testRun, SessionID: "worker", AgentType: "standard_agent", Status: db.SessionOngoing}); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 11, 20, 0, 0, 0, time.UTC)
+	record := event.VerifierOutcome("v", "PASS: fine", "", at)
+	told := *record.Outcome
+	told.Earlier = true
+	for _, e := range []event.Event{
+		&event.VerifyEvent{Action: event.VerifySet, By: event.ByOperator}, &event.AssistantEvent{Content: "It is 42."},
+		&event.VerifyEvent{Action: event.VerifyVerifying, By: event.ByHarness, Verifier: "v", Round: 1},
+		&event.VerifyEvent{Action: event.VerifyReplace, By: event.ByOperator}, record,
+		&event.UserEvent{Content: "[system] `v` passed your conclusion (v1, candidate 1) after v2 superseded it …",
+			Check: event.CheckVerify, Outcome: &told},
+	} {
+		if _, err := store.AppendEvent(ctx, testRun, "worker", e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	_, body := doReq(t, http.MethodGet, ts.URL+"/api/runs/"+testRun+"/sessions/worker/chat?token=secret", "")
+	var feed chatFeed
+	if err := json.Unmarshal(body, &feed); err != nil {
+		t.Fatal(err)
+	}
+	var verdicts []chatBubble
+	for _, m := range feed.Messages {
+		if m.Kind == "verdict" {
+			verdicts = append(verdicts, m)
+		}
+	}
+	if len(verdicts) != 1 || !verdicts[0].Stale || !verdicts[0].Outcome.Earlier {
+		t.Errorf("verdict bubbles = %+v, want the one, stale", verdicts)
+	}
+}
+
 // A session holding a newer binary's event still renders: the chat leaves the
 // event out, and the trajectory's event list carries it as stored.
 func TestServer_UnknownEventSkippedInChatKeptInEvents(t *testing.T) {
@@ -2245,10 +2387,10 @@ func TestServer_UnknownEventSkippedInChatKeptInEvents(t *testing.T) {
 	if err := store.CreateSession(ctx, db.SessionRecord{RunID: testRun, SessionID: "worker", AgentType: "standard_agent", Status: db.SessionOngoing}); err != nil {
 		t.Fatal(err)
 	}
-	stored := `{"type":"verify","action":"set","criteria":"tests pass"}`
+	stored := `{"type":"teleport","action":"set","criteria":"tests pass"}`
 	for _, e := range []event.Event{
 		&event.UserEvent{Content: "do X"},
-		&event.UnknownEvent{Type: "verify", Raw: []byte(stored)},
+		&event.UnknownEvent{Type: "teleport", Raw: []byte(stored)},
 		&event.AssistantEvent{Content: "done"},
 	} {
 		if _, err := store.AppendEvent(ctx, testRun, "worker", e); err != nil {
@@ -2277,7 +2419,7 @@ func TestServer_UnknownEventSkippedInChatKeptInEvents(t *testing.T) {
 		t.Fatalf("events: %d %s (%v)", code, body, err)
 	}
 	if len(evs) != 3 || string(evs[1].Event) != stored || !evs[1].Unknown || evs[0].Unknown || evs[2].Unknown {
-		t.Errorf("events = %s, want 3 with the stored verify event second, marked unknown", body)
+		t.Errorf("events = %s, want 3 with the stored teleport event second, marked unknown", body)
 	}
 }
 
