@@ -158,11 +158,12 @@ type Refusal struct {
 
 // IsOutputLimitStopReason reports whether a provider explicitly says the
 // generation ended because it exhausted its output-token budget. Providers use
-// different labels for the same condition: OpenAI-compatible APIs use
-// "length", while Anthropic and Gemini use max_tokens / MAX_TOKENS.
+// different labels for the same condition: Chat Completions uses "length",
+// Responses uses "max_output_tokens", and Anthropic and Gemini use
+// max_tokens / MAX_TOKENS.
 func IsOutputLimitStopReason(reason string) bool {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "length", "max_tokens":
+	case "length", "max_tokens", "max_output_tokens":
 		return true
 	default:
 		return false
@@ -178,6 +179,7 @@ func IsNormalStopReason(reason string) bool {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "",
 		"end_turn", "tool_use", "stop_sequence", // Anthropic
+		"completed",                   // OpenAI Responses
 		"stop",                        // Gemini STOP; OpenAI-compatible stop
 		"tool_calls", "function_call": // OpenAI-compatible
 		return true
