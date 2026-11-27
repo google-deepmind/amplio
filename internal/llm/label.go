@@ -124,6 +124,7 @@ func ShortLabel(spec string) string {
 	}
 
 	var facets []string
+	var effort string
 	switch sp.Provider {
 	case "vertex-claude", "claude":
 		// "claude-opus-5" -> "opus-5": the family name is redundant with the model
@@ -140,6 +141,9 @@ func ShortLabel(spec string) string {
 				model = m
 			}
 		}
+	case "openai-responses":
+		effort = strings.TrimSpace(args.Get("reasoning.effort"))
+		fallthrough // Both OpenAI protocols use the same endpoint facet.
 	case "openai":
 		// One provider fronts the whole OpenAI-compatible ecosystem, so the server
 		// is often the only thing distinguishing two entries (a local ollama from a
@@ -149,8 +153,11 @@ func ShortLabel(spec string) string {
 			facets = append(facets, "@"+h)
 		}
 	}
-	if e := effortOf(args); e != "" {
-		facets = append(facets, e)
+	if effort == "" {
+		effort = effortOf(args)
+	}
+	if effort != "" {
+		facets = append(facets, effort)
 	}
 	return truncateLabel(strings.Join(append([]string{model}, facets...), " \u00b7 "))
 }

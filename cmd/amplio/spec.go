@@ -68,7 +68,8 @@ var providerRegistry = map[string]providerEntry{
 	// Any OpenAI-compatible /v1/chat/completions server — the hosted API by
 	// default, or whatever base_url= points at (vLLM, ollama, LiteLLM,
 	// OpenRouter, a corp gateway). One provider, most of the ecosystem.
-	"openai": {openaiprovider.New, openaiprovider.ClientArgs},
+	"openai":           {openaiprovider.New, openaiprovider.ClientArgs},
+	"openai-responses": {openaiprovider.NewResponses, openaiprovider.ClientArgs},
 	// Bridges: any process speaking amplio's own NDJSON protocol. We spawn
 	// and own the process for subprocess:, and dial existing server for bridge:.
 	// See bridges/README.md.
